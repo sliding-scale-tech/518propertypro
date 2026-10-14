@@ -1,0 +1,89 @@
+# Isolated on purpose: this box may also be running other automation (Instagram bots, scrapers,
+# cron scripts). Everything below is scoped so that starting, stopping or tearing down WAHA
+# cannot touch anything else, and nothing else can accidentally take WAHA down.
+#
+# An explicit project name means `docker compose down` run from any *other* folder will never
+# match these containers, and `docker compose down` here will never match theirs.
+name: leaseline-waha
+
+services:
+  waha:
+    image: devlikeapro/waha
+    container_name: leaseline-waha
+    restart: unless-stopped
+
+    ports:
+      # Bound to loopback, NOT 0.0.0.0. Two reasons:
+      #  1. Security — WAHA's REST API is protected only by an API key, and on 0.0.0.0 that key
+      #     is the single thing between the public internet and the WhatsApp account.
+      #  2. Isolation — nothing else on the box can collide with a public port we didn't need.
+      # Reaching it from outside goes through the reverse proxy (VPS) or ngrok (local), both of
+      # which run on the host and can see 127.0.0.1 fine.
+      # Override the host port with WAHA_HOST_PORT if 3001 is already taken.
+      - "127.0.0.1:${WAHA_HOST_PORT:-3001}:3000"
+
+    networks:
+      - leaseline
+
+    environment:
+      # GOWS is a Golang WebSocket engine — no headless Chromium at all, unlike WAHA's default
+      # WEBJS engine. On a shared box that difference is the whole ball game: a browser per
+      # session is what would otherwise starve the other scripts of RAM.
+      #
+      # The trade-off is that GOWS webhook payloads are shaped differently from WEBJS, so
+      # convex/http.ts parses defensively and logs anything it doesn't recognise.
+      WHATSAPP_DEFAULT_ENGINE: GOWS
+      # Keeps sessions alive across an engine switch instead of forcing a re-scan.
+      WAHA_NAMESPACE: leaseline
+      WAHA_DASHBOARD_ENABLED: "true"
+      WAHA_DASHBOARD_USERNAME: ${WAHA_DASHBOARD_USERNAME:-admin}
+      WAHA_DASHBOARD_PASSWORD: ${WAHA_DASHBOARD_PASSWORD}
+      # Every REST call must carry this as X-Api-Key. The same value comes back to us on the
+      # webhook, which is how convex/http.ts proves the caller is really WAHA.
+      WHATSAPP_API_KEY: ${WAHA_API_KEY}
+
+    volumes:
+      # Named, not anonymous: this holds the WhatsApp login. An anonymous volume would be
+      # collected by a routine `docker volume prune` and cost you a re-scan of the QR code.
+      - leaseline_waha_sessions:/app/.sessions
+
+    # Sized for the actual target box (surveyed 2026-08-24): 3.8 GB RAM, ONE CPU core, no swap,
+    # already running a browser-driven Instagram bot at ~500 MB.
+    #
+    # The CPU cap is the important one. On a single-core machine an unbounded container can
+    # take the whole core and stall its neighbour; 0.5 leaves half the core guaranteed to the
+    # Instagram bot. GOWS idles near zero, so this is a safety ceiling, not a budget.
+    # Memory was measured, not guessed: WAHA idles at ~364 MB with no WhatsApp session at all
+    # (the Node API layer costs that much even though the GOWS engine runs no browser), so a
+    # 768 MB cap sat at 47% before doing any real work. 1200 MB leaves room for an active
+    # session while still guaranteeing ~2.5 GB of this 3.8 GB box to everything else.
+    deploy:
+      resources:
+        limits:
+          memory: 1200m
+          cpus: '0.5'
+
+    # Unrotated container logs are the classic way a small VPS fills its disk and takes every
+    # service on the box down with it — including the ones that have nothing to do with WAHA.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/sessions"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+networks:
+  # Our own bridge rather than the shared default. Other containers on this host cannot reach
+  # WAHA over the network unless they are explicitly put on this network.
+  leaseline:
+    name: leaseline-net
+
+volumes:
+  leaseline_waha_sessions:
+    name: leaseline-waha-sessions

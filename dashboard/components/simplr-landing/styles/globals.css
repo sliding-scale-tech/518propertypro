@@ -1,0 +1,174 @@
+/* React-port global additions. Keep minimal. */
+
+/*
+ * Self-hosted Inter (perf agent). Byte-identical files pulled directly from the same Google Fonts
+ * v20 CDN URLs the original <link> requested (css2?family=Inter:wght@400;500;600;700;800;900),
+ * using a real Chrome desktop UA so Google serves the same variable-font-backed static API it
+ * serves real browsers. Google's own response reuses ONE physical woff2 per unicode-range subset
+ * across every requested weight (the @font-face blocks just pin different `font-weight` values
+ * against the same file) — so self-hosting only needs the "latin" + "latin-ext" subset files
+ * (the only scripts any text on this site uses; cyrillic/greek/vietnamese subsets were never
+ * fetched by real visitors either, since @font-face unicode-range means the browser only ever
+ * downloaded the subset matching the page's actual characters). Only weights 400/500/600/700/800
+ * are declared: an audit of every `font-weight:` in site.css/demo.css found 300 (falls back to the
+ * nearest loaded weight, 400, in the ORIGINAL too, since 300 was never part of the requested set)
+ * and 400/500/600/700/800 in real use; 900 was requested by the original <link> but never applied
+ * by any rule, so it's dropped (zero visual difference, one less unused face declared).
+ */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url('/simplr-landing/fonts/inter-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url('/simplr-landing/fonts/inter-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/*
+ * Navbar breakpoint fix (src/components/Navbar.jsx's `.nav--demo` modifier, applied only on the
+ * Demo route). The two source pages genuinely define DIFFERENT responsive breakpoints for their
+ * nav — index.html's (site.css) secondary nav-padding/logo-size steps are at 900px/640px/400px,
+ * demo.html's (demo.css) are at 760px/460px (with no 900px-equivalent step at all) — even though
+ * the 860px hamburger-menu threshold happens to match in both. Not a porting bug: two
+ * independently-authored stylesheets that happen to look almost identical. Since Navbar is one
+ * shared component, this restores demo.html's exact thresholds/values when on /demo, without
+ * touching index.html's nav (which already matches site.css's own breakpoints with no override
+ * needed). Higher specificity than site.css's bare `.nav-inner`/`.logo img`/`.nav-actions
+ * .btn-black` rules (two classes vs one) guarantees these win regardless of import order.
+ */
+@media (min-width: 761px) and (max-width: 900px) {
+  .nav--demo .nav-inner {
+    padding: 18px 32px; /* site.css's 900px step (16px 22px) doesn't apply to demo.html at all */
+  }
+}
+@media (max-width: 860px) {
+  .nav--demo .nav-actions .btn-black {
+    /* demo.css's own 860px step — site.css's 640px/400px steps would otherwise win here since
+       they're more specific to narrower widths but still "active" (max-width queries stack). */
+    padding: 10px 18px;
+    font-size: 13.5px;
+  }
+}
+@media (max-width: 760px) {
+  .nav--demo .nav-inner {
+    padding: 16px 18px;
+  }
+  .nav--demo .logo img {
+    width: 88px;
+  }
+}
+@media (max-width: 460px) {
+  .nav--demo .nav-inner {
+    padding: 12px 14px;
+    gap: 10px;
+  }
+  .nav--demo .nav-actions .btn-black {
+    padding: 8px 12px;
+    font-size: 12.5px;
+  }
+}
+
+/*
+ * Heading-order a11y fixes (perf agent). Two headings jumped a level (Lighthouse "heading-order"):
+ * Hero's "Live activity" was an h3 straight after the page's only h1, and each FAQ question was an
+ * h4 straight after its section's h2. Fixed by retagging in Hero.jsx/Faq.jsx (h3->h2, h4->h3) and
+ * mirroring site.css's frozen `.activity-head h3`/`.faq-header h4` declarations here, verbatim,
+ * under the new tag — same values, so nothing renders differently, only the semantic tag changes.
+ */
+.activity-head h2 {
+  font-size: 19px; /* mirrors site.css .activity-head h3 */
+}
+.faq-header h3 {
+  font-size: 16.5px; /* mirrors site.css .faq-header h4 */
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+@media (max-width: 900px) {
+  .faq-header h3 {
+    font-size: 15.5px; /* mirrors site.css's 900px step for .faq-header h4 */
+  }
+}
+.demo-page .cdw-checklist h2 {
+  /* mirrors demo.css's nested `.demo-page .cdw-checklist h4` rule (same fix, on /demo) */
+  margin: 0 0 18px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted-2);
+}
+
+/*
+ * WCAG AA color-contrast fixes. Same minimal-darkening approach used on the sibling ForeShift
+ * ports for this exact purpose (barely perceptible, resting-state colors only) — each color below
+ * is darkened by just enough to clear 4.5:1 against its own background, computed precisely, not
+ * rounded to a "nice" hex. Applied as scoped overrides so the frozen site.css/demo.css files stay
+ * untouched and only the flagged elements change.
+ */
+.prompt-text-row span {
+  color: #727580; /* was #8b8f9c on #fff, 3.22:1 -> 4.59:1 */
+}
+.badge-live,
+.ic-badge {
+  color: #11804c; /* was #159a5b on #e8f7ef, 3.26:1 -> 4.50:1 */
+}
+/* .stat-tile span also has site.css's own `opacity:.85`, which lightens whatever color renders
+   underneath when composited over the tile's background — the source hex here is chosen so the
+   COMPOSITED (post-opacity) result clears 4.5:1, not the raw value (recomputed accordingly). */
+.stat-tile.purple span {
+  color: #7034d6; /* renders as ~#8450dc over #f7f0ff at opacity .85, was #8e55f0, 4.00:1 -> 4.53:1 */
+}
+.stat-tile.orange span {
+  color: #92440a; /* renders as ~#a25e2a over #fcf1e2 at opacity .85, was #c26d2c, 3.41:1 -> 4.51:1 */
+}
+.stat-tile.green span {
+  color: #0e683d; /* renders as ~#2f7d58 over #e8f7ef at opacity .85, was #35a871, 2.71:1 -> 4.52:1 */
+}
+.ic-desc {
+  color: #717171; /* was var(--ink-faint) #8b8b8b on #f4f6fa, 3.14:1 -> 4.51:1 */
+}
+/* site.css's own rule is `.p-step .step-tag{...}` (higher specificity than a bare class) — match it
+   so this actually wins instead of silently losing the cascade. */
+.p-step .step-tag {
+  color: #696969; /* was #6b6b6b (bold) on #e9e9e9, 4.38:1 -> 4.52:1 */
+}
+/* demo.css's own rule is the scoped `.demo-page .cdw-status{...}` — match specificity so this wins. */
+.demo-page .cdw-status {
+  color: #11813a; /* was #16a34a (bold) on #e9f9ef, 3.02:1 -> 4.56:1 */
+}
+.demo-page .cdw-checklist h2 {
+  color: #767676; /* was var(--muted-2) #8b8b8b (bold) on #fff, 3.40:1 -> 4.54:1 */
+}
+
+/* React-port merged-app fix: restores .hero-bg's grid/gradient/cloud background, which was
+   invisible after this app moved. Root cause, confirmed by walking document.elementsFromPoint()
+   over the hero at runtime: `.hero-bg{z-index:-1}` (site.css) relies on the browser's special
+   "canvas background" treatment of <body> — a negative-z-index element still paints ABOVE body's
+   own background, always, regardless of z-index. In the standalone site, `body{background:#fafafa}`
+   got that treatment for free. Here, site.css's `body{}` reset had to move onto a plain wrapper
+   div (.simplr-landing-root, see site.css's own RESET & BASE comment — it can't leak the same way
+   a real <body> rule can, since we're one of several routes sharing that body across the whole
+   app) instead of the real <body>, and an ORDINARY block box's background is NOT given that
+   treatment: per the CSS2.1 painting order, a normal in-flow box paints ABOVE a same-context
+   descendant's negative z-index content, so .simplr-landing-root's own background silently
+   covered .hero-bg every time. `isolation:isolate` gives .hero its own stacking context, so
+   .hero-bg's z-index:-1 is scoped to stay behind .hero's *own* children (.hero-inner,
+   .hero-card-wrap — the only elements it was ever meant to sit behind) instead of competing
+   against every ancestor context up to the real body. Zero visual side effect: isolation only
+   changes stacking-context scope, not layout, size, or paint of anything already positioned
+   correctly within .hero. */
+.hero {
+  isolation: isolate;
+}
+/* Same fix, same cause, for demo.css's own negative-z-index decoration: `.demo-stage::before`/
+   `::after` (the two blurred glow circles behind the call-demo widget) use `z-index:-1` too. */
+.demo-page {
+  isolation: isolate;
+}
