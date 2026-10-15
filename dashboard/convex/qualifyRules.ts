@@ -320,3 +320,19 @@ function coerceOne(
     }
   }
 }
+
+/**
+ * How the voice agent's check_qualification tool reports back (build plan C8).
+ *
+ *   "capture_only"  518's setting. Answers are stored on the lead and staff decide. The tool
+ *                   never returns qualifies: false or a disqualify reason to the agent, so
+ *                   Sarah has nothing to say that sounds like a rejection (PRD section 17: no
+ *                   automatic approval or rejection of a renter without human review).
+ *   "evaluate"      The original behaviour: evaluateQualification decides and Sarah relays it.
+ *
+ * A code constant rather than a stored setting for now, like COMPANY_NAME in agents.ts; it moves
+ * to Sarah configuration (build plan F9) once that exists. Only the voice tools read it:
+ * the WhatsApp/SMS bots call evaluateQualification directly and are unchanged.
+ */
+export type QualificationMode = "capture_only" | "evaluate";
+export const QUALIFICATION_MODE: QualificationMode = "capture_only";

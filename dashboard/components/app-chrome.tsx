@@ -120,6 +120,8 @@ function SignedInShell({ children }: { children: ReactNode }) {
     pathname === "/tasks";
   const { isLoaded, isSignedIn } = useUser();
   const { redirectToSignIn } = useClerk();
+  // Technicians get their own mobile-first layout (app/tech/layout.tsx), not the sidebar shell.
+  const isTechRoute = pathname === "/tech" || pathname.startsWith("/tech/");
 
   if (!isLoaded) {
     return <FullPageSpinner />;
@@ -128,6 +130,10 @@ function SignedInShell({ children }: { children: ReactNode }) {
   if (!isSignedIn) {
     void redirectToSignIn();
     return <FullPageSpinner />;
+  }
+
+  if (isTechRoute) {
+    return <>{children}</>;
   }
 
   return (

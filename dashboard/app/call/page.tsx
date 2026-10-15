@@ -8,8 +8,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { LiveWaveform } from "@/components/ui/live-waveform";
+import { RequireView } from "@/components/require-view";
 
-export default function CallPage() {
+function CallPageInner() {
   return (
     <ConversationProvider>
       <CallScreen />
@@ -366,5 +367,13 @@ function CallScreen() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function CallPage() {
+  return (
+    <RequireView views={["admin"]}>
+      <CallPageInner />
+    </RequireView>
   );
 }

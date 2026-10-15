@@ -18,6 +18,24 @@ const MINUTE = 60 * 1000;
 export const TOUR_MS = TOUR_MINUTES * MINUTE;
 export const BUFFER_MS = BUFFER_MINUTES * MINUTE;
 
+/**
+ * The tunable tour numbers. The constants above are the defaults; Sarah configuration (P17)
+ * can override them per team, and the functions below take an optional `rules` argument that
+ * falls back to these so every existing caller keeps working unchanged.
+ */
+export type TourRules = {
+  tourMinutes: number;
+  bufferMinutes: number;
+  slotStepMinutes: number;
+  minLeadMinutes: number;
+};
+export const DEFAULT_TOUR_RULES: TourRules = {
+  tourMinutes: TOUR_MINUTES,
+  bufferMinutes: BUFFER_MINUTES,
+  slotStepMinutes: SLOT_STEP_MINUTES,
+  minLeadMinutes: MIN_LEAD_MINUTES,
+};
+
 /** day: 0 = Sunday … 6 = Saturday, matching Date.getUTCDay(). Times are "HH:MM", 24-hour. */
 export type DayHours = { day: number; start: string; end: string };
 export type Interval = { start: number; end: number };
@@ -215,35 +233,41 @@ export function candidateStarts(
   hours: DayHours[],
   timeZone: string,
   now: number,
+  rules: TourRules = DEFAULT_TOUR_RULES,
 ): number[] {
   const today = hours.find((h) => h.day === weekdayOf(dateKey));
   if (!today) return [];
 
   const [year, month, day] = dateKey.split("-").map(Number);
-  const open = Math.ceil(toMinutes(today.start) / SLOT_STEP_MINUTES) * SLOT_STEP_MINUTES;
+  const open = Math.ceil(toMinutes(today.start) / rules.slotStepMinutes) * rules.slotStepMinutes;
   const close = toMinutes(today.end);
   const starts: number[] = [];
-  for (let m = open; m + TOUR_MINUTES <= close; m += SLOT_STEP_MINUTES) {
+  for (let m = open; m + rules.tourMinutes <= close; m += rules.slotStepMinutes) {
     const ms = zonedToUtc({ year, month, day, hour: Math.floor(m / 60), minute: m % 60 }, timeZone);
-    if (ms >= now + MIN_LEAD_MINUTES * MINUTE) starts.push(ms);
+    if (ms >= now + rules.minLeadMinutes * MINUTE) starts.push(ms);
   }
   return starts;
 }
 
 /** Whether a tour starting here sits inside the person's hours — the buffer may spill outside. */
-export function withinHours(start: number, hours: DayHours[], timeZone: string): boolean {
+export function withinHours(
+  start: number,
+  hours: DayHours[],
+  timeZone: string,
+  rules: TourRules = DEFAULT_TOUR_RULES,
+): boolean {
   const key = localDateKey(start, timeZone);
   const today = hours.find((h) => h.day === weekdayOf(key));
   if (!today) return false;
   const p = zonedParts(start, timeZone);
   const minutes = p.hour * 60 + p.minute;
-  return minutes >= toMinutes(today.start) && minutes + TOUR_MINUTES <= toMinutes(today.end);
+  return minutes >= toMinutes(today.start) && minutes + rules.tourMinutes <= toMinutes(today.end);
 }
 
 /** Free means nothing busy in the tour itself or in the buffer either side of it. */
-export function isFree(start: number, busy: Interval[]): boolean {
-  const from = start - BUFFER_MS;
-  const to = start + TOUR_MS + BUFFER_MS;
+export function isFree(start: number, busy: Interval[], rules: TourRules = DEFAULT_TOUR_RULES): boolean {
+  const from = start - rules.bufferMinutes * MINUTE;
+  const to = start + (rules.tourMinutes + rules.bufferMinutes) * MINUTE;
   return !busy.some((b) => b.start < to && b.end > from);
 }
 

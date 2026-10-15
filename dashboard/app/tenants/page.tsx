@@ -19,6 +19,8 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { useToast } from "@/components/toast";
 import { Dropdown } from "@/components/ui/dropdown";
 import { SEVERITY_RUBRIC, severityBand, type SeverityBand } from "@/convex/severity";
+import { RequireView } from "@/components/require-view";
+import { ConversationTranscript } from "@/components/transcript";
 
 const SEVERITY_STYLES: Record<SeverityBand, string> = {
   high: "bg-destructive/15 text-destructive",
@@ -78,19 +80,31 @@ type IssueRow = {
   durationSec?: number | null;
   callSummary?: string | null;
   messageCount?: number;
+  // Added by the callType work on the backend; absent on older rows or before it ships.
+  callType?: string;
 };
 
-type TranscriptLine = { _id: string; role: string; text: string };
+function callTypeOf(issue: { callType?: string; category?: string }) {
+  return issue.callType ?? issue.category ?? "";
+}
 
-export default function TenantsPage() {
+function labelize(value: string) {
+  const t = value.replace(/_/g, " ").trim();
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
+function TenantsPageInner() {
   const toast = useToast();
   const issues = useQuery(api.tenants.issues);
   const stats = useQuery(api.tenants.stats);
 
   const updateIssue = useMutation(api.tenants.updateIssue);
   const removeIssue = useMutation(api.tenants.removeIssue);
+  const access = useQuery(api.team.myAccess);
+  const isAdmin = access?.isAdmin === true;
 
   const [severityFilter, setSeverityFilter] = useState<string>("all");
+  const [typeFilter, setTypeFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("open");
   const [expanded, setExpanded] = useState<Id<"tenantIssues"> | null>(null);
   const [editing, setEditing] = useState<Id<"tenantIssues"> | null>(null);
@@ -100,30 +114,33 @@ export default function TenantsPage() {
     return issues.filter((issue) => {
       if (statusFilter !== "all" && issue.status !== statusFilter) return false;
       if (severityFilter !== "all" && severityBand(issue.severity) !== severityFilter) return false;
+      if (typeFilter !== "all" && callTypeOf(issue) !== typeFilter) return false;
       return true;
     });
-  }, [issues, severityFilter, statusFilter]);
+  }, [issues, severityFilter, statusFilter, typeFilter]);
 
-  const expandedIssue = filtered?.find((i) => i._id === expanded) ?? null;
+  const typeOptions = useMemo(() => {
+    const types = [...new Set((issues ?? []).map(callTypeOf).filter(Boolean))].sort();
+    return [
+      { value: "all", label: "All call types" },
+      ...types.map((t) => ({ value: t, label: labelize(t) })),
+    ];
+  }, [issues]);
+
   const editingIssue = filtered?.find((i) => i._id === editing) ?? null;
-
-  // Same "skip" sentinel the Leads page uses: only fetch the transcript for the open row.
-  const transcript = useQuery(
-    api.conversations.transcript,
-    expandedIssue?.conversationId ? { conversationId: expandedIssue.conversationId } : "skip",
-  );
 
   const toggle = (id: Id<"tenantIssues">) => setExpanded(expanded === id ? null : id);
 
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Tenants</h1>
+        <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Resident calls</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Residents who called, what they called about, and how urgent it is. Click a row for the
-          full transcript. Names and units are recorded as the caller gave them — nothing is
-          verified. Severity is Sarah&apos;s judgment on the call; you can change it and the
-          original is kept.
+          Non-maintenance resident calls. Maintenance is under Maintenance.
+        </p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Names and units are recorded as the caller gave them and are not verified. Severity is
+          Sarah&apos;s judgment; you can change it and the original is kept.
         </p>
       </div>
 
@@ -144,6 +161,12 @@ export default function TenantsPage() {
           value={severityFilter}
           onChange={setSeverityFilter}
           options={SEVERITY_DROPDOWN_OPTIONS}
+          buttonClassName="h-10 min-w-40"
+        />
+        <Dropdown
+          value={typeFilter}
+          onChange={setTypeFilter}
+          options={typeOptions}
           buttonClassName="h-10 min-w-40"
         />
         <Dropdown
@@ -172,7 +195,6 @@ export default function TenantsPage() {
             expanded={expanded === issue._id}
             onToggle={() => toggle(issue._id)}
             onEdit={() => setEditing(issue._id)}
-            transcript={expanded === issue._id ? transcript : undefined}
           />
         ))}
       </div>
@@ -200,7 +222,6 @@ export default function TenantsPage() {
                 expanded={expanded === issue._id}
                 onToggle={() => toggle(issue._id)}
                 onEdit={() => setEditing(issue._id)}
-                transcript={expanded === issue._id ? transcript : undefined}
               />
             ))}
           </tbody>
@@ -239,6 +260,7 @@ export default function TenantsPage() {
         {editingIssue && (
           <IssueModal
             issue={editingIssue}
+            canDelete={isAdmin}
             onClose={() => setEditing(null)}
             onSave={async (patch) => {
               await updateIssue({ issueId: editingIssue._id, ...patch });
@@ -294,11 +316,9 @@ function DetailField({ label, value }: { label: string; value?: string | null })
 
 function ExpandedDetail({
   issue,
-  transcript,
   onEdit,
 }: {
   issue: IssueRow;
-  transcript?: TranscriptLine[];
   onEdit: () => void;
 }) {
   return (
@@ -327,6 +347,7 @@ function ExpandedDetail({
       <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm sm:grid-cols-3">
         <DetailField label="Name" value={issue.callerName} />
         <DetailField label="Unit" value={issue.unit} />
+        <DetailField label="Call type" value={issue.callType ? labelize(issue.callType) : undefined} />
         <DetailField label="Category" value={issue.category} />
         <DetailField label="Called from" value={issue.callerNumber} />
         <DetailField
@@ -342,29 +363,13 @@ function ExpandedDetail({
         )}
       </div>
 
-      <div className="space-y-3">
-        {transcript?.length ? (
-          transcript.map((line) => (
-            <div key={line._id} className={line.role === "user" ? "text-right" : "text-left"}>
-              <span
-                className={`inline-block max-w-[80%] rounded-2xl px-3 py-2 text-sm ${
-                  line.role === "user"
-                    ? "bg-secondary text-secondary-foreground"
-                    : "bg-accent text-accent-foreground"
-                }`}
-              >
-                {line.text}
-              </span>
-            </div>
-          ))
-        ) : (
-          <p className="text-sm text-muted-foreground">
-            {issue.conversationId
-              ? "No transcript recorded for this call."
-              : "Transcript arrives once the call has finished processing."}
-          </p>
-        )}
-      </div>
+      {issue.conversationId ? (
+        <ConversationTranscript conversationId={issue.conversationId} />
+      ) : (
+        <p className="text-sm text-muted-foreground">
+          Transcript arrives once the call has finished processing.
+        </p>
+      )}
     </div>
   );
 }
@@ -375,14 +380,12 @@ function IssueFragmentRow({
   expanded,
   onToggle,
   onEdit,
-  transcript,
 }: {
   issue: IssueRow;
   index: number;
   expanded: boolean;
   onToggle: () => void;
   onEdit: () => void;
-  transcript?: TranscriptLine[];
 }) {
   return (
     <>
@@ -444,7 +447,7 @@ function IssueFragmentRow({
                 className="overflow-hidden"
               >
                 <div className="p-5">
-                  <ExpandedDetail issue={issue} transcript={transcript} onEdit={onEdit} />
+                  <ExpandedDetail issue={issue} onEdit={onEdit} />
                 </div>
               </motion.div>
             </td>
@@ -461,14 +464,12 @@ function IssueCard({
   expanded,
   onToggle,
   onEdit,
-  transcript,
 }: {
   issue: IssueRow;
   index: number;
   expanded: boolean;
   onToggle: () => void;
   onEdit: () => void;
-  transcript?: TranscriptLine[];
 }) {
   return (
     <motion.div
@@ -503,7 +504,7 @@ function IssueCard({
             className="overflow-hidden"
           >
             <div className="border-t border-border p-4">
-              <ExpandedDetail issue={issue} transcript={transcript} onEdit={onEdit} />
+              <ExpandedDetail issue={issue} onEdit={onEdit} />
             </div>
           </motion.div>
         )}
@@ -514,11 +515,13 @@ function IssueCard({
 
 function IssueModal({
   issue,
+  canDelete,
   onClose,
   onSave,
   onDelete,
 }: {
   issue: IssueRow;
+  canDelete: boolean;
   onClose: () => void;
   onSave: (patch: {
     severity?: number;
@@ -641,13 +644,17 @@ function IssueModal({
         </label>
 
         <div className="flex items-center justify-between pt-2">
-          <button
-            onClick={onDelete}
-            className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm text-destructive hover:bg-destructive/10"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            Delete
-          </button>
+          {canDelete ? (
+            <button
+              onClick={onDelete}
+              className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm text-destructive hover:bg-destructive/10"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Delete
+            </button>
+          ) : (
+            <span />
+          )}
           <div className="flex gap-2">
             <button
               onClick={onClose}
@@ -686,5 +693,13 @@ function StatCard({
       </div>
       <div className="mt-1.5 text-xl font-semibold tabular-nums">{value}</div>
     </div>
+  );
+}
+
+export default function TenantsPage() {
+  return (
+    <RequireView views={["admin"]}>
+      <TenantsPageInner />
+    </RequireView>
   );
 }

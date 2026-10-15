@@ -20,7 +20,7 @@ type AfterAuthArgs = {
  * external site (Google's consent screen) on /call. Resolving against our origin also catches
  * "//evil.com", which browsers treat as external.
  */
-export function afterAuthDestination(fallback = "/call"): string {
+export function afterAuthDestination(fallback = "/home"): string {
   if (typeof window === "undefined") return fallback;
   const requested = new URLSearchParams(window.location.search).get("redirect_url");
   if (!requested) return fallback;

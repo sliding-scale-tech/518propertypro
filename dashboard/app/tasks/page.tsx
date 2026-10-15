@@ -20,6 +20,13 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useToast } from "@/components/toast";
 import { Dropdown } from "@/components/ui/dropdown";
+import {
+  AssigneeAvatar,
+  TaskLinks,
+  UNASSIGNED,
+  useMembers,
+  type Member,
+} from "@/components/tasks/shared";
 
 type Status = "todo" | "in_progress" | "completed";
 type Priority = "low" | "medium" | "high";
@@ -33,6 +40,10 @@ type Task = {
   category?: string;
   dueDate?: number;
   tags?: string[];
+  assigneeUserId?: Id<"users">;
+  unitId?: Id<"units">;
+  requestId?: Id<"maintenanceRequests">;
+  workOrderId?: Id<"workOrders">;
 };
 
 type Attachment = {
@@ -112,7 +123,9 @@ function formatDueDate(dueDate?: number) {
 
 
 export default function TasksPage() {
-  const tasks = useQuery(api.tasks.list) as Task[] | undefined;
+  const [mine, setMine] = useState(false);
+  const tasks = useQuery(api.tasks.list, mine ? { mine: true } : {}) as Task[] | undefined;
+  const members = useMembers();
   const toggleComplete = useMutation(api.tasks.toggleComplete);
   const toast = useToast();
   const [modalOpen, setModalOpen] = useState(false);
@@ -142,6 +155,22 @@ export default function TasksPage() {
         </button>
       </header>
 
+      <div role="group" aria-label="Task scope" className="inline-flex rounded-lg border border-input p-0.5 text-sm">
+        {([false, true] as const).map((value) => (
+          <button
+            key={String(value)}
+            type="button"
+            aria-pressed={mine === value}
+            onClick={() => setMine(value)}
+            className={`rounded-md px-3 py-1.5 font-medium ${
+              mine === value ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"
+            }`}
+          >
+            {value ? "My tasks" : "All tasks"}
+          </button>
+        ))}
+      </div>
+
       {tasks?.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-border bg-card py-16 text-center text-sm text-muted-foreground">
           No tasks yet. Add one to start tracking what your team needs to do.
@@ -157,6 +186,7 @@ export default function TasksPage() {
                 label={group.label}
                 dotClassName={group.dotClassName}
                 tasks={group.tasks}
+                members={members}
                 selectedId={selectedId}
                 onToggle={(id) => void toggleComplete({ taskId: id })}
                 onSelect={setSelectedId}
@@ -167,7 +197,7 @@ export default function TasksPage() {
 
         {selectedTask ? (
           <div className="w-full shrink-0 xl:sticky xl:top-6 xl:w-[420px]">
-            <TaskDetailPanel key={selectedTask._id} task={selectedTask} onClose={() => setSelectedId(null)} />
+            <TaskDetailPanel key={selectedTask._id} task={selectedTask} members={members} onClose={() => setSelectedId(null)} />
           </div>
         ) : null}
       </div>
@@ -175,6 +205,7 @@ export default function TasksPage() {
       <AnimatePresence>
         {modalOpen ? (
           <NewTaskModal
+            members={members}
             onClose={() => setModalOpen(false)}
             onCreated={() => {
               toast("Task added");
@@ -191,10 +222,12 @@ function TaskGroup({
   label,
   dotClassName,
   tasks,
+  members,
   selectedId,
   onToggle,
   onSelect,
 }: {
+  members: Member[];
   label: string;
   dotClassName: string;
   tasks: Task[];
@@ -230,6 +263,7 @@ function TaskGroup({
               <TaskRow
                 key={task._id}
                 task={task}
+                assignee={members.find((m) => m.userId === task.assigneeUserId)}
                 bordered={index > 0}
                 selected={task._id === selectedId}
                 onToggle={() => onToggle(task._id)}
@@ -245,12 +279,14 @@ function TaskGroup({
 
 function TaskRow({
   task,
+  assignee,
   bordered,
   selected,
   onToggle,
   onSelect,
 }: {
   task: Task;
+  assignee?: Member;
   bordered: boolean;
   selected: boolean;
   onToggle: () => void;
@@ -310,10 +346,18 @@ function TaskRow({
             +{(task.tags?.length ?? 0) - MAX_VISIBLE_TAGS}
           </span>
         ) : null}
+        {assignee ? <AssigneeAvatar member={assignee} /> : <span className="w-6" />}
         <span className="w-12 text-right text-xs text-muted-foreground">{due ?? ""}</span>
       </div>
     </div>
   );
+}
+
+function assigneeOptions(members: Member[]) {
+  return [
+    { value: UNASSIGNED, label: "Unassigned" },
+    ...members.map((m) => ({ value: m.userId as string, label: m.name })),
+  ];
 }
 
 function toDateInputValue(ms?: number) {
@@ -323,7 +367,15 @@ function toDateInputValue(ms?: number) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-function TaskDetailPanel({ task, onClose }: { task: Task; onClose: () => void }) {
+function TaskDetailPanel({
+  task,
+  members,
+  onClose,
+}: {
+  task: Task;
+  members: Member[];
+  onClose: () => void;
+}) {
   const update = useMutation(api.tasks.update);
   const toggleComplete = useMutation(api.tasks.toggleComplete);
   const attachments = useQuery(api.tasks.attachments, { taskId: task._id }) as Attachment[] | undefined;
@@ -429,6 +481,8 @@ function TaskDetailPanel({ task, onClose }: { task: Task; onClose: () => void })
             uploading={uploading}
           />
 
+          <TaskLinks unitId={task.unitId} requestId={task.requestId} workOrderId={task.workOrderId} />
+
           <AttachmentList
             attachments={attachments ?? []}
             onRemove={(id) => void removeAttachment({ attachmentId: id })}
@@ -451,6 +505,20 @@ function TaskDetailPanel({ task, onClose }: { task: Task; onClose: () => void })
               buttonClassName="h-9"
             />
 
+
+            <span className="text-muted-foreground">Assignee</span>
+            <Dropdown
+              value={task.assigneeUserId ?? UNASSIGNED}
+              options={assigneeOptions(members)}
+              onChange={(value) =>
+                void patch(
+                  value === UNASSIGNED
+                    ? { taskId: task._id, clearAssignee: true }
+                    : { taskId: task._id, assigneeUserId: value as Id<"users"> },
+                )
+              }
+              buttonClassName="h-9"
+            />
 
             <span className="text-muted-foreground">Due date</span>
             <div className="flex items-center gap-1.5">
@@ -786,7 +854,15 @@ function AttachmentList({
   );
 }
 
-function NewTaskModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+function NewTaskModal({
+  members,
+  onClose,
+  onCreated,
+}: {
+  members: Member[];
+  onClose: () => void;
+  onCreated: () => void;
+}) {
   const create = useMutation(api.tasks.create);
   const generateUploadUrl = useMutation(api.tasks.generateUploadUrl);
   const attach = useMutation(api.tasks.attach);
@@ -797,6 +873,7 @@ function NewTaskModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
   const [status, setStatus] = useState<Status>("todo");
   const [priority, setPriority] = useState<Priority>("medium");
   const [dueDate, setDueDate] = useState("");
+  const [assignee, setAssignee] = useState<string>(UNASSIGNED);
   const [tags, setTags] = useState<string[]>([]);
   const [newTag, setNewTag] = useState("");
   const [addingTag, setAddingTag] = useState(false);
@@ -860,6 +937,7 @@ function NewTaskModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
         dueDate: dueDate ? new Date(dueDate).getTime() : undefined,
         tags: tags.length ? tags : undefined,
         attachmentIds: attachments.map((a) => a._id),
+        assigneeUserId: assignee === UNASSIGNED ? undefined : (assignee as Id<"users">),
       });
       onCreated();
     } catch (err) {
@@ -926,6 +1004,11 @@ function NewTaskModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
               <Dropdown value={priority} options={PRIORITY_OPTIONS} onChange={setPriority} />
             </label>
           </div>
+
+          <label className="block">
+            <span className="mb-2 block text-sm font-medium">Assignee</span>
+            <Dropdown value={assignee} options={assigneeOptions(members)} onChange={setAssignee} />
+          </label>
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <label className="block">

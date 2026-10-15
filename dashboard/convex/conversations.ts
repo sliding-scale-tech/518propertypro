@@ -5,7 +5,8 @@ import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { isOtlpPayload, parseOtlp } from "./otlp";
 import { computeLeadScore } from "./leadScoring";
-import { currentOrg } from "./authz";
+import { currentOrg, requireAdminView, viewFor } from "./authz";
+import { writeAudit } from "./audit";
 
 // Disabled: the 15-min/month free-tier cap no longer applies now that ElevenLabs is upgraded.
 // Usage is still tracked below (secondsUsed) for visibility; it just isn't enforced as a limit
@@ -90,6 +91,11 @@ export const history = query({
     if (!org) {
       return { page: [], isDone: true, continueCursor: "" };
     }
+    // Lead history is not for technicians or accountants.
+    const view = viewFor(org.isAdmin, org.jobRoles);
+    if (view === "technician" || view === "accountant") {
+      return { page: [], isDone: true, continueCursor: "" };
+    }
 
     const result = await ctx.db
       .query("conversations")
@@ -142,6 +148,8 @@ export const transcript = query({
     if (conv.orgId) {
       const org = await currentOrg(ctx);
       if (!org || org.orgId !== conv.orgId) return [];
+      const view = viewFor(org.isAdmin, org.jobRoles);
+      if (view === "technician" || view === "accountant") return [];
     }
     return ctx.db
       .query("messages")
@@ -402,6 +410,9 @@ export const markTenantIssue = internalMutation({
     reason: v.string(),
     severity: v.number(),
     callerNumber: v.optional(v.string()),
+    // log_maintenance_request names its severity level rather than a 1-10 score, so it passes the
+    // finished summary line; log_tenant_issue leaves this out and keeps the numeric wording.
+    summary: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db
@@ -414,7 +425,7 @@ export const markTenantIssue = internalMutation({
     const classification = {
       intent: "maintenance" as const,
       outcome: "logged_only" as const,
-      summary: `Tenant issue (severity ${args.severity}): ${args.reason}`.slice(0, 300),
+      summary: (args.summary ?? `Tenant issue (severity ${args.severity}): ${args.reason}`).slice(0, 300),
     };
 
     if (existing) {
@@ -589,6 +600,20 @@ export const ingestFromWebhook = internalMutation({
       });
     }
 
+    // Same back-fill for a maintenance request Sarah took mid-call (log_maintenance_request). On a
+    // phone call no conversations row existed yet, so createFromCall stored it unlinked; without
+    // this the request detail page could not show the call's transcript. Scoped to the call's own
+    // team so a request is never attached to another team's conversation.
+    const maintenanceRequests = await ctx.db
+      .query("maintenanceRequests")
+      .withIndex("by_conversation", (q) => q.eq("elevenLabsConversationId", conversationId))
+      .collect();
+    for (const request of maintenanceRequests) {
+      if (request.conversationId) continue;
+      if (conv.orgId && request.orgId !== conv.orgId) continue;
+      await ctx.db.patch(request._id, { conversationId: conv._id, updatedAt: Date.now() });
+    }
+
     // Only set intent/outcome/summary if a tool call during the call didn't already set them
     // (e.g. escalation) — this is the safety net for a silent or confused call the PRD
     // requires ("clean logged reason why not"), not an override of what actually happened.
@@ -697,5 +722,54 @@ export const end = mutation({
       .first();
     if (row) await ctx.db.patch(row._id, { secondsUsed: row.secondsUsed + durationSec });
     else await ctx.db.insert("usage", { monthKey: key, secondsUsed: durationSec });
+  },
+});
+
+/**
+ * Calls nobody has dealt with yet: the call failed, or Sarah could not tell what it was about
+ * (intent "unclear"), and no one has marked it followed up. Admin view only. Looks at the
+ * latest 200 calls, which is far more than a week of volume for one team.
+ */
+export const needsFollowUp = query({
+  args: {},
+  handler: async (ctx) => {
+    const org = await currentOrg(ctx);
+    if (!org || viewFor(org.isAdmin, org.jobRoles) !== "admin") return [];
+    const rows = await ctx.db
+      .query("conversations")
+      .withIndex("by_org_and_started", (q) => q.eq("orgId", org.orgId))
+      .order("desc")
+      .take(200);
+    return rows
+      .filter((c) => !c.followedUpAt && (c.status === "failed" || c.intent === "unclear"))
+      .map((c) => ({
+        _id: c._id,
+        callerNumber: c.callerNumber,
+        channel: c.channel,
+        startedAt: c.startedAt,
+        durationSec: c.durationSec,
+        status: c.status,
+        intent: c.intent,
+        summary: c.summary,
+      }));
+  },
+});
+
+export const markFollowedUp = mutation({
+  args: { conversationId: v.id("conversations") },
+  handler: async (ctx, args) => {
+    const org = await requireAdminView(ctx);
+    const conversation = await ctx.db.get(args.conversationId);
+    // Same answer for missing and another team's call.
+    if (!conversation || conversation.orgId !== org.orgId) throw new Error("Call not found.");
+    if (conversation.followedUpAt) return;
+    await ctx.db.patch(conversation._id, { followedUpAt: Date.now(), followedUpBy: org.user._id });
+    await writeAudit(ctx, {
+      orgId: org.orgId,
+      entity: "conversation",
+      entityId: conversation._id,
+      action: "followed_up",
+      actorUserId: org.user._id,
+    });
   },
 });

@@ -3,6 +3,8 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { internalQuery } from "./_generated/server";
 import type { ActionCtx, QueryCtx, MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
+import { JOB_ROLES } from "./jobRoles";
+import type { JobRole } from "./jobRoles";
 
 /**
  * Every dashboard tab (Leads, Tenants, Knowledge, Property, Agent) is scoped by this one
@@ -66,8 +68,83 @@ export type OrgContext = {
   orgId: Id<"organizations">;
   role: "admin" | "member";
   isAdmin: boolean;
+  // Job roles (what they do), distinct from `role` (team administration). [] for rows that
+  // predate job roles — see team.backfillJobRoles.
+  jobRoles: JobRole[];
   user: Doc<"users">;
 };
+
+export { JOB_ROLES };
+export type { JobRole };
+export type { AppRole } from "./jobRoles";
+
+/**
+ * True if the person holds any of `roles`. simplr_admin satisfies every check, and so does a
+ * team admin: before job roles were backfilled an admin had none, and locking them out of their
+ * own team would be worse than the extra reach.
+ */
+export function hasJobRole(
+  org: { jobRoles: JobRole[]; isAdmin: boolean },
+  ...roles: JobRole[]
+): boolean {
+  if (org.isAdmin || org.jobRoles.includes("simplr_admin")) return true;
+  return roles.some((r) => org.jobRoles.includes(r));
+}
+
+/** Server-side gate on job role, the query/mutation counterpart of requireOrgAdmin. */
+export async function requireJobRole(
+  ctx: QueryCtx | MutationCtx,
+  ...roles: JobRole[]
+): Promise<OrgContext> {
+  const org = await requireOrg(ctx);
+  if (!hasJobRole(org, ...roles)) throw new Error("You don't have access to that.");
+  return org;
+}
+
+/** Which of the app's views a person lands in. One app, four views, decided by role. */
+export type AppView = "admin" | "asset_manager" | "technician" | "accountant" | "none";
+
+/**
+ * Pure: team admins and the three admin-flavoured job roles get the admin view; otherwise the
+ * first of asset_manager, technician, accountant they hold; otherwise none.
+ */
+export function viewFor(isAdmin: boolean, jobRoles: JobRole[]): AppView {
+  if (
+    isAdmin ||
+    jobRoles.includes("simplr_admin") ||
+    jobRoles.includes("executive") ||
+    jobRoles.includes("maintenance_lead")
+  ) {
+    return "admin";
+  }
+  if (jobRoles.includes("asset_manager")) return "asset_manager";
+  if (jobRoles.includes("technician")) return "technician";
+  if (jobRoles.includes("accountant")) return "accountant";
+  return "none";
+}
+
+/** Server-side gate on the admin view, the query/mutation counterpart of requireOrgAdmin. */
+export async function requireAdminView(ctx: QueryCtx | MutationCtx): Promise<OrgContext> {
+  const org = await requireOrg(ctx);
+  if (viewFor(org.isAdmin, org.jobRoles) !== "admin") throw new Error("You don't have access to that.");
+  return org;
+}
+
+/**
+ * "Pat powers": what the maintenance lead can do beyond reviewing — forward, close without a
+ * work order, create work orders for any unit, close them out. Team admins and simplr_admin
+ * pass via hasJobRole; an executive alone does not (read-only per the roles matrix).
+ */
+export function canManageMaintenance(org: { jobRoles: JobRole[]; isAdmin: boolean }): boolean {
+  return hasJobRole(org, "maintenance_lead", "simplr_admin");
+}
+
+/** Action-context equivalent of requireAdminView. */
+export async function requireAdminViewId(ctx: ActionCtx): Promise<Awaited<ReturnType<typeof requireOrgId>>> {
+  const org = await requireOrgId(ctx);
+  if (viewFor(org.isAdmin, org.jobRoles) !== "admin") throw new Error("You don't have access to that.");
+  return org;
+}
 
 /**
  * Null rather than throwing, for the same reason currentUser is: a dashboard query wants to
@@ -88,6 +165,7 @@ export async function currentOrg(ctx: QueryCtx | MutationCtx): Promise<OrgContex
     orgId: membership.orgId,
     role: membership.role,
     isAdmin: membership.role === "admin",
+    jobRoles: membership.jobRoles ?? [],
     user,
   };
 }
@@ -132,6 +210,7 @@ export async function requireOrgId(ctx: ActionCtx): Promise<{
   orgId: Id<"organizations">;
   role: "admin" | "member";
   isAdmin: boolean;
+  jobRoles: JobRole[];
   userId: Id<"users">;
 }> {
   const identity = await ctx.auth.getUserIdentity();
@@ -146,6 +225,7 @@ export async function requireOrgId(ctx: ActionCtx): Promise<{
     orgId: resolved.orgId,
     role: resolved.role,
     isAdmin: resolved.role === "admin",
+    jobRoles: resolved.jobRoles,
     userId: resolved.userId,
   };
 }
@@ -166,6 +246,11 @@ export const orgForClerkId = internalQuery({
       .first();
     if (!membership) return null;
 
-    return { orgId: membership.orgId, role: membership.role, userId: user._id };
+    return {
+      orgId: membership.orgId,
+      role: membership.role,
+      jobRoles: membership.jobRoles ?? [],
+      userId: user._id,
+    };
   },
 });

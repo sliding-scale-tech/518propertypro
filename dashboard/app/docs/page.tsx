@@ -18,6 +18,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useToast } from "@/components/toast";
+import { RequireView } from "@/components/require-view";
 
 const SYNC_LABELS: Record<string, { label: string; className: string }> = {
   pending: { label: "Queued", className: "bg-muted text-muted-foreground" },
@@ -54,7 +55,7 @@ function relativeDate(timestamp: number) {
   return `Updated ${days} days ago`;
 }
 
-export default function DocsPage() {
+function DocsPageInner() {
   const docs = useQuery(api.docs.list);
   const save = useMutation(api.docs.save);
   const remove = useAction(api.docs.remove);
@@ -367,5 +368,13 @@ function KnowledgeModal({
         </div>
       </motion.div>
     </motion.div>
+  );
+}
+
+export default function DocsPage() {
+  return (
+    <RequireView views={["admin"]}>
+      <DocsPageInner />
+    </RequireView>
   );
 }

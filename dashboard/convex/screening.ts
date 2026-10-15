@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { internalQuery, mutation, query } from "./_generated/server";
-import { currentOrg, requireOrg } from "./authz";
+import { currentOrg, requireAdminView } from "./authz";
 import { CORE_QUESTIONS, DISABLEABLE_KEYS, type CoreKey } from "./coreQuestions";
 
 /**
@@ -130,7 +130,7 @@ export const save = mutation({
     enabled: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const { orgId, user } = await requireOrg(ctx);
+    const { orgId, user } = await requireAdminView(ctx);
     const question = args.question.trim();
     if (!question) throw new Error("Give the question some text.");
 
@@ -186,7 +186,7 @@ export const save = mutation({
 export const remove = mutation({
   args: { id: v.id("screeningQuestions") },
   handler: async (ctx, args) => {
-    const { orgId } = await requireOrg(ctx);
+    const { orgId } = await requireAdminView(ctx);
     const row = await ctx.db.get(args.id);
     if (!row || row.orgId !== orgId) return;
     await ctx.db.delete(args.id);
@@ -204,7 +204,7 @@ export const remove = mutation({
 export const setBuiltin = mutation({
   args: { key: v.string(), enabled: v.boolean() },
   handler: async (ctx, args) => {
-    const { orgId, user } = await requireOrg(ctx);
+    const { orgId, user } = await requireAdminView(ctx);
     if (!DISABLEABLE_KEYS.includes(args.key as CoreKey)) {
       throw new Error("That question is required and cannot be switched off.");
     }
@@ -238,7 +238,7 @@ export const setBuiltin = mutation({
 export const reorder = mutation({
   args: { ids: v.array(v.id("screeningQuestions")) },
   handler: async (ctx, args) => {
-    const { orgId } = await requireOrg(ctx);
+    const { orgId } = await requireAdminView(ctx);
     for (const [index, id] of args.ids.entries()) {
       const row = await ctx.db.get(id);
       if (!row || row.orgId !== orgId) continue;

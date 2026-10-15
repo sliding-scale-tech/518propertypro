@@ -2,15 +2,16 @@ import { httpRouter, type GenericActionCtx } from "convex/server";
 import { httpAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { DataModel } from "./_generated/dataModel";
-import { clampSeverity } from "./severity";
+import { SEVERITY_LEVEL_SCORE, clampSeverity, parseSeverityLevel } from "./severity";
 import {
+  QUALIFICATION_MODE,
   coerceScreeningAnswers,
   evaluateQualification,
   missingScreeningKeys,
   type ScreeningQuestion,
 } from "./qualifyRules";
 import * as waha from "./wahaApi";
-import { realPhone } from "./sanitize";
+import { realPhone, realValue } from "./sanitize";
 import { handleClerkWebhook } from "./clerkWebhook";
 import { handleOAuthCallback as handleGoogleOAuthCallback } from "./googleCalendar";
 import type { FunctionReturnType } from "convex/server";
@@ -110,6 +111,136 @@ async function findCallerTour(
   return tour ? { orgId, tour } : null;
 }
 
+/** One unit type Sarah may offer, summed over the available units of that type. */
+type OfferedUnitType = {
+  community: string | null;
+  bedrooms: string;
+  rentMin: number | null;
+  rentMax: number | null;
+  /** Null when we only have the property's per-type summary, which carries no count. */
+  count: number | null;
+  availableFrom: string | null;
+};
+
+/**
+ * What Sarah is allowed to offer: ONLY units with available = true (PRD section 7). A team with
+ * rows in the units table is answered from those; otherwise from the older per-property bedroom
+ * summary. A team that has units but none free gets an empty list, never the stale summary.
+ */
+async function offeredUnitTypes(
+  ctx: GenericActionCtx<DataModel>,
+  orgId: string | undefined,
+  property: { name: string; units: Array<{ bedrooms: string; rentMin: number; rentMax: number; available: boolean }> },
+): Promise<OfferedUnitType[]> {
+  if (orgId) {
+    const fromUnits = await ctx.runQuery(internal.sarahTools.availableUnits, { orgId });
+    if (fromUnits.hasUnits) {
+      const groups = new Map<string, OfferedUnitType>();
+      for (const u of fromUnits.available) {
+        const key = `${u.community ?? ""}|${u.bedrooms}`;
+        const g = groups.get(key) ?? {
+          community: u.community,
+          bedrooms: u.bedrooms,
+          rentMin: null,
+          rentMax: null,
+          count: 0,
+          availableFrom: null,
+        };
+        g.count = (g.count ?? 0) + 1;
+        if (u.rent !== null) {
+          g.rentMin = g.rentMin === null ? u.rent : Math.min(g.rentMin, u.rent);
+          g.rentMax = g.rentMax === null ? u.rent : Math.max(g.rentMax, u.rent);
+        }
+        // The earliest date any unit of this type frees up, compared as written (ISO dates sort).
+        if (u.availableFrom && (!g.availableFrom || u.availableFrom < g.availableFrom)) {
+          g.availableFrom = u.availableFrom;
+        }
+        groups.set(key, g);
+      }
+      return [...groups.values()];
+    }
+  }
+  return property.units
+    .filter((u) => u.available)
+    .map((u) => ({
+      community: property.name,
+      bedrooms: u.bedrooms,
+      rentMin: u.rentMin,
+      rentMax: u.rentMax,
+      count: null,
+      availableFrom: null,
+    }));
+}
+
+function offeredForAgent(t: OfferedUnitType) {
+  return {
+    community: t.community,
+    bedrooms: t.bedrooms,
+    rent_min: t.rentMin,
+    rent_max: t.rentMax,
+    units_available: t.count,
+    available_from: t.availableFrom,
+  };
+}
+
+/** log_tenant_issue's call_type values. Anything else is dropped rather than stored. */
+const CALL_TYPES = [
+  "rent",
+  "portal_login",
+  "application",
+  "eviction",
+  "non_renewal",
+  "renewal",
+  "work_order_status",
+  "vendor_payment",
+  "neighbor_dispute",
+  "other",
+] as const;
+
+/** log_maintenance_request's issue_type values. */
+const ISSUE_TYPES = [
+  "electrical",
+  "water_leak",
+  "broken_item",
+  "gas",
+  "fire",
+  "flooding",
+  "tenant_responsibility",
+  "other",
+] as const;
+
+/**
+ * The model's `answers` argument (key -> string) as the stored question/answer rows. Tolerates a
+ * JSON string, because some tool-call layers stringify nested objects, and caps everything so a
+ * runaway call can't write an unbounded record. The key doubles as the question label: the
+ * agent names each key after what it asked (for example "breaker_checked").
+ */
+function parseAnswers(raw: unknown): Array<{ key: string; question: string; value: string }> {
+  let obj: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      obj = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return [];
+  const out: Array<{ key: string; question: string; value: string }> = [];
+  for (const [k, value] of Object.entries(obj as Record<string, unknown>).slice(0, 30)) {
+    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") continue;
+    const key = k.trim().slice(0, 60);
+    const text = String(value).trim().slice(0, 500);
+    if (!key || !text) continue;
+    out.push({ key, question: key.replace(/_/g, " "), value: text });
+  }
+  return out;
+}
+
+/** Optional text argument: a trimmed, bounded string, or undefined for anything else or a placeholder. */
+function optString(value: unknown, max = 500): string | undefined {
+  return typeof value === "string" ? realValue(value.slice(0, max)) : undefined;
+}
+
 // Clerk → Convex user sync. Endpoint configured in the Clerk dashboard as
 // https://<deployment>.convex.site/auth
 http.route({
@@ -142,11 +273,12 @@ http.route({
     const bedrooms: string | undefined = body.bedrooms;
     const conversationId: string | undefined = body.conversation_id;
 
-    const orgId = await resolveOrg(ctx, conversationId);
+    const orgId = await resolveBookingOrg(ctx, conversationId, body.agent_id);
     const property = await ctx.runQuery(internal.properties.currentInternal, { orgId });
-    const unit = bedrooms
-      ? property.units.find((u: { bedrooms: string }) => u.bedrooms === bedrooms)
-      : undefined;
+    // Only units that are open right now. An unavailable type is simply absent, so there is
+    // nothing in the result for Sarah to offer by mistake.
+    const offered = await offeredUnitTypes(ctx, orgId, property);
+    const requested = bedrooms ? offered.filter((t) => t.bedrooms === bedrooms) : [];
 
     return Response.json({
       property_name: property.name,
@@ -154,15 +286,15 @@ http.route({
       property_address: (property as { address?: { formatted: string } }).address?.formatted ?? null,
       pets_allowed: property.petsAllowed,
       move_in_window_days: property.moveInWindowDays,
-      requested_unit: unit
-        ? { bedrooms: unit.bedrooms, rent_min: unit.rentMin, rent_max: unit.rentMax, available: unit.available }
-        : null,
-      all_units: property.units.map((u: { bedrooms: string; rentMin: number; rentMax: number; available: boolean }) => ({
-        bedrooms: u.bedrooms,
-        rent_min: u.rentMin,
-        rent_max: u.rentMax,
-        available: u.available,
-      })),
+      requested_unit: requested.length > 0 ? { ...offeredForAgent(requested[0]), available: true } : null,
+      ...(bedrooms && requested.length === 0
+        ? {
+            message:
+              "Nothing of that type is available right now. Do not offer it. Offer the closest " +
+              "type in all_units, or offer to note their interest.",
+          }
+        : {}),
+      all_units: offered.map((t) => ({ ...offeredForAgent(t), available: true })),
     });
   }),
 });
@@ -193,7 +325,7 @@ http.route({
       return Response.json({ error: "missing conversation_id" }, { status: 400 });
     }
 
-    const orgId = await resolveOrg(ctx, conversationId);
+    const orgId = await resolveBookingOrg(ctx, conversationId, body.agent_id);
     const property = await ctx.runQuery(internal.properties.currentInternal, { orgId });
 
     const questions: ScreeningQuestion[] = await ctx.runQuery(
@@ -217,6 +349,65 @@ http.route({
         message:
           "Do not state a qualification result yet. Ask the caller the questions in " +
           "still_needed, then call this tool again with those answers included.",
+      });
+    }
+
+    // Pat's leasing questions that are only ever recorded (build plan C8). Stored beside the
+    // property's own screening answers, which is what the lead view already renders.
+    const captured: Array<{ key: string; question: string; value: string | number | boolean }> = [];
+    const addCaptured = (key: string, question: string, value: unknown) => {
+      if (typeof value === "boolean" || typeof value === "number") captured.push({ key, question, value });
+      else if (typeof value === "string") {
+        const text = optString(value, 500);
+        if (text) captured.push({ key, question, value: text });
+      }
+    };
+    addCaptured("capture_third_party_payer", "Will someone else be paying the rent?", body.third_party_payer);
+    addCaptured("capture_payer_name", "Third-party payer name", body.payer_name);
+    addCaptured("capture_payer_phone", "Third-party payer phone", body.payer_phone);
+    addCaptured("capture_payer_email", "Third-party payer email", body.payer_email);
+    addCaptured("capture_preferred_communities", "Preferred communities", body.preferred_communities);
+    addCaptured("capture_avoid_communities", "Communities to avoid", body.avoid_communities);
+    addCaptured("capture_pet_count", "Number of pets", body.pet_count);
+    addCaptured("capture_other_info", "Other information", body.other_info);
+
+    if (QUALIFICATION_MODE === "capture_only") {
+      // Everything is recorded and staff decide. Nothing computed from the rules is stored or
+      // returned: no qualifies flag, no reason, no near-miss. The agent has no rejection to
+      // relay, and a lead is never auto-marked as turned away (PRD section 17).
+      await ctx.runMutation(internal.qualifications.upsertByConversationId, {
+        elevenLabsConversationId: conversationId,
+        bedrooms,
+        moveInDate,
+        budget: typeof budget === "number" ? budget : undefined,
+        petsWanted: typeof petsWanted === "boolean" ? petsWanted : undefined,
+        petType,
+        callerName,
+        callerPhone,
+        screeningAnswers: [
+          ...screeningAnswers.map((a) => ({
+            key: a.key,
+            question: questions.find((q) => q.key === a.key)?.question ?? a.key,
+            value: a.value,
+          })),
+          ...captured,
+        ],
+      });
+
+      const offered = await offeredUnitTypes(ctx, orgId, property);
+      const matching = typeof bedrooms === "string" ? offered.filter((t) => t.bedrooms === bedrooms) : [];
+      return Response.json({
+        recorded: true,
+        property_name: property.name,
+        requested_type_available: matching.length > 0,
+        available_units: offered.map(offeredForAgent),
+        message:
+          "Their answers are recorded and the team will review them. Never tell the caller they do " +
+          "or do not qualify, and never give a reason they might not. " +
+          (matching.length > 0
+            ? "Something of the type they asked for is available, so offer a tour."
+            : "Nothing of the type they asked for is available right now. Say so, offer the closest " +
+              "type in available_units or to note their interest, and offer a tour if they want one."),
       });
     }
 
@@ -265,13 +456,7 @@ http.route({
       // ask if they can go up to this number before anything else, never a different figure.
       near_miss_budget_target: qualifies === false && nearMiss ? (nearMissBudgetTarget ?? null) : null,
       property_name: property.name,
-      available_units: property.units
-        .filter((u: { available: boolean }) => u.available)
-        .map((u: { bedrooms: string; rentMin: number; rentMax: number }) => ({
-          bedrooms: u.bedrooms,
-          rent_min: u.rentMin,
-          rent_max: u.rentMax,
-        })),
+      available_units: (await offeredUnitTypes(ctx, orgId, property)).map(offeredForAgent),
     });
   }),
 });
@@ -709,8 +894,8 @@ http.route({
 });
 
 /**
- * Hands the call to a human: texts the on-call staff number with the reason and a short
- * summary, and marks the call so it's unmissable in the dashboard.
+ * Hands the call to a human: texts the team's staff through the notification service and marks
+ * the call so it's unmissable in the dashboard.
  */
 http.route({
   path: "/tools/escalate",
@@ -739,22 +924,27 @@ http.route({
       .filter(Boolean)
       .join(" ");
 
-    // Disabled: SMS alert to staff on escalation — turned off per request. The dashboard still
-    // marks the call as escalated below; only the outbound text is skipped. Re-enable by
-    // uncommenting this block.
-    const staffNumber = await ctx.runQuery(internal.orgSettings.staffPhoneNumberInternal, {});
-    const notified = false;
-    if (staffNumber) {
+    // Escalation alerts go out through the notification service (convex/notify.ts) to the
+    // team's staff, replacing the old direct-SMS block that was switched off. Each send is
+    // logged there, and a failure to enqueue or deliver can't fail the call: the dashboard marks
+    // the call as escalated below either way. SMS bodies carry a first name and unit only.
+    const isResidentIssue = reason === "urgent_tenant_issue";
+    const orgId = await resolveBookingOrg(ctx, conversationId, body.agent_id);
+    let notified = false;
+    let alreadyCovered = false;
+    if (orgId) {
       try {
-        // await ctx.runAction(internal.notifications.sendEscalationAlert, {
-        //   to: staffNumber,
-        //   reason,
-        //   summary: fullSummary,
-        //   callerPhone: callerPhone ?? "unknown",
-        // });
-        // notified = true;
-      } catch {
-        // Logged via the dashboard regardless; SMS delivery failure shouldn't break the call.
+        const result = await ctx.runMutation(internal.sarahTools.notifyEscalation, {
+          orgId,
+          elevenLabsConversationId: conversationId,
+          callerName: optString(callerName, 120),
+          unit: optString(livingArea, 60),
+          residentIssue: isResidentIssue,
+        });
+        notified = result.notified;
+        alreadyCovered = result.alreadyNotified;
+      } catch (err) {
+        console.error("[escalate] could not notify staff:", err);
       }
     }
 
@@ -767,7 +957,7 @@ http.route({
       elevenLabsConversationId: conversationId,
       reason,
       summary: fullSummary,
-      escalatedTo: notified ? staffNumber! : "unassigned",
+      escalatedTo: notified ? "staff" : "unassigned",
     });
 
     // A resident emergency (fire, gas leak, break-in) is escalated straight away rather than
@@ -776,7 +966,9 @@ http.route({
     // call has nothing to make isResidentCall recognise it as a resident call, so it fell into
     // the Leads list instead of the Tenants page. Logging it here, at max severity, is what puts
     // it on the right page.
-    if (reason === "urgent_tenant_issue") {
+    // Not when log_maintenance_request already filed this call as an emergency or urgent request:
+    // that request is the record, and a second Tenants-page row would duplicate it.
+    if (isResidentIssue && !alreadyCovered) {
       await ctx.runMutation(internal.tenants.logIssue, {
         elevenLabsConversationId: conversationId,
         callerName,
@@ -826,11 +1018,18 @@ http.route({
       category,
       severity,
       severity_reason: severityReason,
+      call_type: callTypeRaw,
     } = body;
 
     if (!conversationId || !reason) {
       return Response.json({ error: "missing conversation_id or reason" }, { status: 400 });
     }
+
+    // Only a known type is stored; an invented one is dropped, not guessed at.
+    const callType =
+      typeof callTypeRaw === "string" && (CALL_TYPES as readonly string[]).includes(callTypeRaw.trim().toLowerCase())
+        ? callTypeRaw.trim().toLowerCase()
+        : undefined;
 
     // Kept apart rather than collapsed into one field. The telephony number is always
     // correct; a spoken one is what they actually want to be called back on but goes through
@@ -851,6 +1050,7 @@ http.route({
       category,
       severity: clamped,
       severityReason,
+      callType,
     });
 
     await ctx.runMutation(internal.conversations.markTenantIssue, {
@@ -861,6 +1061,244 @@ http.route({
     });
 
     return Response.json({ logged: true, severity: clamped });
+  }),
+});
+
+/**
+ * Who is calling, from caller ID, so Sarah can CONFIRM rather than assume: "Am I speaking with
+ * Sam, in unit 4B?". Returns a first name and a unit label and nothing else. If they say no,
+ * the match is dropped and nothing further about the matched resident is ever said.
+ *
+ * Caller ID is not authentication, which is why this returns so little: a spoofed number can
+ * learn a first name and a unit label at most, and the agent's instructions say to treat the
+ * match as a question to the caller, not a fact.
+ */
+http.route({
+  path: "/tools/lookup-caller",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const body = await request.json();
+    const orgId = await resolveBookingOrg(ctx, body.conversation_id, body.agent_id);
+    const phone = realPhone(typeof body.caller_id === "string" ? body.caller_id : undefined);
+    const noMatch = {
+      matched: false,
+      message: "No match. Do not guess; ask the caller for their name, address and unit.",
+    };
+    if (!orgId || !phone) return Response.json(noMatch);
+    const found = await ctx.runQuery(internal.sarahTools.lookupCaller, { orgId, phone });
+    if (!found.matched) return Response.json(noMatch);
+    return Response.json({
+      matched: true,
+      first_name: found.firstName ?? null,
+      unit_label: found.unitLabel ?? null,
+      message:
+        "Possible match from caller ID. Confirm it by asking, for example: Am I speaking with " +
+        "first_name in unit unit_label? If they say no, ignore this and ask their name and " +
+        "unit. Never say anything else about this resident.",
+    });
+  }),
+});
+
+/**
+ * Spoken address + unit -> the stored unit label. Answers only whether there is a match: nothing
+ * about who lives there, so reading a unit number out loud can't leak a neighbour's details.
+ */
+http.route({
+  path: "/tools/find-unit",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const body = await request.json();
+    const spokenUnit = optString(body.spoken_unit, 60);
+    const orgId = await resolveBookingOrg(ctx, body.conversation_id, body.agent_id);
+    if (!orgId || !spokenUnit) return Response.json({ matched: false });
+    const found = await ctx.runQuery(internal.sarahTools.findUnit, {
+      orgId,
+      spokenAddress: optString(body.spoken_address, 300),
+      spokenUnit,
+    });
+    return Response.json(
+      found.matched ? { matched: true, unit_label: found.unitLabel ?? null } : { matched: false },
+    );
+  }),
+});
+
+/**
+ * Takes a resident's maintenance request (build plan F4). The model supplies the issue and its
+ * severity LEVEL; routing to an asset manager, the exception queue and staff alerts are all done
+ * by maintenance.createFromCall, not decided here.
+ *
+ * Safe to call repeatedly in one call: createFromCall upserts by the ElevenLabs conversation id,
+ * so a second call with fuller details updates the same request. That is what lets an
+ * emergency be logged immediately with almost nothing known and completed afterwards.
+ *
+ * Nothing here verifies who is calling. The name, address and unit are stored as given and
+ * matched to a unit server-side; a request that can't be matched lands in the exception queue
+ * for a person.
+ */
+http.route({
+  path: "/tools/log-maintenance-request",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const body = await request.json();
+    const conversationId: unknown = body.conversation_id;
+    if (typeof conversationId !== "string" || !conversationId) {
+      return Response.json({ error: "missing conversation_id" }, { status: 400 });
+    }
+
+    const issueType = typeof body.issue_type === "string" ? body.issue_type.trim().toLowerCase() : "";
+    if (!(ISSUE_TYPES as readonly string[]).includes(issueType)) {
+      return Response.json(
+        { logged: false, error: `issue_type must be one of: ${ISSUE_TYPES.join(", ")}.` },
+        { status: 400 },
+      );
+    }
+    const description = optString(body.description, 4000);
+    if (!description) {
+      return Response.json(
+        { logged: false, error: "description is required: one or two plain sentences on what is wrong." },
+        { status: 400 },
+      );
+    }
+    const requestedSeverity = parseSeverityLevel(body.severity);
+    if (!requestedSeverity) {
+      return Response.json(
+        { logged: false, error: "severity must be one of: emergency, urgent, routine, informational." },
+        { status: 400 },
+      );
+    }
+    // Tenant-responsibility items (bulbs, blinds, trash to the curb) are never a repair; the
+    // policy is that they are logged as informational, whatever level the model picked.
+    const severity = issueType === "tenant_responsibility" ? "informational" : requestedSeverity;
+
+    const callerName = optString(body.caller_name, 120);
+    const spokenUnit = optString(body.spoken_unit, 60);
+    const spokenAddress = optString(body.spoken_address, 300);
+    const callerNumber = realPhone(typeof body.caller_id === "string" ? body.caller_id : undefined);
+    const callbackNumber = realPhone(typeof body.callback_phone === "string" ? body.callback_phone : undefined);
+    const severityReason = optString(body.severity_reason, 500);
+    const summaryLine = `${severity} maintenance request (${issueType.replace(/_/g, " ")}): ${description}`;
+
+    const orgId = await resolveBookingOrg(ctx, conversationId, body.agent_id);
+
+    try {
+      if (!orgId) {
+        // The team can't be told yet (no conversations row, no agent id). Losing a request is
+        // worse than filing it in the older place: the resident-call record is backfilled with
+        // its team once the post-call webhook resolves the agent, and staff still see it.
+        await ctx.runMutation(internal.tenants.logIssue, {
+          elevenLabsConversationId: conversationId,
+          callerName,
+          unit: spokenUnit,
+          callerNumber: callerNumber ?? callbackNumber,
+          callbackNumber,
+          reason: description,
+          category: issueType,
+          severity: SEVERITY_LEVEL_SCORE[severity],
+          severityReason,
+        });
+      } else {
+        const propertyId = await ctx.runQuery(internal.sarahTools.matchPropertyId, {
+          orgId,
+          spokenAddress,
+        });
+        await ctx.runMutation(internal.maintenance.createFromCall, {
+          orgId,
+          elevenLabsConversationId: conversationId,
+          callerName,
+          callerNumber,
+          callbackNumber,
+          spokenAddress,
+          spokenUnit,
+          propertyId: propertyId ?? undefined,
+          issueType,
+          description,
+          firstNoticed: optString(body.first_noticed, 200),
+          answers: parseAnswers(body.answers),
+          pets: optString(body.pets, 300),
+          preferredAccessTimes: optString(body.preferred_access_times, 300),
+          severity,
+          severityScore: SEVERITY_LEVEL_SCORE[severity],
+          severityReason,
+        });
+      }
+
+      // Classifies the call as a resident/maintenance call so it stays out of the Leads list.
+      await ctx.runMutation(internal.conversations.markTenantIssue, {
+        elevenLabsConversationId: conversationId,
+        reason: description,
+        severity: SEVERITY_LEVEL_SCORE[severity],
+        callerNumber: callerNumber ?? callbackNumber,
+        summary: summaryLine,
+      });
+    } catch (err) {
+      console.error("[log-maintenance-request] failed:", err);
+      return Response.json(
+        {
+          logged: false,
+          error: "It could not be saved. Call this tool once more; if it fails again, escalate.",
+        },
+        { status: 500 },
+      );
+    }
+
+    return Response.json({ logged: true, severity });
+  }),
+});
+
+/**
+ * An owner who wants 518 to manage their property is not a renter. Stored on the call's
+ * qualifications row and texted to the executives (Alex). The SMS carries a first name only;
+ * the property details stay behind the login.
+ */
+http.route({
+  path: "/tools/owner-prospect",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const body = await request.json();
+    const conversationId: unknown = body.conversation_id;
+    if (typeof conversationId !== "string" || !conversationId) {
+      return Response.json({ error: "missing conversation_id" }, { status: 400 });
+    }
+    const name = optString(body.name, 120);
+    // The spoken number wins; caller ID is the fallback when they say to use the one they called from.
+    const phone =
+      realPhone(typeof body.phone === "string" ? body.phone : undefined) ??
+      realPhone(typeof body.caller_id === "string" ? body.caller_id : undefined);
+    if (!name || !phone) {
+      return Response.json({
+        recorded: false,
+        message: "Ask for their name and the best number to reach them on, then call this again.",
+      });
+    }
+
+    await ctx.runMutation(internal.qualifications.upsertByConversationId, {
+      elevenLabsConversationId: conversationId,
+      callerName: name,
+      callerPhone: phone,
+      ownerProspect: {
+        name,
+        phone,
+        email: optString(body.email, 200),
+        propertyAddress: optString(body.property_address, 300),
+        propertyDetails: optString(body.property_details, 1000),
+        notes: optString(body.notes, 1000),
+      },
+    });
+
+    let notified = false;
+    const orgId = await resolveBookingOrg(ctx, conversationId, body.agent_id);
+    if (orgId) {
+      try {
+        notified = await ctx.runMutation(internal.sarahTools.notifyOwnerProspect, { orgId, name });
+      } catch (err) {
+        console.error("[owner-prospect] could not notify:", err);
+      }
+    }
+    return Response.json({
+      recorded: true,
+      staff_notified: notified,
+      message: "Recorded. Tell them someone from the team will be in touch. Do not discuss fees or terms.",
+    });
   }),
 });
 

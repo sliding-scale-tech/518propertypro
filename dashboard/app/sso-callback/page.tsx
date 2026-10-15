@@ -82,8 +82,8 @@ export default function SSOCallbackPage() {
         continueSignUpUrl="/sign-up"
         verifyEmailAddressUrl="/sign-up"
         verifyPhoneNumberUrl="/sign-up"
-        signInFallbackRedirectUrl="/call"
-        signUpFallbackRedirectUrl="/call"
+        signInFallbackRedirectUrl="/home"
+        signUpFallbackRedirectUrl="/home"
       />
     </div>
   );

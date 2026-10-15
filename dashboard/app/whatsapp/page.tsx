@@ -28,6 +28,7 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useToast } from "@/components/toast";
 import { severityBand, type SeverityBand } from "@/convex/severity";
+import { RequireView } from "@/components/require-view";
 
 const SEVERITY_STYLES: Record<SeverityBand, string> = {
   high: "bg-destructive/15 text-destructive",
@@ -76,7 +77,7 @@ const STATUS_COPY: Record<string, { label: string; tone: string }> = {
   not_configured: { label: "Not configured", tone: "bg-destructive/15 text-destructive" },
 };
 
-export default function WhatsAppPage() {
+function WhatsAppPageInner() {
   const toast = useToast();
   const threads = useQuery(api.whatsapp.threads);
   const stats = useQuery(api.whatsapp.stats);
@@ -796,5 +797,13 @@ function StatCard({
       </div>
       <div className="mt-1.5 text-xl font-semibold tabular-nums">{value}</div>
     </div>
+  );
+}
+
+export default function WhatsAppPage() {
+  return (
+    <RequireView views={["admin"]}>
+      <WhatsAppPageInner />
+    </RequireView>
   );
 }

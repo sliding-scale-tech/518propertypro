@@ -6,8 +6,9 @@ import { ArrowLeft, Send, MessageCircle, Bot, User, Undo2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { RequireView } from "@/components/require-view";
 
-export default function MessagesPage() {
+function MessagesPageInner() {
   const threads = useQuery(api.threads.list);
   const [selected, setSelected] = useState<Id<"threads"> | null>(null);
 
@@ -173,5 +174,13 @@ function Thread({ threadId, onBack }: { threadId: Id<"threads">; onBack: () => v
         </button>
       </div>
     </div>
+  );
+}
+
+export default function MessagesPage() {
+  return (
+    <RequireView views={["admin"]}>
+      <MessagesPageInner />
+    </RequireView>
   );
 }

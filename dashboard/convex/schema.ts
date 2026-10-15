@@ -1,6 +1,9 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
+import { jobRoleValidator, notifyChannelValidator } from "./jobRoles";
 import { propertyAddressValidator } from "./placesApi";
+import { auditEntityValidator } from "./auditEntities";
+import { sarahConfigValidator } from "./sarahConfigLib";
 
 export default defineSchema({
   // Mirrors Clerk users via the /auth webhook (user.created / session.created / user.updated).
@@ -49,6 +52,13 @@ export default defineSchema({
     // Deliberately a plain union and not a Clerk permission catalog — the finer-grained limits
     // discussed for later are a change to this column, not a new authorization system.
     role: v.union(v.literal("admin"), v.literal("member")),
+    // What the person does for the business (PRD §4), separate from `role` above, which is only
+    // team administration. A person can hold several (Pat may also be an asset manager). All
+    // optional so rows written before job roles existed stay valid; absent reads as none.
+    jobRoles: v.optional(v.array(jobRoleValidator)),
+    phone: v.optional(v.string()), // E.164, for SMS
+    notifyBy: v.optional(v.array(notifyChannelValidator)),
+    unavailableUntil: v.optional(v.number()), // out-of-office flag for AM fallback
     createdAt: v.number(),
   })
     .index("by_user", ["userId"])
@@ -63,6 +73,9 @@ export default defineSchema({
     orgId: v.id("organizations"),
     email: v.string(), // always lowercased, so lookups cannot miss on casing
     role: v.union(v.literal("admin"), v.literal("member")),
+    // Copied onto the membership when the invite is redeemed.
+    jobRoles: v.optional(v.array(jobRoleValidator)),
+    phone: v.optional(v.string()),
     tokenHash: v.string(),
     createdBy: v.id("users"),
     createdAt: v.number(),
@@ -211,6 +224,10 @@ export default defineSchema({
     ),
     escalatedTo: v.optional(v.string()),
     summary: v.optional(v.string()),
+    // Follow-up queue (failed or unclear calls nobody has called back yet). Set by
+    // conversations.markFollowedUp; absent means nobody has dealt with it.
+    followedUpAt: v.optional(v.number()),
+    followedUpBy: v.optional(v.id("users")),
   })
     .index("by_agent", ["agentId"])
     .index("by_started", ["startedAt"])
@@ -269,11 +286,19 @@ export default defineSchema({
     category: v.optional(v.string()),
     dueDate: v.optional(v.number()),
     tags: v.optional(v.array(v.string())),
+    // Task as follow-up work: who owns it and which record it is about. All optional so tasks
+    // created before maintenance existed stay valid. Links are verified against the creator's
+    // org on write, never trusted from the client.
+    assigneeUserId: v.optional(v.id("users")),
+    unitId: v.optional(v.id("units")),
+    requestId: v.optional(v.id("maintenanceRequests")),
+    workOrderId: v.optional(v.id("workOrders")),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index("by_org", ["orgId"])
-    .index("by_user", ["userId"]),
+    .index("by_user", ["userId"])
+    .index("by_assignee", ["assigneeUserId"]),
 
   // Files attached to a task from the Create task modal or the detail panel's Attach files
   // button. `taskId` is optional because the create modal uploads to storage (so the file picks
@@ -350,6 +375,10 @@ export default defineSchema({
     // and what Sarah tells a renter when she books. Never cloned from the template: it is one
     // specific building, not a sensible default for someone else's.
     address: v.optional(propertyAddressValidator),
+    // Multi-property: a team can now hold several rows here. `properties.current` (Sarah's
+    // tools) still returns the oldest one, so adding buildings never changes what she reads.
+    isPilot: v.optional(v.boolean()), // pilot buildings get maintenance intake first
+    utilityGasPhone: v.optional(v.string()), // E.164, the gas company's emergency line
     updatedAt: v.number(),
   })
     .index("by_org", ["orgId"])
@@ -396,6 +425,20 @@ export default defineSchema({
     nearMiss: v.optional(v.boolean()),
     tourSlot: v.optional(v.string()),
     tourConfirmed: v.boolean(),
+
+    // Set by route_owner_prospect: someone who owns property and wants 518 to manage it, not a
+    // renter. Lives on the call's qualifications row because that is the one per-call capture
+    // record the lead/call views already join to.
+    ownerProspect: v.optional(
+      v.object({
+        name: v.string(),
+        phone: v.string(),
+        email: v.optional(v.string()),
+        propertyAddress: v.optional(v.string()),
+        propertyDetails: v.optional(v.string()),
+        notes: v.optional(v.string()),
+      }),
+    ),
 
     // Answers to the property manager's own pre-screening questions (see screeningQuestions).
     // `question` is denormalized on purpose: a manager who later rewrites or deletes a
@@ -508,6 +551,9 @@ export default defineSchema({
     category: v.optional(v.string()),
     severity: v.number(), // 1-10, clamped server-side by clampSeverity
     severityReason: v.optional(v.string()),
+    // What kind of non-maintenance resident call this was (rent, portal_login, application, ...).
+    // A free string on purpose: the allowed set lives in http.ts, so a new call type needs no migration.
+    callType: v.optional(v.string()),
     // Set the first time staff overrides the score, so the agent's original call is never lost.
     originalSeverity: v.optional(v.number()),
     status: v.union(v.literal("open"), v.literal("resolved")),
@@ -611,4 +657,336 @@ export default defineSchema({
   })
     .index("by_thread", ["threadId"])
     .index("by_created", ["createdAt"]),
+
+  // One row per rentable unit. Separate from the `properties.units` array (unit *types* Sarah
+  // quotes from), which stays as is.
+  //
+  // assetManagerUserId is required, not optional: every unit has exactly one designated asset
+  // manager, because maintenance intake routes to that person and a unit without one would have
+  // requests nobody owns. Making it a required field turns the rule into a fact about the data.
+  // All writes must go through convex/units.ts, the only module that inserts or patches this
+  // table; it validates the AM and audits changes. Never ctx.db.insert("units") anywhere else.
+  units: defineTable({
+    orgId: v.string(),
+    propertyId: v.id("properties"),
+    unitNumber: v.string(),
+    unitNumberKey: v.string(), // normalizeUnitKey(unitNumber), for matching what callers say
+    floor: v.optional(v.number()),
+    isTopFloor: v.optional(v.boolean()), // drives the roof/leak script
+    bedrooms: v.string(),
+    bathrooms: v.optional(v.number()),
+    parking: v.optional(v.string()),
+    rent: v.optional(v.number()),
+    available: v.boolean(), // Sarah offers ONLY when true
+    availableFrom: v.optional(v.string()),
+    leasingFacts: v.optional(v.string()),
+    assetManagerUserId: v.id("users"),
+    maintenanceIntakeActive: v.boolean(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_org", ["orgId"])
+    .index("by_property", ["propertyId"])
+    .index("by_property_and_unit_key", ["propertyId", "unitNumberKey"])
+    .index("by_asset_manager", ["assetManagerUserId"]),
+
+  // Append-only history, written in the same mutation as the change it describes so a change
+  // never exists without its trail. convex/audit.ts exports no update or delete.
+  auditEvents: defineTable({
+    orgId: v.string(),
+    entity: auditEntityValidator,
+    entityId: v.string(),
+    action: v.string(), // "am_changed", "unit_created", "job_roles_set", ...
+    actorUserId: v.optional(v.id("users")), // absent = Sarah/system
+    actorLabel: v.string(), // the person's name at that time, or "System"
+    from: v.optional(v.string()),
+    to: v.optional(v.string()),
+    note: v.optional(v.string()),
+    at: v.number(),
+  })
+    .index("by_entity", ["entity", "entityId", "at"])
+    .index("by_org_and_at", ["orgId", "at"]),
+
+  // --- Residents (F3) --------------------------------------------------------
+  //
+  // The tenant directory Sarah's caller-ID match runs against. One person, one unit; roommates
+  // are separate rows that may share a phone, which is why lookup yields a list, not a row.
+  residents: defineTable({
+    orgId: v.string(),
+    unitId: v.id("units"),
+    fullName: v.string(),
+    phones: v.array(v.string()), // E.164. Source of truth; residentPhones mirrors it for lookup.
+    email: v.optional(v.string()),
+    leaseEnd: v.optional(v.string()), // YYYY-MM-DD
+    active: v.boolean(), // false = moved out / removed. Never hard-deleted, history points at it.
+    source: v.union(v.literal("manual"), v.literal("buildium_csv")),
+    updatedAt: v.number(),
+  })
+    .index("by_org", ["orgId"])
+    .index("by_unit", ["unitId"]),
+
+  // Convex cannot index the elements of an array, so each phone gets its own row. Caller ID ->
+  // resident is then one indexed read. Rows exist only for ACTIVE residents (removed on
+  // deactivate), so a moved-out tenant's number never routes a call to their old unit.
+  residentPhones: defineTable({
+    orgId: v.string(),
+    residentId: v.id("residents"),
+    phone: v.string(),
+  })
+    .index("by_org_and_phone", ["orgId", "phone"])
+    .index("by_resident", ["residentId"]),
+
+  // --- Maintenance requests (F4) ---------------------------------------------
+  //
+  // The intake record, deliberately separate from a work order: no work order exists until a
+  // human decides one should (PRD 6.3).
+  maintenanceRequests: defineTable({
+    orgId: v.string(),
+    number: v.number(), // MR-1042, from orgCounters
+    source: v.union(v.literal("phone"), v.literal("manual")),
+    elevenLabsConversationId: v.optional(v.string()),
+    conversationId: v.optional(v.id("conversations")),
+
+    // Caller and location
+    callerName: v.optional(v.string()),
+    callerNumber: v.optional(v.string()), // telephony caller ID (trusted)
+    callbackNumber: v.optional(v.string()), // spoken (may be misheard)
+    spokenAddress: v.optional(v.string()),
+    spokenUnit: v.optional(v.string()),
+    residentId: v.optional(v.id("residents")),
+    propertyId: v.optional(v.id("properties")),
+    unitId: v.optional(v.id("units")),
+    matchConfidence: v.union(v.literal("exact"), v.literal("caller_id"), v.literal("none")),
+
+    // Issue
+    issueType: v.string(), // electrical | water_leak | broken_item | gas | fire | flooding | tenant_responsibility | other
+    description: v.string(),
+    firstNoticed: v.optional(v.string()),
+    answers: v.array(v.object({ key: v.string(), question: v.string(), value: v.string() })),
+    pets: v.optional(v.string()),
+    preferredAccessTimes: v.optional(v.string()),
+    severity: v.union(
+      v.literal("emergency"),
+      v.literal("urgent"),
+      v.literal("routine"),
+      v.literal("informational"),
+    ),
+    severityScore: v.optional(v.number()), // 1-10, continuity with tenantIssues
+    severityReason: v.optional(v.string()),
+    originalSeverity: v.optional(v.string()), // preserved when staff override
+    mediaRequested: v.boolean(),
+
+    // Routing
+    assignedAssetManagerUserId: v.optional(v.id("users")),
+    routeReason: v.optional(v.string()),
+    inExceptionQueue: v.boolean(),
+
+    status: v.union(
+      v.literal("new"),
+      v.literal("under_review"),
+      v.literal("more_info_needed"),
+      v.literal("forwarded_to_pat"),
+      v.literal("work_order_created"),
+      v.literal("closed_out_of_scope"),
+      v.literal("closed_duplicate"),
+    ),
+    // "Validate" keeps the status at under_review and sets this; forwarding requires it.
+    validatedAt: v.optional(v.number()),
+    validatedBy: v.optional(v.id("users")),
+    closeReason: v.optional(v.string()),
+    possibleDuplicateOf: v.optional(v.id("maintenanceRequests")),
+    nextAction: v.optional(v.string()),
+    // Unread indicator: set the first time the ASSIGNED asset manager opens it.
+    firstViewedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_org_and_status", ["orgId", "status"])
+    .index("by_org_and_created", ["orgId", "createdAt"])
+    .index("by_assigned_am_and_status", ["assignedAssetManagerUserId", "status"])
+    .index("by_unit_and_created", ["unitId", "createdAt"])
+    .index("by_exception", ["orgId", "inExceptionQueue"])
+    .index("by_conversation", ["elevenLabsConversationId"]),
+
+  maintenanceMedia: defineTable({
+    orgId: v.string(),
+    requestId: v.id("maintenanceRequests"),
+    storageId: v.id("_storage"),
+    kind: v.union(v.literal("photo"), v.literal("video")),
+    uploadedBy: v.union(v.literal("tenant"), v.literal("staff")),
+    createdAt: v.number(),
+  })
+    .index("by_request", ["requestId"])
+    .index("by_org", ["orgId"])
+    // Refuses attaching one stored file twice (or one that another record already claimed).
+    .index("by_storage", ["storageId"]),
+
+  // Per-org monotonic sequences (MR-n, WO-n). Read-modify-write inside the creating mutation,
+  // which Convex serialises, so two concurrent creates cannot receive the same number.
+  orgCounters: defineTable({
+    orgId: v.string(),
+    name: v.string(), // "maintenanceRequest" | "workOrder"
+    value: v.number(),
+  }).index("by_org_and_name", ["orgId", "name"]),
+
+  // --- Work orders (F5) ------------------------------------------------------
+  workOrders: defineTable({
+    orgId: v.string(),
+    number: v.number(), // WO-2051
+    requestId: v.optional(v.id("maintenanceRequests")), // absent for manual WOs
+    unitId: v.id("units"),
+    propertyId: v.id("properties"),
+    title: v.string(),
+    scope: v.string(),
+    priority: v.union(v.literal("emergency"), v.literal("urgent"), v.literal("routine")),
+    checklist: v.array(
+      v.object({
+        id: v.string(),
+        label: v.string(),
+        required: v.boolean(),
+        done: v.boolean(),
+        doneAt: v.optional(v.number()),
+        doneBy: v.optional(v.id("users")),
+      }),
+    ),
+    technicianUserId: v.optional(v.id("users")),
+    accessNotes: v.optional(v.string()),
+    // What the technician must provide before "submit completed" is accepted (PRD 6.5).
+    requiredOnSubmit: v.object({
+      photos: v.boolean(),
+      hours: v.boolean(),
+      receipts: v.boolean(),
+      notes: v.boolean(),
+    }),
+    status: v.union(
+      v.literal("created"),
+      v.literal("assigned"),
+      v.literal("in_progress"),
+      v.literal("completed"),
+      v.literal("reviewed_closed"),
+      v.literal("cancelled"),
+    ),
+    dueDate: v.optional(v.number()),
+    cancelReason: v.optional(v.string()),
+    createdBy: v.id("users"),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    completedAt: v.optional(v.number()),
+    closedAt: v.optional(v.number()),
+  })
+    .index("by_org_and_status", ["orgId", "status"])
+    .index("by_technician_and_status", ["technicianUserId", "status"])
+    .index("by_request", ["requestId"])
+    .index("by_unit", ["unitId"]),
+
+  workOrderFiles: defineTable({
+    orgId: v.string(),
+    workOrderId: v.id("workOrders"),
+    unitId: v.id("units"),
+    storageId: v.id("_storage"),
+    kind: v.union(v.literal("completion_photo"), v.literal("receipt"), v.literal("other")),
+    uploadedByUserId: v.id("users"),
+    createdAt: v.number(),
+  })
+    .index("by_work_order", ["workOrderId"])
+    .index("by_org", ["orgId"])
+    .index("by_storage", ["storageId"]),
+
+  workOrderTime: defineTable({
+    orgId: v.string(),
+    workOrderId: v.id("workOrders"),
+    technicianUserId: v.id("users"),
+    date: v.string(), // YYYY-MM-DD
+    hours: v.number(),
+    note: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_work_order", ["workOrderId"])
+    .index("by_org", ["orgId"]),
+
+  // Money is integer cents everywhere (ROS totals later must not accumulate float error).
+  workOrderExpenses: defineTable({
+    orgId: v.string(),
+    workOrderId: v.id("workOrders"),
+    technicianUserId: v.id("users"),
+    kind: v.union(v.literal("material"), v.literal("expense")),
+    description: v.string(),
+    amountCents: v.number(),
+    quantity: v.optional(v.number()),
+    receiptFileId: v.optional(v.id("workOrderFiles")),
+    reimbursable: v.optional(v.boolean()),
+    createdAt: v.number(),
+  })
+    .index("by_work_order", ["workOrderId"])
+    .index("by_org", ["orgId"]),
+
+  workOrderNotes: defineTable({
+    orgId: v.string(),
+    workOrderId: v.id("workOrders"),
+    authorUserId: v.id("users"),
+    body: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_work_order", ["workOrderId"])
+    .index("by_org", ["orgId"]),
+
+  // Editable default checklist per issue type; workOrders.checklistFor falls back to built-ins.
+  checklistTemplates: defineTable({
+    orgId: v.string(),
+    issueType: v.string(),
+    items: v.array(v.string()),
+  }).index("by_org_and_issue_type", ["orgId", "issueType"]),
+
+  // --- Notifications (F7) ----------------------------------------------------
+  // One row per send attempt so failures are visible. The phone is stored as its last four
+  // digits only: the log needs to say "who", not become a second copy of the contact list.
+  notificationLog: defineTable({
+    orgId: v.string(),
+    userId: v.optional(v.id("users")),
+    phoneLast4: v.optional(v.string()),
+    template: v.string(),
+    channel: v.literal("sms"),
+    status: v.union(v.literal("sent"), v.literal("failed"), v.literal("skipped")),
+    error: v.optional(v.string()),
+    createdAt: v.number(),
+  }).index("by_org_and_created", ["orgId", "createdAt"]),
+
+  // --- Public token links (F8) -----------------------------------------------
+  // Same pattern as invites: only a SHA-256 of the token is stored, so a dump of this table
+  // cannot be replayed. Expiry and a use cap are enforced when a link is consumed.
+  publicLinks: defineTable({
+    orgId: v.string(),
+    purpose: v.union(v.literal("maintenance_media"), v.literal("payment")),
+    tokenHash: v.string(),
+    targetId: v.string(), // maintenanceRequests id or payment id
+    expiresAt: v.number(),
+    maxUses: v.number(),
+    useCount: v.number(),
+    usedAt: v.optional(v.number()), // set when the cap is reached
+    createdAt: v.number(),
+  })
+    .index("by_token_hash", ["tokenHash"])
+    .index("by_org", ["orgId"]),
+  // --- Sarah configuration (P17) ---------------------------------------------
+  // One row per org. `draft` is what /sarah edits; `published` is what the live agent was last
+  // composed from. Approval stamps inside the config are written only by sarahConfig.approve.
+  sarahConfig: defineTable({
+    orgId: v.string(),
+    draft: sarahConfigValidator,
+    published: v.optional(sarahConfigValidator),
+    publishedAt: v.optional(v.number()),
+    publishedBy: v.optional(v.id("users")),
+    version: v.number(), // 0 = never published
+    updatedAt: v.number(),
+  }).index("by_org", ["orgId"]),
+
+  // Every publish, for rollback and history.
+  sarahConfigVersions: defineTable({
+    orgId: v.string(),
+    version: v.number(),
+    config: sarahConfigValidator,
+    publishedBy: v.id("users"),
+    publishedAt: v.number(),
+    note: v.optional(v.string()),
+  }).index("by_org_and_version", ["orgId", "version"]),
 });

@@ -14,8 +14,9 @@ import {
 import { SEVERITY_RUBRIC } from "@/convex/severity";
 import { WA_DEFAULT_PROMPT } from "@/convex/waPrompt";
 import { Bot, Users, Gauge, AlertTriangle, MessageCircle } from "lucide-react";
+import { RequireView } from "@/components/require-view";
 
-export default function SettingsPage() {
+function SettingsPageInner() {
   const toast = useToast();
   const agent = useQuery(api.agents.current);
   const saveAgent = useAction(api.agents.saveAgent);
@@ -411,5 +412,13 @@ function Field({
       {hint && <span className="block text-xs text-muted-foreground">{hint}</span>}
       {children}
     </label>
+  );
+}
+
+export default function SettingsPage() {
+  return (
+    <RequireView views={["admin"]}>
+      <SettingsPageInner />
+    </RequireView>
   );
 }

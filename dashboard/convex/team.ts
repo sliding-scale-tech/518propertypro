@@ -11,8 +11,12 @@ import {
 } from "./_generated/server";
 import type { MutationCtx } from "./_generated/server";
 import { appBaseUrl } from "./appUrl";
+import { purgeOrgAudit, writeAudit } from "./audit";
 import {
   currentOrg,
+  hasJobRole,
+  viewFor,
+  requireOrg,
   requireOrgAdmin,
   requireOrgId,
   requireUser,
@@ -20,7 +24,15 @@ import {
   tenantOrgId,
 } from "./authz";
 import * as el from "./elevenLabsApi";
+import {
+  appRoleOf,
+  appRoleValidator,
+  jobRoleValidator,
+  jobRolesFor,
+  notifyChannelValidator,
+} from "./jobRoles";
 import { sendEmail } from "./resendApi";
+import { countOwnedBy, purgeOrgUnits } from "./units";
 
 /**
  * Teams, members and invitations.
@@ -33,6 +45,23 @@ import { sendEmail } from "./resendApi";
 /** Long enough that guessing is hopeless, short enough to survive an email client's line wrap. */
 const TOKEN_BYTES = 32;
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_UNAVAILABLE_MS = 365 * 24 * 60 * 60 * 1000;
+
+/** E.164: a plus, a non-zero first digit, 8-15 digits in all. SMS routing breaks on anything else. */
+const E164 = /^\+[1-9]\d{7,14}$/;
+
+function assertE164(phone: string): string {
+  const trimmed = phone.trim();
+  if (!E164.test(trimmed)) {
+    throw new Error("Enter the phone number in international format, like +15185550123.");
+  }
+  return trimmed;
+}
+
+/** Same sentence everywhere a member is blocked or removed while they still own units. */
+function ownsUnitsError(count: number): Error {
+  return new Error(`Reassign their ${count} unit${count === 1 ? "" : "s"} first.`);
+}
 
 // --- Reads ----------------------------------------------------------------
 
@@ -52,9 +81,13 @@ export const overview = query({
       .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
       .collect();
 
+    // Phone numbers are PII: only the people who dispatch work (and the owner of the number)
+    // get them. Everyone else on the roster sees the member, not how to reach them.
+    const canSeePhones = hasJobRole(org, "executive", "maintenance_lead");
+
     const members = await Promise.all(
       memberships.map(async (m) => {
-        const [user, hours, connection] = await Promise.all([
+        const [user, hours, connection, unitsOwned] = await Promise.all([
           ctx.db.get(m.userId),
           ctx.db
             .query("tourAvailability")
@@ -64,6 +97,7 @@ export const overview = query({
             .query("googleCalendarConnections")
             .withIndex("by_user", (q) => q.eq("userId", m.userId))
             .unique(),
+          countOwnedBy(ctx, m.userId),
         ]);
         const name = [user?.firstName, user?.lastName].filter(Boolean).join(" ").trim();
         const takingTours = hours?.availableForTours ?? true;
@@ -74,6 +108,12 @@ export const overview = query({
           email: user?.email ?? "",
           imageUrl: user?.imageUrl ?? null,
           role: m.role,
+          jobRoles: m.jobRoles ?? [],
+          appRole: appRoleOf(m.role, m.jobRoles ?? []),
+          phone: canSeePhones || m.userId === org.user._id ? (m.phone ?? null) : null,
+          notifyBy: m.notifyBy ?? [],
+          unavailableUntil: m.unavailableUntil ?? null,
+          unitsOwned,
           isSelf: m.userId === org.user._id,
           joinedAt: m.createdAt,
           takingTours,
@@ -105,6 +145,8 @@ export const overview = query({
             id: i._id,
             email: i.email,
             role: i.role,
+            jobRoles: i.jobRoles ?? [],
+            appRole: appRoleOf(i.role, i.jobRoles ?? []),
             createdAt: i.createdAt,
             expiresAt: i.expiresAt,
           }))
@@ -119,6 +161,22 @@ export const overview = query({
         return a.joinedAt - b.joinedAt;
       }),
       invitations,
+    };
+  },
+});
+
+/** What the signed-in person may see: drives which of the app's views they land in. */
+export const myAccess = query({
+  args: {},
+  handler: async (ctx) => {
+    const org = await currentOrg(ctx);
+    if (!org) return null;
+    return {
+      view: viewFor(org.isAdmin, org.jobRoles),
+      isAdmin: org.isAdmin,
+      jobRoles: org.jobRoles,
+      canManageMaintenance: hasJobRole(org, "maintenance_lead", "simplr_admin"),
+      isExecutive: org.jobRoles.includes("executive"),
     };
   },
 });
@@ -148,7 +206,212 @@ export const removeMember = mutation({
     if (membership.userId === org.user._id) {
       throw new Error("You cannot remove yourself from your own team.");
     }
+
+    // Units must always have an asset manager, so someone who still owns units can't leave.
+    const owned = await countOwnedBy(ctx, membership.userId);
+    if (owned > 0) throw ownsUnitsError(owned);
+
+    await writeAudit(ctx, {
+      orgId: org.orgId,
+      entity: "membership",
+      entityId: args.membershipId,
+      action: "member_removed",
+      actorUserId: org.user._id,
+      from: (membership.jobRoles ?? []).join(","),
+    });
     await ctx.db.delete(args.membershipId);
+  },
+});
+
+/**
+ * Replaces a member's job roles. Admin-only: handing out simplr_admin or executive is handing
+ * out reach, so it sits with team administration rather than with the job roles it grants.
+ */
+export const setJobRoles = mutation({
+  args: { userId: v.id("users"), jobRoles: v.array(jobRoleValidator) },
+  handler: async (ctx, args) => {
+    const org = await requireOrgAdmin(ctx);
+    const membership = await ctx.db
+      .query("memberships")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
+      .first();
+    if (!membership || membership.orgId !== org.orgId) throw new Error("Member not found.");
+
+    const next = [...new Set(args.jobRoles)];
+    const before = membership.jobRoles ?? [];
+
+    // Dropping asset_manager from someone who owns units would leave those units pointing at a
+    // person who can no longer be their AM; they have to be reassigned first.
+    if (before.includes("asset_manager") && !next.includes("asset_manager")) {
+      const owned = await countOwnedBy(ctx, args.userId);
+      if (owned > 0) throw ownsUnitsError(owned);
+    }
+
+    await ctx.db.patch(membership._id, { jobRoles: next });
+    await writeAudit(ctx, {
+      orgId: org.orgId,
+      entity: "membership",
+      entityId: membership._id,
+      action: "job_roles_set",
+      actorUserId: org.user._id,
+      from: before.join(","),
+      to: next.join(","),
+    });
+  },
+});
+
+/**
+ * Sets a member's app role (Admin / Asset manager / Technician), writing both the membership
+ * role and the job roles in one patch so they can never disagree. Admin-only.
+ */
+export const setAppRole = mutation({
+  args: { userId: v.id("users"), appRole: appRoleValidator },
+  handler: async (ctx, args) => {
+    const org = await requireOrgAdmin(ctx);
+    const membership = await ctx.db
+      .query("memberships")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
+      .first();
+    if (!membership || membership.orgId !== org.orgId) throw new Error("Member not found.");
+
+    const before = membership.jobRoles ?? [];
+    const next = jobRolesFor(args.appRole);
+    const wasAdmin = membership.role === "admin";
+
+    if (wasAdmin && next.role !== "admin") {
+      // Locking yourself out is the easy mistake; another admin can make the change instead.
+      if (membership.userId === org.user._id) {
+        throw new Error("Ask another admin to change your role.");
+      }
+      const members = await ctx.db
+        .query("memberships")
+        .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
+        .collect();
+      if (!members.some((m) => m._id !== membership._id && m.role === "admin")) {
+        throw new Error("The team needs at least one admin.");
+      }
+    }
+
+    // Leaving asset_manager while owning units would strand those units; reassign them first.
+    if (before.includes("asset_manager") && !next.jobRoles.includes("asset_manager")) {
+      const owned = await countOwnedBy(ctx, args.userId);
+      if (owned > 0) throw ownsUnitsError(owned);
+    }
+
+    await ctx.db.patch(membership._id, { role: next.role, jobRoles: next.jobRoles });
+    await writeAudit(ctx, {
+      orgId: org.orgId,
+      entity: "membership",
+      entityId: membership._id,
+      action: "app_role_set",
+      actorUserId: org.user._id,
+      from: `${membership.role}:${before.join(",")}`,
+      to: `${next.role}:${next.jobRoles.join(",")}`,
+    });
+  },
+});
+
+/**
+ * Phone and notification channels. An admin can set anyone's; everyone can set their own, since
+ * it is their number and their inbox. The number itself is kept out of the audit row (PII).
+ */
+export const setContact = mutation({
+  args: {
+    userId: v.id("users"),
+    phone: v.optional(v.string()), // "" clears it
+    notifyBy: v.optional(v.array(notifyChannelValidator)),
+  },
+  handler: async (ctx, args) => {
+    const org = await requireOrg(ctx);
+    if (!org.isAdmin && args.userId !== org.user._id) {
+      throw new Error("You don't have access to that.");
+    }
+    const membership = await ctx.db
+      .query("memberships")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
+      .first();
+    if (!membership || membership.orgId !== org.orgId) throw new Error("Member not found.");
+
+    // Fields are picked one by one — never spread args into the row.
+    const patch: { phone?: string; notifyBy?: Array<"sms" | "email" | "push"> } = {};
+    if (args.phone !== undefined) {
+      patch.phone = args.phone.trim() === "" ? undefined : assertE164(args.phone);
+    }
+    if (args.notifyBy !== undefined) patch.notifyBy = [...new Set(args.notifyBy)];
+    if (!("phone" in patch) && !("notifyBy" in patch)) return;
+
+    await ctx.db.patch(membership._id, patch);
+    await writeAudit(ctx, {
+      orgId: org.orgId,
+      entity: "membership",
+      entityId: membership._id,
+      action: "contact_updated",
+      actorUserId: org.user._id,
+      note: [
+        args.phone !== undefined ? "phone" : null,
+        args.notifyBy !== undefined ? `notifyBy=${patch.notifyBy?.join(",")}` : null,
+      ]
+        .filter(Boolean)
+        .join("; "),
+    });
+  },
+});
+
+/** Out-of-office flag that sends asset-manager work to the fallback. `until` omitted clears it. */
+export const setUnavailable = mutation({
+  args: { userId: v.id("users"), until: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    const org = await requireOrg(ctx);
+    if (args.userId !== org.user._id && !hasJobRole(org, "executive", "maintenance_lead")) {
+      throw new Error("You don't have access to that.");
+    }
+    const membership = await ctx.db
+      .query("memberships")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
+      .first();
+    if (!membership || membership.orgId !== org.orgId) throw new Error("Member not found.");
+
+    const now = Date.now();
+    if (args.until !== undefined) {
+      // A past or absurdly distant date is a typo, and a far-future one silently parks a
+      // person's work forever.
+      if (!Number.isFinite(args.until) || args.until <= now) {
+        throw new Error("Pick a time in the future.");
+      }
+      if (args.until > now + MAX_UNAVAILABLE_MS) throw new Error("That is too far ahead.");
+    }
+
+    await ctx.db.patch(membership._id, { unavailableUntil: args.until });
+    await writeAudit(ctx, {
+      orgId: org.orgId,
+      entity: "membership",
+      entityId: membership._id,
+      action: "unavailable_set",
+      actorUserId: org.user._id,
+      from: membership.unavailableUntil ? String(membership.unavailableUntil) : undefined,
+      to: args.until ? String(args.until) : undefined,
+    });
+  },
+});
+
+/**
+ * One-off: gives every membership that predates job roles a value. Team admins become
+ * simplr_admin (they already act as one — see authz.hasJobRole); everyone else starts with none
+ * until an admin assigns roles on the Team page. Idempotent: rows that already have jobRoles
+ * (even an empty array) are left alone.
+ *
+ * Run it with:  npx convex run team:backfillJobRoles
+ */
+export const backfillJobRoles = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    let updated = 0;
+    for (const m of await ctx.db.query("memberships").collect()) {
+      if (m.jobRoles !== undefined) continue;
+      await ctx.db.patch(m._id, { jobRoles: m.role === "admin" ? ["simplr_admin"] : [] });
+      updated += 1;
+    }
+    return { updated };
   },
 });
 
@@ -171,10 +434,30 @@ export const revokeInvite = mutation({
  * available in Convex's deterministic mutation runtime) and because it sends mail.
  */
 export const invite = action({
-  args: { email: v.string(), role: v.optional(v.union(v.literal("admin"), v.literal("member"))) },
+  args: {
+    email: v.string(),
+    role: v.optional(v.union(v.literal("admin"), v.literal("member"))),
+    jobRoles: v.optional(v.array(jobRoleValidator)),
+    // Preferred: when given, role and jobRoles above are ignored and derived from it.
+    appRole: v.optional(appRoleValidator),
+    phone: v.optional(v.string()),
+  },
   handler: async (ctx, args): Promise<{ email: string }> => {
     const { orgId, isAdmin, userId } = await requireOrgId(ctx);
     if (!isAdmin) throw new Error("Only a team admin can do that.");
+    const phone = args.phone?.trim() ? assertE164(args.phone) : undefined;
+
+    const derived = args.appRole ? jobRolesFor(args.appRole) : null;
+    const jobRoles = derived ? derived.jobRoles : [...new Set(args.jobRoles ?? [])];
+    if (jobRoles.length === 0) throw new Error("Pick a role for this person.");
+    // An admin invite must carry an admin-flavoured job role, so they land in the admin view.
+    const role = derived ? derived.role : (args.role ?? "member");
+    if (
+      role === "admin" &&
+      !jobRoles.some((r) => r === "executive" || r === "maintenance_lead" || r === "simplr_admin")
+    ) {
+      throw new Error("Pick a role for this person.");
+    }
 
     const email = args.email.trim().toLowerCase();
     if (!email.includes("@") || email.length < 3) throw new Error("Enter a valid email address.");
@@ -183,7 +466,9 @@ export const invite = action({
     const created: { orgName: string } = await ctx.runMutation(internal.team.recordInvite, {
       orgId,
       email,
-      role: args.role ?? "member",
+      role,
+      jobRoles,
+      phone,
       tokenHash: await sha256(token),
       createdBy: userId,
       expiresAt: Date.now() + INVITE_TTL_MS,
@@ -228,6 +513,8 @@ export const recordInvite = internalMutation({
     orgId: v.id("organizations"),
     email: v.string(),
     role: v.union(v.literal("admin"), v.literal("member")),
+    jobRoles: v.optional(v.array(jobRoleValidator)),
+    phone: v.optional(v.string()),
     tokenHash: v.string(),
     createdBy: v.id("users"),
     expiresAt: v.number(),
@@ -307,6 +594,8 @@ export const redeemInvite = internalMutation({
       orgId: invite.orgId,
       userId: user._id,
       role: invite.role,
+      jobRoles: invite.jobRoles,
+      phone: invite.phone,
       createdAt: Date.now(),
     });
     await ctx.db.patch(invite._id, { acceptedAt: Date.now() });
@@ -640,6 +929,95 @@ export const deleteOrgRows = internalMutation({
       await drop(table, rows as never[]);
     }
 
+    // New maintenance-era tables. Each has a by_org-prefixed index, so these are indexed reads.
+    // Uploaded files are removed from storage too, or they would outlive the team that owned them.
+    for (const row of await ctx.db
+      .query("maintenanceMedia")
+      .withIndex("by_org", (q) => q.eq("orgId", args.orgId))
+      .collect()) {
+      await ctx.storage.delete(row.storageId);
+      await ctx.db.delete(row._id);
+      counts.maintenanceMedia = (counts.maintenanceMedia ?? 0) + 1;
+    }
+    for (const row of await ctx.db
+      .query("workOrderFiles")
+      .withIndex("by_org", (q) => q.eq("orgId", args.orgId))
+      .collect()) {
+      await ctx.storage.delete(row.storageId);
+      await ctx.db.delete(row._id);
+      counts.workOrderFiles = (counts.workOrderFiles ?? 0) + 1;
+    }
+    await drop(
+      "workOrderTime",
+      (await ctx.db.query("workOrderTime").withIndex("by_org", (q) => q.eq("orgId", args.orgId)).collect()) as never[],
+    );
+    await drop(
+      "workOrderExpenses",
+      (await ctx.db.query("workOrderExpenses").withIndex("by_org", (q) => q.eq("orgId", args.orgId)).collect()) as never[],
+    );
+    await drop(
+      "workOrderNotes",
+      (await ctx.db.query("workOrderNotes").withIndex("by_org", (q) => q.eq("orgId", args.orgId)).collect()) as never[],
+    );
+    for (const status of ["created", "assigned", "in_progress", "completed", "reviewed_closed", "cancelled"] as const) {
+      await drop(
+        "workOrders",
+        (await ctx.db
+          .query("workOrders")
+          .withIndex("by_org_and_status", (q) => q.eq("orgId", args.orgId).eq("status", status))
+          .collect()) as never[],
+      );
+    }
+    await drop(
+      "maintenanceRequests",
+      (await ctx.db
+        .query("maintenanceRequests")
+        .withIndex("by_org_and_created", (q) => q.eq("orgId", args.orgId))
+        .collect()) as never[],
+    );
+    await drop(
+      "residentPhones",
+      (await ctx.db
+        .query("residentPhones")
+        .withIndex("by_org_and_phone", (q) => q.eq("orgId", args.orgId))
+        .collect()) as never[],
+    );
+    await drop(
+      "residents",
+      (await ctx.db.query("residents").withIndex("by_org", (q) => q.eq("orgId", args.orgId)).collect()) as never[],
+    );
+    await drop(
+      "orgCounters",
+      (await ctx.db
+        .query("orgCounters")
+        .withIndex("by_org_and_name", (q) => q.eq("orgId", args.orgId))
+        .collect()) as never[],
+    );
+    await drop(
+      "checklistTemplates",
+      (await ctx.db
+        .query("checklistTemplates")
+        .withIndex("by_org_and_issue_type", (q) => q.eq("orgId", args.orgId))
+        .collect()) as never[],
+    );
+    await drop(
+      "notificationLog",
+      (await ctx.db
+        .query("notificationLog")
+        .withIndex("by_org_and_created", (q) => q.eq("orgId", args.orgId))
+        .collect()) as never[],
+    );
+    await drop(
+      "publicLinks",
+      (await ctx.db.query("publicLinks").withIndex("by_org", (q) => q.eq("orgId", args.orgId)).collect()) as never[],
+    );
+    // Units and the audit trail have no delete path in the app; these purge-only helpers (see
+    // units.purgeOrgUnits / audit.purgeOrgAudit) exist solely for tearing down a whole team.
+    const unitsDeleted = await purgeOrgUnits(ctx, args.orgId);
+    if (unitsDeleted) counts.units = unitsDeleted;
+    const auditDeleted = await purgeOrgAudit(ctx, args.orgId);
+    if (auditDeleted) counts.auditEvents = auditDeleted;
+
     await drop(
       "memberships",
       (await ctx.db
@@ -708,6 +1086,11 @@ export async function promoteIfNoAdmin(ctx: MutationCtx, orgId: Id<"organization
 export const deleteUserRows = internalMutation({
   args: { userId: v.id("users"), email: v.optional(v.string()) },
   handler: async (ctx, args) => {
+    // Last line of defence for the one-AM-per-unit rule: removeMember checks this too, but
+    // purges (operator or Clerk webhook) reach this mutation without going through it.
+    const owned = await countOwnedBy(ctx, args.userId);
+    if (owned > 0) throw ownsUnitsError(owned);
+
     const removed = await ctx.db
       .query("memberships")
       .withIndex("by_user", (q) => q.eq("userId", args.userId))
@@ -954,6 +1337,8 @@ export const acceptPendingInvite = mutation({
       orgId: invite.orgId,
       userId: user._id,
       role: invite.role,
+      jobRoles: invite.jobRoles,
+      phone: invite.phone,
       createdAt: Date.now(),
     });
     await ctx.db.patch(invite._id, { acceptedAt: Date.now() });

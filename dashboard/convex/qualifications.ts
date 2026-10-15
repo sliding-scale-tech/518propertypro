@@ -56,6 +56,16 @@ export const upsertByConversationId = internalMutation({
     nearMiss: v.optional(v.boolean()),
     tourSlot: v.optional(v.string()),
     tourConfirmed: v.optional(v.boolean()),
+    ownerProspect: v.optional(
+      v.object({
+        name: v.string(),
+        phone: v.string(),
+        email: v.optional(v.string()),
+        propertyAddress: v.optional(v.string()),
+        propertyDetails: v.optional(v.string()),
+        notes: v.optional(v.string()),
+      }),
+    ),
     screeningAnswers: v.optional(
       v.array(
         v.object({

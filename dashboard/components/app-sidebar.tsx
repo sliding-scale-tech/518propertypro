@@ -16,25 +16,43 @@ import {
   UsersRound,
   UserRoundSearch,
   FileText,
-  Package,
-  Target,
   ChevronDown,
   LayoutDashboard,
   LogOut,
   CalendarRange,
+  DoorOpen,
+  Wrench,
+  Inbox,
+  AlertTriangle,
+  ListChecks,
+  Sparkles,
+  History,
+  Wallet,
+  Home,
 } from "lucide-react";
 import { useState } from "react";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
+import type { AppView } from "@/convex/authz";
 
 type NavLeaf = {
   href: string;
   label: string;
   icon: typeof Phone;
-  adminOnly?: boolean;
+  // Which views see this link. Undefined = every view.
+  views?: AppView[];
+  // Live count badge: the maintenance inbox (new + unread) or the exception queue.
+  badge?: "inbox" | "exceptions";
 };
 
 type NavEntry = NavLeaf | { group: string; icon: typeof Phone; items: NavLeaf[] };
+
+/** Exact match, or a nested route when no other nav link matches it more closely. */
+function isActiveHref(pathname: string, href: string): boolean {
+  if (pathname === href) return true;
+  if (!pathname.startsWith(`${href}/`)) return false;
+  return !NAV_HREFS.some((h) => h.length > href.length && (pathname === h || pathname.startsWith(`${h}/`)));
+}
 
 function isGroup(entry: NavEntry): entry is { group: string; icon: typeof Phone; items: NavLeaf[] } {
   return "group" in entry;
@@ -49,63 +67,101 @@ function isGroup(entry: NavEntry): entry is { group: string; icon: typeof Phone;
  * linked from anywhere while they're off the roadmap.
  */
 const NAV: NavEntry[] = [
-  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/call", label: "Call", icon: Phone },
+  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, views: ["admin", "accountant"] },
+  { href: "/maintenance", label: "My inbox", icon: Inbox, views: ["asset_manager"], badge: "inbox" },
+  {
+    group: "Maintenance",
+    icon: Wrench,
+    items: [
+      { href: "/maintenance", label: "All requests", icon: Inbox, views: ["admin"], badge: "inbox" },
+      { href: "/maintenance/exceptions", label: "Exceptions", icon: AlertTriangle, views: ["admin"], badge: "exceptions" },
+      { href: "/work-orders/queue", label: "Validated queue", icon: ListChecks, views: ["admin"] },
+      { href: "/work-orders", label: "Work orders", icon: ClipboardList, views: ["admin"] },
+    ],
+  },
+  { href: "/work-orders", label: "Work orders", icon: ClipboardList, views: ["asset_manager", "accountant"] },
+  { href: "/leads", label: "Leads", icon: UserRoundSearch, views: ["asset_manager"] },
+  { href: "/units", label: "Units", icon: DoorOpen, views: ["asset_manager", "accountant"] },
   {
     group: "Customers",
     icon: UsersRound,
     items: [
-      { href: "/leads", label: "Leads", icon: UserRoundSearch },
-      { href: "/tenants", label: "Tenants", icon: FileText },
+      { href: "/leads", label: "Leads", icon: UserRoundSearch, views: ["admin"] },
+      { href: "/residents", label: "Residents", icon: Home, views: ["admin"] },
+      { href: "/tenants", label: "Resident calls", icon: FileText, views: ["admin"] },
     ],
   },
   {
-    group: "Knowledge",
-    icon: Package,
+    group: "Properties",
+    icon: Building2,
     items: [
-      { href: "/docs", label: "Knowledge", icon: BookOpen },
-      { href: "/property", label: "Property", icon: Building2 },
+      { href: "/properties", label: "Properties", icon: Building2, views: ["admin"] },
+      { href: "/units", label: "Units", icon: DoorOpen, views: ["admin"] },
     ],
   },
+  { href: "/calendar", label: "Calendar", icon: CalendarRange, views: ["admin", "asset_manager"] },
+  { href: "/tasks", label: "Tasks", icon: ClipboardCheck, views: ["admin", "asset_manager"] },
   {
-    group: "Productivity",
-    icon: Target,
+    group: "Sarah",
+    icon: Sparkles,
     items: [
-      { href: "/tasks", label: "Tasks", icon: ClipboardCheck },
-      { href: "/calendar", label: "Calendar", icon: CalendarRange },
+      { href: "/sarah", label: "Sarah config", icon: Sparkles, views: ["admin"] },
+      { href: "/docs", label: "Knowledge", icon: BookOpen, views: ["admin"] },
+      { href: "/call", label: "Test call", icon: Phone, views: ["admin"] },
     ],
   },
-  { href: "/screening", label: "Screening", icon: ClipboardList },
-  // Visible to everyone: members get a read-only roster so they can see who they share the
+  // Visible to every view: members get a read-only roster so they can see who they share the
   // dashboard with. The page itself hides every control they cannot use, and convex/team.ts
-  // re-checks the role on every write — the nav flag was never the boundary.
+  // re-checks the role on every write; the nav flag was never the boundary.
   { href: "/team", label: "Team", icon: UserPlus },
+  { href: "/audit", label: "Audit log", icon: History, views: ["admin"] },
+  { href: "/finance", label: "Finance", icon: Wallet, views: ["admin"] },
 ];
 
-/** Every destination in NAV, flattened — what the mobile nav and the "More" sheet draw from. */
-const ALL_LEAVES: NavLeaf[] = NAV.flatMap((entry) => (isGroup(entry) ? entry.items : [entry]));
+const NAV_HREFS = NAV.flatMap((e) => (isGroup(e) ? e.items.map((i) => i.href) : [e.href]));
 
-// The bottom nav only has room for a handful of items; the rest live in the "More" sheet.
-const BOTTOM_NAV_LINKS = ALL_LEAVES.filter((l) =>
-  ["/dashboard", "/call", "/leads"].includes(l.href),
-);
-const MORE_LINKS = ALL_LEAVES.filter((l) => !BOTTOM_NAV_LINKS.includes(l));
+// The bottom nav only has room for a handful of items; whichever of these the view can see,
+// in this order, take the slots. The rest live in the "More" sheet.
+const BOTTOM_NAV_ORDER = ["/dashboard", "/call", "/maintenance", "/leads", "/units"];
+const BOTTOM_NAV_SLOTS = 3;
 
 /**
- * Hides admin-only tabs from members.
+ * Narrows a nav entry list to what `view` may see; groups left empty drop out.
  *
- * Nothing is marked adminOnly today — Team is visible to everyone and restricts itself — but
- * the mechanism stays for the finer-grained limits planned later.
- *
- * Undefined while the query is in flight, and null for someone with no team — both resolve to
- * "not an admin", so an admin-only tab never flashes into view before we know it belongs there.
+ * The role-restricted links are the nav's job, not its security: the server re-checks every
+ * query and mutation. `view` is undefined while the query is in flight, and null for someone
+ * with no team — neither sees any link, so a restricted tab never flashes into view before we
+ * know it belongs there.
  */
-function useIsOrgAdmin() {
-  return useQuery(api.team.overview)?.isAdmin ?? false;
+function entriesFor(view: AppView | undefined): NavEntry[] {
+  if (!view) return [];
+  const allowed = (link: NavLeaf) => !link.views || link.views.includes(view);
+  return NAV.flatMap((entry): NavEntry[] => {
+    if (!isGroup(entry)) return allowed(entry) ? [entry] : [];
+    const items = entry.items.filter(allowed);
+    return items.length > 0 ? [{ ...entry, items }] : [];
+  });
 }
 
-function visible(links: NavLeaf[], isAdmin: boolean) {
-  return links.filter((link) => !link.adminOnly || isAdmin);
+/** Every destination the view can see, flattened — what the mobile nav and "More" sheet use. */
+function leavesOf(entries: NavEntry[]): NavLeaf[] {
+  return entries.flatMap((entry) => (isGroup(entry) ? entry.items : [entry]));
+}
+
+/** The signed-in person's view, or undefined while loading / when they have no team. */
+function useAppView(): AppView | undefined {
+  return useQuery(api.team.myAccess)?.view;
+}
+
+function NavBadge({ kind }: { kind: "inbox" | "exceptions" }) {
+  const counts = useQuery(api.maintenance.counts);
+  const n = counts ? (kind === "inbox" ? counts.new + counts.unread : counts.exceptions) : 0;
+  if (n <= 0) return null;
+  return (
+    <span className="relative z-10 ml-auto rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold leading-none text-primary-foreground">
+      {n > 99 ? "99+" : n}
+    </span>
+  );
 }
 
 function NavRow({
@@ -149,6 +205,7 @@ function NavRow({
       >
         {link.label}
       </span>
+      {link.badge ? <NavBadge kind={link.badge} /> : null}
     </Link>
   );
 }
@@ -192,7 +249,7 @@ function NavGroup({
               key={item.href}
               link={item}
               nested
-              active={pathname === item.href}
+              active={isActiveHref(pathname, item.href)}
               onNavigate={onNavigate}
             />
           ))}
@@ -204,31 +261,28 @@ function NavGroup({
 
 function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
-  const isAdmin = useIsOrgAdmin();
+  const view = useAppView();
 
   return (
     <nav className="flex flex-1 flex-col gap-1 overflow-y-auto">
-      {NAV.map((entry) => {
+      {entriesFor(view).map((entry) => {
         if (isGroup(entry)) {
-          const items = visible(entry.items, isAdmin);
-          if (items.length === 0) return null;
           return (
             <NavGroup
               key={entry.group}
               group={entry.group}
               icon={entry.icon}
-              items={items}
+              items={entry.items}
               pathname={pathname}
               onNavigate={onNavigate}
             />
           );
         }
-        if (entry.adminOnly && !isAdmin) return null;
         return (
           <NavRow
             key={entry.href}
             link={entry}
-            active={pathname === entry.href}
+            active={isActiveHref(pathname, entry.href)}
             onNavigate={onNavigate}
           />
         );
@@ -239,7 +293,7 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
 
 function Brand() {
   return (
-    <Link href="/dashboard" className="block px-1" aria-label="Simplr — go to dashboard">
+    <Link href="/home" className="block px-1" aria-label="Simplr — go home">
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img src="/brand/simplr-logo.png" alt="Simplr" className="h-9 w-auto" />
     </Link>
@@ -351,8 +405,14 @@ function UserProfile({ compact = false }: { compact?: boolean }) {
 export function AppSidebar() {
   const [moreOpen, setMoreOpen] = useState(false);
   const pathname = usePathname();
-  const isAdmin = useIsOrgAdmin();
-  const moreActive = MORE_LINKS.some((l) => l.href === pathname);
+  const view = useAppView();
+  const leaves = leavesOf(entriesFor(view));
+  const bottomLinks = BOTTOM_NAV_ORDER.flatMap((href) => leaves.filter((l) => l.href === href)).slice(
+    0,
+    BOTTOM_NAV_SLOTS,
+  );
+  const moreLinks = leaves.filter((l) => !bottomLinks.includes(l));
+  const moreActive = moreLinks.some((l) => isActiveHref(pathname, l.href));
 
   return (
     <>
@@ -373,8 +433,8 @@ export function AppSidebar() {
 
       {/* Mobile bottom nav */}
       <nav className="fixed inset-x-0 bottom-0 z-40 flex items-stretch justify-around border-t border-sidebar-border bg-sidebar/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-sm lg:hidden">
-        {BOTTOM_NAV_LINKS.map((link) => {
-          const active = pathname === link.href;
+        {bottomLinks.map((link) => {
+          const active = isActiveHref(pathname, link.href);
           const Icon = link.icon;
           return (
             <Link
@@ -432,8 +492,8 @@ export function AppSidebar() {
                 </button>
               </div>
               <div className="flex flex-col gap-1">
-                {visible(MORE_LINKS, isAdmin).map((link) => {
-                  const active = pathname === link.href;
+                {moreLinks.map((link) => {
+                  const active = isActiveHref(pathname, link.href);
                   const Icon = link.icon;
                   return (
                     <Link

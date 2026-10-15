@@ -1,0 +1,66 @@
+import { v } from "convex/values";
+
+/**
+ * Job roles live in their own dependency-free module so schema.ts (which cannot import authz,
+ * since authz imports generated types built from the schema) and the mutation args in team.ts
+ * share one definition. authz.ts re-exports these; import them from there in app code.
+ */
+export const JOB_ROLES = [
+  "executive",
+  "maintenance_lead",
+  "asset_manager",
+  "technician",
+  "accountant",
+  "simplr_admin",
+] as const;
+
+export type JobRole = (typeof JOB_ROLES)[number];
+
+export const jobRoleValidator = v.union(
+  v.literal("executive"),
+  v.literal("maintenance_lead"),
+  v.literal("asset_manager"),
+  v.literal("technician"),
+  v.literal("accountant"),
+  v.literal("simplr_admin"),
+);
+
+/**
+ * The three user types the UI shows. Each maps onto a membership role plus job roles, which the
+ * backend keeps using; the mapping lives here (pure, no server imports) so the UI can share it.
+ */
+export type AppRole = "admin" | "asset_manager" | "technician";
+
+export const appRoleValidator = v.union(
+  v.literal("admin"),
+  v.literal("asset_manager"),
+  v.literal("technician"),
+);
+
+const ADMIN_JOB_ROLES: ReadonlyArray<string> = ["executive", "maintenance_lead", "simplr_admin"];
+
+/** Reverse mapping, for display and filtering. null means no role has been assigned yet. */
+export function appRoleOf(role: string, jobRoles: ReadonlyArray<string>): AppRole | null {
+  if (role === "admin" || jobRoles.some((r) => ADMIN_JOB_ROLES.includes(r))) return "admin";
+  if (jobRoles.includes("asset_manager")) return "asset_manager";
+  if (jobRoles.includes("technician")) return "technician";
+  return null;
+}
+
+/** Forward mapping: the membership role and job roles an app role is stored as. */
+export function jobRolesFor(appRole: AppRole): { role: "admin" | "member"; jobRoles: JobRole[] } {
+  switch (appRole) {
+    case "admin":
+      return { role: "admin", jobRoles: ["executive", "maintenance_lead"] };
+    case "asset_manager":
+      return { role: "member", jobRoles: ["asset_manager"] };
+    case "technician":
+      return { role: "member", jobRoles: ["technician"] };
+  }
+}
+
+export const notifyChannelValidator = v.union(
+  v.literal("sms"),
+  v.literal("email"),
+  v.literal("push"),
+);

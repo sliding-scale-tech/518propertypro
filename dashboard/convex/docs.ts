@@ -9,7 +9,7 @@ import {
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import * as el from "./elevenLabsApi";
-import { currentOrg, requireOrg, requireOrgId } from "./authz";
+import { currentOrg, requireAdminView, requireAdminViewId } from "./authz";
 
 // Shared with cloneDefaultsForOrg below, so the two never drift into disagreeing on which
 // title marks a doc as generated rather than authored content worth cloning verbatim.
@@ -150,7 +150,7 @@ export const syncedTextInternal = internalQuery({
 export const generateUploadUrl = mutation({
   args: {},
   handler: async (ctx) => {
-    await requireOrg(ctx);
+    await requireAdminView(ctx);
     return ctx.storage.generateUploadUrl();
   },
 });
@@ -165,7 +165,7 @@ export const extractFile = action({
     fileName: v.string(),
   },
   handler: async (ctx, args): Promise<{ title: string; body: string }> => {
-    await requireOrgId(ctx);
+    await requireAdminViewId(ctx);
     return await ctx.runAction(internal.docsImport.extractFile, args);
   },
 });
@@ -181,7 +181,7 @@ export const save = mutation({
     body: v.string(),
   },
   handler: async (ctx, args) => {
-    const { orgId, user } = await requireOrg(ctx);
+    const { orgId, user } = await requireAdminView(ctx);
     const now = Date.now();
     let docId = args.id;
 
@@ -215,7 +215,7 @@ export const save = mutation({
 export const remove = action({
   args: { docId: v.id("docs") },
   handler: async (ctx, args): Promise<void> => {
-    const { orgId } = await requireOrgId(ctx);
+    const { orgId } = await requireAdminViewId(ctx);
     const doc = await ctx.runQuery(internal.docs.getInternal, { docId: args.docId });
     if (!doc || doc.orgId !== orgId) return;
 

@@ -26,6 +26,7 @@ import type { WeekView } from "@/convex/calendarView";
 import * as sched from "@/convex/tourSchedule";
 import { TourHoursEditor, type TourHours } from "@/components/tour-hours-editor";
 import { useToast } from "@/components/toast";
+import { RequireView } from "@/components/require-view";
 
 // What googleCalendar.handleOAuthCallback sends back in `?google=` after the consent redirect.
 const OAUTH_RESULTS: Record<string, { message: string; variant: "success" | "error" | "info" }> = {
@@ -89,7 +90,7 @@ function formatDate(dateKey: string, options: Intl.DateTimeFormatOptions): strin
   return new Intl.DateTimeFormat("en-US", { ...options, timeZone: "UTC" }).format(Date.UTC(y, m - 1, d));
 }
 
-export default function CalendarPage() {
+function CalendarPageInner() {
   const settings = useQuery(api.tours.availabilitySettings);
   const googleStatus = useQuery(api.googleCalendar.status);
   const loadWeek = useAction(api.calendarView.week);
@@ -1224,5 +1225,13 @@ function Notice({ children }: { children: React.ReactNode }) {
       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
       <span>{children}</span>
     </p>
+  );
+}
+
+export default function CalendarPage() {
+  return (
+    <RequireView views={["admin", "asset_manager"]}>
+      <CalendarPageInner />
+    </RequireView>
   );
 }

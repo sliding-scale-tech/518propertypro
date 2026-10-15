@@ -1,7 +1,10 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { currentOrg, requireOrg } from "./authz";
+import type { Doc, Id } from "./_generated/dataModel";
+import { writeAudit } from "./audit";
+import { currentOrg, requireAdminView, requireOrg, viewFor } from "./authz";
+import { requireE164 } from "./phone";
 import { propertyAddressValidator } from "./placesApi";
 
 const DEFAULT_PROPERTY = {
@@ -144,5 +147,117 @@ export const save = mutation({
     else await ctx.db.insert("properties", row);
 
     await ctx.scheduler.runAfter(0, internal.docs.syncPropertyDoc, { orgId, userId: user._id });
+  },
+});
+
+// --- Multi-property (admin view) -------------------------------------------
+//
+// `current`, `currentInternal` and `save` above still treat the oldest row as "the" property
+// (what Sarah's tools and the legacy Property page read). The functions below manage the rest.
+
+/** Every building on the team with its unit count. Not for technicians (they only see jobs). */
+export const list = query({
+  args: {},
+  handler: async (ctx) => {
+    const org = await currentOrg(ctx);
+    if (!org) return [];
+    if (viewFor(org.isAdmin, org.jobRoles) === "technician") return [];
+    const rows = await ctx.db
+      .query("properties")
+      .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
+      .collect();
+    const out = [];
+    for (const p of rows) {
+      const units = await ctx.db
+        .query("units")
+        .withIndex("by_property", (q) => q.eq("propertyId", p._id))
+        .collect();
+      out.push({
+        _id: p._id,
+        name: p.name,
+        address: p.address,
+        isPilot: p.isPilot ?? false,
+        utilityGasPhone: p.utilityGasPhone,
+        petsAllowed: p.petsAllowed,
+        unitCount: units.length,
+        updatedAt: p.updatedAt,
+      });
+    }
+    return out;
+  },
+});
+
+function cleanName(raw: string): string {
+  const name = raw.trim();
+  if (!name) throw new Error("Enter a property name.");
+  if (name.length > 120) throw new Error("Property name is too long.");
+  return name;
+}
+
+export const create = mutation({
+  args: {
+    name: v.string(),
+    address: v.optional(propertyAddressValidator),
+    isPilot: v.optional(v.boolean()),
+    utilityGasPhone: v.optional(v.string()),
+  },
+  handler: async (ctx, args): Promise<Id<"properties">> => {
+    const org = await requireAdminView(ctx);
+    const id = await ctx.db.insert("properties", {
+      orgId: org.orgId,
+      userId: org.user._id,
+      name: cleanName(args.name),
+      // Legacy leasing fields are required by the schema; a new building starts neutral.
+      units: [],
+      petsAllowed: false,
+      moveInWindowDays: 60,
+      address: args.address,
+      isPilot: args.isPilot ?? false,
+      utilityGasPhone: args.utilityGasPhone ? requireE164(args.utilityGasPhone, "Gas phone") : undefined,
+      updatedAt: Date.now(),
+    });
+    await writeAudit(ctx, {
+      orgId: org.orgId,
+      entity: "property",
+      entityId: id,
+      action: "property_created",
+      actorUserId: org.user._id,
+      to: args.name.trim(),
+    });
+    return id;
+  },
+});
+
+/** Name, address and the pilot/gas-phone profile only. Leasing fields stay with `save`. */
+export const updateProfile = mutation({
+  args: {
+    propertyId: v.id("properties"),
+    name: v.optional(v.string()),
+    address: v.optional(propertyAddressValidator),
+    isPilot: v.optional(v.boolean()),
+    utilityGasPhone: v.optional(v.string()),
+    clearGasPhone: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const org = await requireAdminView(ctx);
+    const property = await ctx.db.get(args.propertyId);
+    if (!property || property.orgId !== org.orgId) throw new Error("Property not found.");
+
+    const patch: Partial<Doc<"properties">> = { updatedAt: Date.now() };
+    if (args.name !== undefined) patch.name = cleanName(args.name);
+    if (args.address !== undefined) patch.address = args.address;
+    if (args.isPilot !== undefined) patch.isPilot = args.isPilot;
+    if (args.clearGasPhone) patch.utilityGasPhone = undefined;
+    else if (args.utilityGasPhone !== undefined) {
+      patch.utilityGasPhone = requireE164(args.utilityGasPhone, "Gas phone");
+    }
+    await ctx.db.patch(property._id, patch);
+    await writeAudit(ctx, {
+      orgId: org.orgId,
+      entity: "property",
+      entityId: property._id,
+      action: "property_profile_updated",
+      actorUserId: org.user._id,
+    });
   },
 });

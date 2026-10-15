@@ -7,6 +7,7 @@ import { currentOrg, requireOrg, requireOrgAdmin, requireOrgId } from "./authz";
 import * as google from "./googleApi";
 import { accessTokenFor } from "./googleCalendar";
 import * as sched from "./tourSchedule";
+import { tourRulesFor } from "./sarahConfigRead";
 
 /**
  * Tour availability and booking.
@@ -398,6 +399,8 @@ export const bookingContext = internalQuery({
       propertyName: property?.name ?? org.name,
       propertyAddress: property?.address?.formatted ?? null,
       members,
+      // Published Sarah configuration (P17), or the code defaults.
+      rules: await tourRulesFor(ctx, args.orgId),
     };
   },
 });
@@ -437,20 +440,22 @@ export const reserve = internalMutation({
     elevenLabsConversationId: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<Id<"tours"> | null> => {
+    const rules = await tourRulesFor(ctx, args.orgId);
+    const bufferMs = rules.bufferMinutes * 60 * 1000;
     const nearby = await ctx.db
       .query("tours")
       .withIndex("by_assignee_and_start", (q) =>
         q
           .eq("assignedUserId", args.assignedUserId)
-          .gte("start", args.start - sched.TOUR_MS - 2 * sched.BUFFER_MS)
-          .lt("start", args.end + sched.BUFFER_MS),
+          .gte("start", args.start - (rules.tourMinutes * 60 * 1000 + 2 * bufferMs))
+          .lt("start", args.end + bufferMs),
       )
       .collect();
     const clash = nearby.some(
       (t) =>
         t.status === "booked" &&
-        t.start < args.end + sched.BUFFER_MS &&
-        t.end > args.start - sched.BUFFER_MS,
+        t.start < args.end + bufferMs &&
+        t.end > args.start - bufferMs,
     );
     if (clash) return null;
 
@@ -543,21 +548,23 @@ export const moveReservation = internalMutation({
     const tour = await ctx.db.get(args.tourId);
     if (!tour || tour.status !== "booked") return null;
 
+    const rules = await tourRulesFor(ctx, tour.orgId);
+    const bufferMs = rules.bufferMinutes * 60 * 1000;
     const nearby = await ctx.db
       .query("tours")
       .withIndex("by_assignee_and_start", (q) =>
         q
           .eq("assignedUserId", args.assignedUserId)
-          .gte("start", args.start - sched.TOUR_MS - 2 * sched.BUFFER_MS)
-          .lt("start", args.end + sched.BUFFER_MS),
+          .gte("start", args.start - (rules.tourMinutes * 60 * 1000 + 2 * bufferMs))
+          .lt("start", args.end + bufferMs),
       )
       .collect();
     const clash = nearby.some(
       (t) =>
         t._id !== args.tourId &&
         t.status === "booked" &&
-        t.start < args.end + sched.BUFFER_MS &&
-        t.end > args.start - sched.BUFFER_MS,
+        t.start < args.end + bufferMs &&
+        t.end > args.start - bufferMs,
     );
     if (clash) return null;
 
@@ -643,7 +650,14 @@ function isWorkingDay(member: Member, day: string): boolean {
   return !member.daysOff.includes(day);
 }
 type Context =
-  | { ok: true; timeZone: string; propertyName: string; propertyAddress: string | null; members: Member[] }
+  | {
+      ok: true;
+      timeZone: string;
+      propertyName: string;
+      propertyAddress: string | null;
+      members: Member[];
+      rules: sched.TourRules;
+    }
   | { ok: false; reason: string };
 
 async function loadContext(ctx: ActionCtx, orgId: string | undefined): Promise<Context> {
@@ -660,6 +674,7 @@ async function loadContext(ctx: ActionCtx, orgId: string | undefined): Promise<C
     propertyName: context.propertyName,
     propertyAddress: context.propertyAddress,
     members: context.members,
+    rules: context.rules,
   };
 }
 
@@ -679,11 +694,12 @@ async function busyByMember(
   members: Member[],
   from: number,
   to: number,
+  rules: sched.TourRules,
   ignore?: IgnoredTour,
 ): Promise<Map<Id<"users">, sched.Interval[]>> {
   const booked = await ctx.runQuery(internal.tours.bookedInRange, {
     orgId,
-    start: from - sched.TOUR_MS - sched.BUFFER_MS,
+    start: from - (rules.tourMinutes + rules.bufferMinutes) * 60 * 1000,
     end: to,
   });
 
@@ -737,7 +753,7 @@ export async function findTourTimes(
 > {
   const context = await loadContext(ctx, orgId);
   if (!context.ok) return { available: false, reason: context.reason };
-  const { timeZone, members } = context;
+  const { timeZone, members, rules } = context;
 
   const now = Date.now();
   const today = sched.localDateKey(now, timeZone);
@@ -751,6 +767,7 @@ export async function findTourTimes(
     members,
     sched.startOfLocalDay(firstDay, timeZone),
     sched.startOfLocalDay(sched.addDays(firstDay, SEARCH_DAYS), timeZone),
+    rules,
     ignoreTour,
   );
 
@@ -766,8 +783,8 @@ export async function findTourTimes(
       if (!isWorkingDay(m, day)) continue;
       const memberBusy = busy.get(m.userId);
       if (!memberBusy) continue;
-      for (const start of sched.candidateStarts(day, m.weeklyHours, timeZone, now)) {
-        if (sched.isFree(start, memberBusy)) open.add(start);
+      for (const start of sched.candidateStarts(day, m.weeklyHours, timeZone, now, rules)) {
+        if (sched.isFree(start, memberBusy, rules)) open.add(start);
       }
     }
     return [...open].sort((a, b) => a - b);
@@ -776,13 +793,13 @@ export async function findTourTimes(
   // Any minute, not just the half-hour grid: "10:15" is a fair thing for a caller to ask for.
   const statusAt = (start: number): RequestedTime["reason"] => {
     if (start <= now) return "passed";
-    if (start < now + sched.MIN_LEAD_MINUTES * 60 * 1000) return "too_soon";
+    if (start < now + rules.minLeadMinutes * 60 * 1000) return "too_soon";
     const day = sched.localDateKey(start, timeZone);
-    const working = members.filter((m) => isWorkingDay(m, day) && sched.withinHours(start, m.weeklyHours, timeZone));
+    const working = members.filter((m) => isWorkingDay(m, day) && sched.withinHours(start, m.weeklyHours, timeZone, rules));
     if (working.length === 0) return "outside_hours";
     const free = working.some((m) => {
       const memberBusy = busy.get(m.userId);
-      return memberBusy !== undefined && sched.isFree(start, memberBusy);
+      return memberBusy !== undefined && sched.isFree(start, memberBusy, rules);
     });
     return free ? "open" : "taken";
   };
@@ -880,14 +897,14 @@ export async function bookTour(
 ): Promise<BookingResult> {
   const context = await loadContext(ctx, orgId);
   if (!context.ok) return { status: "unavailable", reason: context.reason };
-  const { timeZone, members, propertyName, propertyAddress } = context;
+  const { timeZone, members, propertyName, propertyAddress, rules } = context;
 
   const parts = sched.parseLocalDateTime(args.slotStart);
   if (!parts) {
     return { status: "invalid", reason: "slot_start must be the exact start value from find_tour_times." };
   }
   const start = sched.zonedToUtc(parts, timeZone);
-  const end = start + sched.TOUR_MS;
+  const end = start + rules.tourMinutes * 60 * 1000;
 
   // The times closest to the one they tried, not a spread across the day.
   const alternatives = async (): Promise<BookingResult> => {
@@ -903,14 +920,21 @@ export async function bookTour(
     };
   };
 
-  if (start < Date.now() + sched.MIN_LEAD_MINUTES * 60 * 1000) return alternatives();
+  if (start < Date.now() + rules.minLeadMinutes * 60 * 1000) return alternatives();
 
   const day = sched.localDateKey(start, timeZone);
-  const eligible = members.filter((m) => isWorkingDay(m, day) && sched.withinHours(start, m.weeklyHours, timeZone));
-  const busy = await busyByMember(ctx, orgId!, eligible, start - sched.BUFFER_MS, end + sched.BUFFER_MS);
+  const eligible = members.filter((m) => isWorkingDay(m, day) && sched.withinHours(start, m.weeklyHours, timeZone, rules));
+  const busy = await busyByMember(
+    ctx,
+    orgId!,
+    eligible,
+    start - rules.bufferMinutes * 60 * 1000,
+    end + rules.bufferMinutes * 60 * 1000,
+    rules,
+  );
   const free = eligible.filter((m) => {
     const memberBusy = busy.get(m.userId);
-    return memberBusy !== undefined && sched.isFree(start, memberBusy);
+    return memberBusy !== undefined && sched.isFree(start, memberBusy, rules);
   });
   if (free.length === 0) return alternatives();
 
@@ -1008,7 +1032,7 @@ export async function rescheduleTour(
 ): Promise<BookingResult> {
   const context = await loadContext(ctx, orgId);
   if (!context.ok) return { status: "unavailable", reason: context.reason };
-  const { timeZone, members, propertyName, propertyAddress } = context;
+  const { timeZone, members, propertyName, propertyAddress, rules } = context;
   const { tour } = args;
 
   const parts = sched.parseLocalDateTime(args.slotStart);
@@ -1016,7 +1040,7 @@ export async function rescheduleTour(
     return { status: "invalid", reason: "slot_start must be the exact start value from find_tour_times." };
   }
   const start = sched.zonedToUtc(parts, timeZone);
-  const end = start + sched.TOUR_MS;
+  const end = start + rules.tourMinutes * 60 * 1000;
   if (start === tour.start) {
     return { status: "invalid", reason: "The tour is already booked for that time. Nothing needs to change." };
   }
@@ -1036,14 +1060,22 @@ export async function rescheduleTour(
     };
   };
 
-  if (start < Date.now() + sched.MIN_LEAD_MINUTES * 60 * 1000) return alternatives();
+  if (start < Date.now() + rules.minLeadMinutes * 60 * 1000) return alternatives();
 
   const day = sched.localDateKey(start, timeZone);
-  const eligible = members.filter((m) => isWorkingDay(m, day) && sched.withinHours(start, m.weeklyHours, timeZone));
-  const busy = await busyByMember(ctx, orgId!, eligible, start - sched.BUFFER_MS, end + sched.BUFFER_MS, ignore);
+  const eligible = members.filter((m) => isWorkingDay(m, day) && sched.withinHours(start, m.weeklyHours, timeZone, rules));
+  const busy = await busyByMember(
+    ctx,
+    orgId!,
+    eligible,
+    start - rules.bufferMinutes * 60 * 1000,
+    end + rules.bufferMinutes * 60 * 1000,
+    rules,
+    ignore,
+  );
   const free = eligible.filter((m) => {
     const memberBusy = busy.get(m.userId);
-    return memberBusy !== undefined && sched.isFree(start, memberBusy);
+    return memberBusy !== undefined && sched.isFree(start, memberBusy, rules);
   });
   if (free.length === 0) return alternatives();
 

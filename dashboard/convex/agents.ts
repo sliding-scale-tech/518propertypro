@@ -21,6 +21,8 @@ import {
 import { coreBlock } from "./coreQuestions";
 import { withTourBooking } from "./tourPrompt";
 import { currentOrg, requireOrgId } from "./authz";
+import { composeSarahSections } from "./sarahConfigLib";
+import type { SarahConfig } from "./sarahConfigLib";
 
 // Jessica — premade, American, female, "conversational" use case. Premade rather than a
 // professional clone on purpose: a PVC run at the wrong similarity_boost is what made the
@@ -75,7 +77,14 @@ const TURN_TUNING: el.TurnTuning = {
 };
 
 
-const LEASING_PROMPT = `You are Sarah, the leasing receptionist for Maple Court Apartments, answering by phone or
+/**
+ * The company name Sarah says on the phone. A code constant for now (build plan C13); it moves
+ * to Sarah configuration (F9) once that exists. The exact spoken name is still to be confirmed
+ * with the client, so change it here and nowhere else.
+ */
+export const COMPANY_NAME = "518 Property Pro";
+
+export const LEASING_PROMPT = `You are Sarah, the receptionist for ${COMPANY_NAME}, answering by phone or
 voice chat, 24/7. You are warm, brief, and efficient — the way a good in-person leasing
 agent sounds on a phone call, not a chatbot. Introduce yourself by name only in your first
 message, not repeatedly. Never mention that you are AI unless directly asked; if asked
@@ -89,36 +98,54 @@ real date when booking a tour. Never claim you don't know what today's date is.
 YOUR JOB, IN ORDER:
 0. If someone asks a standalone question about rent, availability, or pet policy at any
    point — even before you've gathered anything else — call check_availability and answer
-   from that. It never captures a lead or decides qualification, it's just a lookup.
-1. Figure out why they're calling.
+   from that. It never captures a lead, it's just a lookup. Only ever offer what it returns:
+   a unit type that is not in its result is not available, so never offer it.
+1. Figure out why they're calling: renting an apartment, a maintenance issue or another
+   matter as a current resident, an owner who wants ${COMPANY_NAME} to manage their property,
+   or something else.
 1a. Existing resident or prospect? If they say or imply they already live here — "my
    apartment," "my unit," "the heat's out" — treat them as a resident straight away and don't
    ask. Only if you genuinely can't tell, ask once: "Are you a current resident with us?"
-   Take their answer at face value; there is nothing to check it against. If they are a
-   resident, get their name and unit, then follow the RESIDENT CALLS section below instead of
-   the leasing steps.
+   Take their answer at face value. If they are a resident, follow the RESIDENT CALLS section
+   below instead of the leasing steps.
+1b. A property owner who wants ${COMPANY_NAME} to manage their property is not a renter and
+   not a resident. Get their name and the best number to reach them on, plus the property's
+   address and a few plain details about it (type, number of units) if they offer them, then
+   call route_owner_prospect. Tell them someone from the team will be in touch. Do not discuss
+   fees, terms or what the company can promise.
 2. If it's a leasing inquiry, gather everything listed under WHAT TO ASK EVERY LEASING
-   CALLER below before deciding anything, then everything under EXTRA SCREENING QUESTIONS.
-   Both lists are set by this property. Never invent questions of your own.
-3. Once you have all of them, call check_qualification. Send only the fields you were
-   actually told to ask about — leave the rest out entirely rather than guessing at them —
-   plus every extra screening answer in the screening_answers argument. Do not estimate any
-   value yourself; the tool applies the actual property rules.
-4. Speak the tool's result plainly, but never coldly — see TONE FOR DISQUALIFICATIONS below for
-   exactly how to handle a "no". If it says qualified, offer to book a tour. If it says
-   disqualified, follow that section instead of just stating the reason and moving on. Do NOT
-   offer a tour you already know will be rejected — that is the one thing you must never do, it
-   breaks trust with the property manager. The rules decide qualification, never you, and that
-   is true no matter how close someone seems or how nicely you want to let them down.
-5. If qualified and they want a tour, follow TOUR BOOKING below to find a time and book it.
-6. Once the reason for the call is resolved — a tour is booked, a disqualification and
-   alternative has been given, or you've handed off with escalate — the call is done. Ask
-   one time, "Is there anything else I can help with?" If no, say a short, warm goodbye and
-   end the call yourself right away using end_call. Do not keep talking, recap what already
-   happened, or wait for them to hang up first — a call that has done its job should end
-   promptly, not linger.
+   CALLER below, then everything under LEASING QUESTIONS WE ONLY RECORD and EXTRA SCREENING
+   QUESTIONS. Never invent questions of your own.
+3. Once you have them, call check_qualification. Send only the fields you were actually told to
+   ask about — leave the rest out entirely rather than guessing at them — plus every extra
+   screening answer in the screening_answers argument. This only records their answers for the
+   team; it does not decide anything.
+4. Speak the result plainly and warmly. Tell them their answers are recorded and the team will
+   review them. Follow CAPTURE ONLY below: you never tell a caller whether they qualify. If
+   the result says something of the type they asked for is available, offer a tour. If not, say
+   so and follow WHEN THERE'S NO MATCH.
+5. If they want a tour, follow TOUR BOOKING below to find a time and book it.
+6. Once the reason for the call is resolved — a tour is booked, their details are recorded and
+   next steps given, or you've handed off with escalate — the call is done. Ask one time, "Is
+   there anything else I can help with?" If no, say a short, warm goodbye and end the call
+   yourself right away using end_call. Do not keep talking, recap what already happened, or
+   wait for them to hang up first — a call that has done its job should end promptly, not
+   linger.
 
 {{CORE_QUESTIONS}}
+
+LEASING QUESTIONS WE ONLY RECORD:
+These are approved for ${COMPANY_NAME} and are the only exception to the rule that the list above
+is exhaustive. Ask them conversationally, after the questions above, and send the answers to
+check_qualification with the argument named in brackets. Include every answer you have each time
+you call it.
+- Whether someone else, such as an agency, an employer or a family member, will be paying part or
+  all of the rent [third_party_payer, true or false]. If yes, ask for that payer's name
+  [payer_name], phone number [payer_phone] and email address [payer_email].
+- Which communities they'd prefer in the Capital Region [preferred_communities], and any they
+  want to avoid [avoid_communities].
+- How many pets, as a number [pet_count], on top of the type of pet.
+- Anything else they'd like us to know [other_info].
 
 PACING:
 Move at a natural, brisk pace. Once you have a piece of information, use it and move on —
@@ -127,14 +154,15 @@ things you've already said. The call should feel like it's clearly moving toward
 from the first question onward, not meandering — every turn should either be gathering
 something you still need or acting on what you already have.
 
-WHAT YOU NEVER DECIDE YOURSELF:
-Qualification is based only on what the WHAT TO ASK EVERY LEASING CALLER and EXTRA SCREENING
-QUESTIONS sections list, and nothing else — not how someone sounds, their name,
-their accent, anything they mention about themselves — ever factors into whether they
-qualify. Your job is to report the answers accurately, not to judge them: never decide that
-an answer disqualifies someone, and never skip asking a question because you assume you
-know how it will go. check_qualification makes that call. Never make it on your own
-judgment.
+CAPTURE ONLY — YOU NEVER JUDGE:
+Your job with a renter is to record their answers accurately, not to judge them. Never tell a
+caller they do not qualify, are not approved, are not eligible or were turned down, and never
+give a reason that sounds like one — not about their budget, pets, credit, income, background or
+anything else. Never decide that an answer rules someone out, and never skip a question because
+you assume you know how it will go. Nothing about how someone sounds, their name, their accent
+or anything they mention about themselves ever changes how you treat them. The team reviews every
+inquiry and decides; you can say exactly that. If they ask whether they'd be approved, say the
+team will review their answers and follow up.
 
 {{SCREENING_QUESTIONS}}
 
@@ -143,10 +171,11 @@ ${LIFE_SAFETY_BLOCK}
 WHEN TO ESCALATE — call the escalate tool, don't try to handle it yourself:
 - They ask to speak to a human, and you haven't already tried once to help — the second
   time they ask, escalate immediately, no more attempts.
-- An existing resident's issue that you scored 8 or higher: always call log_tenant_issue
-  first, then escalate. Below 8, log it and close the call — don't escalate routine repairs.
+- A resident's maintenance issue that is an emergency or urgent: always call
+  log_maintenance_request first, then escalate. Routine and informational requests are logged
+  and the call closed — don't escalate routine repairs.
 - Anything that is neither a leasing inquiry nor a resident issue — "what's the WiFi speed in
-  unit 4B," anything outside those two topics — say you'll have someone follow up, then
+  unit 4B," anything outside those topics — say you'll have someone follow up, then
   escalate with a short note of what they asked. Never invent an answer to something you
   don't actually know.
 - If 90 seconds have passed and you still can't tell why they're calling, escalate — don't
@@ -165,52 +194,22 @@ ${RESIDENT_TRIAGE_BLOCK}
 
 WHEN THERE'S NO MATCH:
 If nothing available matches what they asked for (wrong bedroom count, wrong timeframe),
-don't just say no. Offer the closest available alternative, or offer to note their
-interest for when something matching opens up. Always leave them with a next step.
-
-TONE FOR DISQUALIFICATIONS:
-A real leasing agent doesn't recite a policy and reach for the exit — they sound a little sorry,
-explain why in plain words, and stay on the line long enough to leave the person with something.
-Never rush toward end_call right after check_qualification says no; that is exactly the abrupt,
-robotic pattern to avoid. Follow whichever of these actually applies:
-- If near_miss_budget_target is a number (their stated budget was close to the real minimum):
-  before anything else, ask if they'd be able to go up to that exact number — e.g. "Our lowest
-  price for that is $1,400 — would you be able to go up to that?" Always use the exact
-  near_miss_budget_target figure, never a number you pick yourself.
-  - If they say yes, call check_qualification again with that as their new budget. A budget is
-    their own answer, not a fact about them — them reconsidering it is a normal part of the
-    conversation, not you deciding they qualify.
-    - If it now says qualified, ask about a tour as always.
-    - If it does not, follow the rest of this list from your original reason instead. Never keep
-      asking them to go higher a second time.
-  - If they say no, treat it like any other near miss: say plainly you can't confirm they
-    qualify at their number, then let them know you'll pass their info to the leasing team,
-    since there's sometimes a little room and someone there would be better placed to look into
-    it. Say this as an honest heads-up, never a promise or a guarantee, and never adjust the
-    number or the qualification yourself no matter how close it is.
-- If near_miss is true but near_miss_budget_target is not (a close miss on one of the property's
-  own screening questions, not on budget — a fact like a credit score isn't something anyone can
-  just decide to raise): say plainly you can't confirm they qualify, then let them know you'll
-  pass their info to the leasing team, the same honest-heads-up way as above.
-- Otherwise, state the real reason honestly and kindly (e.g. "this building doesn't allow pets"
-  or "our lowest rent is above what you mentioned"), then do what WHEN THERE'S NO MATCH says:
-  offer the closest alternative if one exists, or offer to note their interest for later.
-Either way, ask if there's anything else you can help with before closing, the same as any other
-call — a disqualification is a normal ending to a call, not a reason to cut it short.
+don't just say no. Offer the closest available alternative from check_availability, or offer
+to note their interest for when something matching opens up. Always leave them with a next step.
 
 TONE FOR VOICE:
 Short sentences. No lists, no markdown, nothing that only makes sense written down. Confirm
 you understood something before moving to the next question. Before checking availability,
-qualification, or anything else that takes a moment, say a short natural phrase first —
-"let me check that," "one sec, pulling that up," "give me just a moment" — never go silent
-while you look something up.
+looking someone up, logging a request, or anything else that takes a moment, say a short
+natural phrase first — "let me check that," "one sec, pulling that up," "give me just a
+moment" — never go silent while you look something up.
 
 WHAT YOU DO NOT DO:
-Negotiate rent. Discuss lease terms or legal questions. Try to resolve a maintenance issue
-yourself. Guess at facts you don't have. Speak a language other than English.`;
+Negotiate rent. Discuss lease terms or legal questions, or give legal advice. Diagnose a
+maintenance issue or make commitments beyond what is written in these instructions. Guess at
+facts you don't have. Speak a language other than English.`;
 
-const DEFAULT_FIRST_MESSAGE =
-  "Thanks for calling Maple Court Apartments, this is Sarah! Are you calling about renting an apartment, or something else?";
+export const DEFAULT_FIRST_MESSAGE = `Thanks for calling ${COMPANY_NAME}, this is Sarah! Are you calling about renting an apartment, a maintenance issue, or something else?`;
 
 /**
  * Renders the property manager's own questions into the prompt.
@@ -258,10 +257,11 @@ question out just because you think you know what they would say.`;
  * rather than only when non-empty — an agent with no WHAT TO ASK section would have nothing
  * telling it what to collect at all.
  */
-function composePrompt(
+export function composePrompt(
   prompt: string,
   questions: ScreeningQuestion[],
   disabledCore: string[] = [],
+  sarah: SarahConfig | null = null,
 ): string {
   // First, so the old "confirmation text is on its way" step is rewritten before anything else
   // is spliced in around it — see convex/tourPrompt.ts.
@@ -276,9 +276,32 @@ function composePrompt(
   } else if (block) {
     next = `${next}\n\n${block}`;
   }
-  return next;
+  // Last: the published Sarah configuration (P17) replaces the hard-coded life-safety and
+  // resident blocks, so nothing above can re-introduce an unapproved script.
+  return sarah ? applySarahConfig(next, sarah) : next;
 }
 
+/** Swaps one known block for its configured replacement, or appends the replacement if the stored prompt no longer contains it verbatim. */
+function replaceBlock(prompt: string, old: string, replacement: string): string {
+  const at = prompt.indexOf(old);
+  if (at === -1) return `${prompt}\n\n${replacement}`;
+  return `${prompt.slice(0, at)}${replacement}${prompt.slice(at + old.length)}`;
+}
+
+/**
+ * Renders a Sarah configuration into a prompt: company name, call types, the life-safety block
+ * with per-incident scripts (approved ones verbatim), the resident-calls block and the
+ * leasing mode. Pure, so the /sarah preview and the real push produce identical text.
+ */
+export function applySarahConfig(prompt: string, config: SarahConfig): string {
+  const sections = composeSarahSections(config);
+  let next = replaceBlock(prompt, LIFE_SAFETY_BLOCK, sections.lifeSafety);
+  next = replaceBlock(next, RESIDENT_TRIAGE_BLOCK, sections.resident);
+  if (config.identity.companyName !== COMPANY_NAME) {
+    next = next.split(COMPANY_NAME).join(config.identity.companyName);
+  }
+  return sections.extra ? `${next}\n\n${sections.extra}` : next;
+}
 
 // --- Reads ----------------------------------------------------------------
 
@@ -369,7 +392,8 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       "Looks up current rent and availability for a bedroom type, or the whole property, " +
       "with no lead capture and no qualification decision. Call this any time someone asks " +
       "a standalone question like 'what's the rent for a 2BR' or 'do you allow pets', even " +
-      "before you've gathered the five qualification fields.",
+      "before you've gathered the five qualification fields. Returns only units that are " +
+      "available right now: never offer a unit type that is not in the result.",
     url: `${siteUrl}/tools/check-availability`,
     // conversation_id isn't required from the model — it's a dynamic_variable the platform
     // fills in regardless — but declaring it is what lets the webhook resolve *whose*
@@ -378,6 +402,9 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
     required: [],
     properties: {
       conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
+      // A phone call has no conversations row until it ends, so the agent id is what tells the
+      // webhook which team's units to read — see resolveBookingOrg in convex/http.ts.
+      agent_id: { type: "string", dynamicVariable: "system__agent_id" },
       bedrooms: {
         type: "string",
         description:
@@ -388,12 +415,12 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
   {
     name: "check_qualification",
     description:
-      "Checks a prospective tenant's stated bedrooms, budget, move-in date, pet needs and " +
-      "any extra screening answers against the property's real availability and rules. Call " +
-      "this once you have the five qualification fields and every extra screening question " +
-      "your instructions list. Safe to call again in the same call if the caller revises an " +
-      "answer — e.g. after agreeing to a higher budget on a near miss. Never decide " +
-      "qualification yourself.",
+      "Records a prospective tenant's stated bedrooms, budget, move-in date, pet needs, the " +
+      "leasing answers your instructions list and any extra screening answers, and returns " +
+      "what is available. It is capture only: the team reviews every answer, and the result " +
+      "never says whether the caller qualifies, so never tell them they do or do not. Call " +
+      "this once you have the answers your instructions list. Safe to call again in the same " +
+      "call if the caller revises an answer; include every answer you have each time.",
     url: `${siteUrl}/tools/check-qualification`,
     // Only the two structural fields are required. move_in_date, budget and pets_wanted are
     // optional because each property manager can switch those questions off (see
@@ -403,10 +430,30 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
     required: ["conversation_id", "bedrooms", "caller_name", "caller_phone"],
     properties: {
       conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
+      agent_id: { type: "string", dynamicVariable: "system__agent_id" },
       bedrooms: {
         type: "string",
         description: "The bedroom count they want: 'studio', '1br', '2br', or '3br+'.",
       },
+      // The leasing questions that are only recorded (build plan C8). All optional: leave out
+      // whatever the caller was not asked or did not answer.
+      third_party_payer: {
+        type: "boolean",
+        description: "Whether someone else (an agency, employer or family member) will pay some or all of the rent.",
+      },
+      payer_name: { type: "string", description: "That payer's name, only if third_party_payer is true." },
+      payer_phone: { type: "string", description: "That payer's phone number, as digits, only if they gave one." },
+      payer_email: { type: "string", description: "That payer's email address, only if they gave one." },
+      preferred_communities: {
+        type: "string",
+        description: "Communities in the Capital Region they would prefer, in their words.",
+      },
+      avoid_communities: {
+        type: "string",
+        description: "Communities in the Capital Region they want to avoid, in their words.",
+      },
+      pet_count: { type: "number", description: "How many pets they have or plan to bring." },
+      other_info: { type: "string", description: "Anything else the caller wants the team to know." },
       move_in_date: { type: "string", description: "When they want to move in, in their own words." },
       budget: { type: "number", description: "Their monthly budget in dollars." },
       pets_wanted: { type: "boolean", description: "Whether they have or plan to bring pets." },
@@ -465,11 +512,11 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
   {
     name: "request_tour",
     description:
-      "Books a tour for a caller who has already qualified. Pass slot_start with a start value " +
+      "Books a tour for a leasing caller who wants one. Pass slot_start with a start value " +
       "from your latest find_tour_times result, only after reading it back and hearing yes. " +
       "Only if find_tour_times said booking isn't available, pass " +
       "preferred_slot with their preferred day and time instead. Only call this after " +
-      "check_qualification returned qualifies: true.",
+      "check_qualification has recorded their answers.",
     url: `${siteUrl}/tools/request-tour`,
     // Neither slot field is required: which one applies depends on whether the team has booking
     // set up, and the webhook rejects a call that sends neither.
@@ -582,6 +629,9 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
     required: ["conversation_id", "reason", "summary", "caller_name", "caller_phone", "living_area"],
     properties: {
       conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
+      // Lets the webhook find the team to alert on a phone call, before any conversations row
+      // exists — see resolveBookingOrg in convex/http.ts.
+      agent_id: { type: "string", dynamicVariable: "system__agent_id" },
       reason: {
         type: "string",
         description:
@@ -600,14 +650,16 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
   {
     name: "log_tenant_issue",
     description:
-      "Records that an existing resident called, why they called, and how severe it is on a " +
-      "1-10 scale. Call this for every resident before you close the call, even for small " +
-      "things. Ask for their name, unit and a callback number FIRST and pass them here — do " +
-      "not call this with a " +
-      "placeholder like 'unknown'. Safe to call more than once in the same call: a second call " +
-      "updates the same record, so if you learn or correct anything afterwards, call it again " +
-      "with the full details. Do not call it for people looking to rent — that is " +
-      "check_qualification. If the severity is 8 or higher, call escalate as well.",
+      "Records a call from an existing resident that is NOT a maintenance issue — rent or fees, " +
+      "portal login, an application, eviction, non-renewal, renewal, a work-order status, a " +
+      "vendor payment, a neighbor dispute or anything else — with its call_type and how severe " +
+      "it is on a 1-10 scale. For anything broken, leaking or unsafe use " +
+      "log_maintenance_request instead. Ask for their name, unit and a callback number FIRST " +
+      "and pass them here — do not call this with a placeholder like 'unknown'. Safe to call " +
+      "more than once in the same call: a second call updates the same record, so if you learn " +
+      "or correct anything afterwards, call it again with the full details. Do not call it for " +
+      "people looking to rent — that is check_qualification. If the severity is 8 or higher, " +
+      "call escalate as well.",
     url: `${siteUrl}/tools/log-tenant-issue`,
     // caller_name is deliberately NOT required. When it was, the agent satisfied the schema by
     // inventing "unknown" and calling the tool before it had actually asked — see the call on
@@ -646,6 +698,12 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
         type: "string",
         description: "One of: maintenance, billing, noise, lockout, lease, other.",
       },
+      call_type: {
+        type: "string",
+        description:
+          "What kind of call this was. One of: rent, portal_login, application, eviction, " +
+          "non_renewal, renewal, work_order_status, vendor_payment, neighbor_dispute, other.",
+      },
       severity: {
         type: "number",
         description:
@@ -657,6 +715,137 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
         description:
           "A few words on why that number, e.g. 'no hot water, unlivable but not dangerous'.",
       },
+    },
+  },
+  {
+    name: "lookup_caller",
+    description:
+      "Looks up the caller's phone number (caller ID) against the resident list. Call it at the " +
+      "start of a resident or maintenance call. If it matches, you get a first name and a unit " +
+      "label: use them only to CONFIRM ('Am I speaking with Sam in unit 4B?'), never to assume. " +
+      "It returns nothing else about the resident.",
+    url: `${siteUrl}/tools/lookup-caller`,
+    required: ["conversation_id"],
+    properties: {
+      conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
+      agent_id: { type: "string", dynamicVariable: "system__agent_id" },
+      caller_id: { type: "string", dynamicVariable: "system__caller_id" },
+    },
+  },
+  {
+    name: "find_unit",
+    description:
+      "Checks whether the address and unit number a caller said match a unit in our records. " +
+      "Returns only whether it matched and the unit's label; it never returns anything about who " +
+      "lives there. Use it when a caller gives an address and unit you want to check.",
+    url: `${siteUrl}/tools/find-unit`,
+    required: ["conversation_id", "spoken_unit"],
+    properties: {
+      conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
+      agent_id: { type: "string", dynamicVariable: "system__agent_id" },
+      spoken_address: {
+        type: "string",
+        description: "The street address the caller said, as they said it. Leave out if they did not give one.",
+      },
+      spoken_unit: { type: "string", description: "The unit or apartment number the caller said, e.g. '4B'." },
+    },
+  },
+  {
+    name: "log_maintenance_request",
+    description:
+      "Records a resident's maintenance request, including emergencies. Use it for anything " +
+      "broken, leaking, not working or unsafe, and for tenant-responsibility items (bulbs, " +
+      "blinds, trash to the curb) with issue_type tenant_responsibility. Ask for their name, " +
+      "address, unit and a callback number first and pass them here, EXCEPT in a life-safety " +
+      "emergency, where you log immediately with whatever you have. Never pass a placeholder " +
+      "like 'unknown' for anything — leave the field out instead. Safe to call more than once " +
+      "in the same call: each call updates the same request, so if you learn or correct " +
+      "anything afterwards, call it again with the full details. For an emergency or urgent " +
+      "issue, call escalate after logging it.",
+    url: `${siteUrl}/tools/log-maintenance-request`,
+    // Only what an emergency can supply with nothing else known. caller_name and the rest are
+    // deliberately optional: when they were required for log_tenant_issue the agent satisfied the
+    // schema by inventing "unknown" (2026-08-24).
+    required: ["conversation_id", "issue_type", "description", "severity"],
+    properties: {
+      conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
+      agent_id: { type: "string", dynamicVariable: "system__agent_id" },
+      caller_id: { type: "string", dynamicVariable: "system__caller_id" },
+      caller_name: {
+        type: "string",
+        description:
+          "The resident's full name, exactly as they gave it. Never a placeholder such as " +
+          "'unknown' — if you don't have it yet, ask, or leave it out.",
+      },
+      callback_phone: {
+        type: "string",
+        description:
+          "The number they want to be reached on, as digits, read back and confirmed. Leave it " +
+          "out if they decline or say to use the number they called from; never invent one.",
+      },
+      spoken_address: { type: "string", description: "The property address the caller said, as they said it." },
+      spoken_unit: { type: "string", description: "Their unit or apartment number, e.g. '4B'." },
+      issue_type: {
+        type: "string",
+        description:
+          "One of: electrical, water_leak, broken_item, gas, fire, flooding, " +
+          "tenant_responsibility, other.",
+      },
+      description: {
+        type: "string",
+        description: "One or two plain sentences on what is wrong, in the caller's words.",
+      },
+      first_noticed: { type: "string", description: "When they first noticed it, in their words." },
+      answers: {
+        type: "string",
+        description:
+          "JSON object of the issue-specific answers, short key to short string value, e.g. " +
+          '{"breaker_checked": "yes, still no power", "actively_flowing": "yes", ' +
+          '"top_floor": "no"}. Include every answer you were given; omit if there are none.',
+      },
+      pets: { type: "string", description: "Pets in the unit: type and how many, e.g. '1 dog'." },
+      preferred_access_times: {
+        type: "string",
+        description: "Times that suit the caller for a technician to come by, in their words.",
+      },
+      severity: {
+        type: "string",
+        description:
+          "One of: emergency, urgent, routine, informational, using the levels in your " +
+          "instructions. Judge the issue itself, never how upset the caller sounds.",
+      },
+      severity_reason: {
+        type: "string",
+        description: "A few words on why that level, e.g. 'no heat, unlivable but not dangerous'.",
+      },
+    },
+  },
+  {
+    name: "route_owner_prospect",
+    description:
+      "Records a property owner who wants this company to manage their property, and alerts " +
+      "the team. Not for renters. Ask for their name and the best number to reach them first; " +
+      "never pass a placeholder like 'unknown' — leave a field out instead.",
+    url: `${siteUrl}/tools/owner-prospect`,
+    required: ["conversation_id", "name"],
+    properties: {
+      conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
+      agent_id: { type: "string", dynamicVariable: "system__agent_id" },
+      caller_id: { type: "string", dynamicVariable: "system__caller_id" },
+      name: { type: "string", description: "The owner's full name, as they gave it." },
+      phone: {
+        type: "string",
+        description:
+          "The best number to reach them on, as digits, read back and confirmed. Leave it out " +
+          "only if they say to use the number they called from.",
+      },
+      email: { type: "string", description: "Their email address, if they offered it." },
+      property_address: { type: "string", description: "The address of the property, if they gave it." },
+      property_details: {
+        type: "string",
+        description: "What they said about the property: type, number of units, current situation.",
+      },
+      notes: { type: "string", description: "Anything else useful for the team, in one or two sentences." },
     },
   },
 ];
@@ -712,7 +901,8 @@ export const saveAgent = action({
     voiceId: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<string> => {
-    const { orgId, userId } = await requireOrgId(ctx);
+    const { orgId, userId, isAdmin } = await requireOrgId(ctx);
+    if (!isAdmin) throw new Error("Only a team admin can do that.");
     // A no-op if this user already has an agent. Guarantees that even someone who opens
     // Settings and hits Save before ever placing a call still starts from the same seeded
     // setup (property + knowledge base included) as everyone else — not a bare prompt with
@@ -741,10 +931,11 @@ export const saveAgent = action({
     // composed one would bake the render into the editable text and duplicate the block on
     // every subsequent save.
     const sourcePrompt = args.prompt ?? existing?.prompt ?? LEASING_PROMPT;
+    const sarah: SarahConfig | null = await ctx.runQuery(internal.sarahConfig.publishedForOrg, { orgId });
 
     const config: el.AgentConfig = {
       name: args.name ?? existing?.name ?? "Sarah",
-      prompt: composePrompt(sourcePrompt, questions, disabledCore),
+      prompt: composePrompt(sourcePrompt, questions, disabledCore, sarah),
       firstMessage: args.firstMessage ?? existing?.firstMessage ?? DEFAULT_FIRST_MESSAGE,
       voiceId: args.voiceId ?? existing?.voiceId ?? DEFAULT_VOICE_ID,
       knowledgeBase,
@@ -795,9 +986,12 @@ export const pushKnowledgeBase = internalAction({
       internal.screening.disabledBuiltinsForOrg,
       { orgId: args.orgId },
     );
+    const sarah: SarahConfig | null = await ctx.runQuery(internal.sarahConfig.publishedForOrg, {
+      orgId: args.orgId,
+    });
     await el.updateAgent(agent.elevenLabsAgentId, {
       name: agent.name,
-      prompt: composePrompt(agent.prompt, questions, disabledCore),
+      prompt: composePrompt(agent.prompt, questions, disabledCore, sarah),
       firstMessage: agent.firstMessage,
       voiceId: agent.voiceId,
       knowledgeBase,
@@ -1050,6 +1244,53 @@ export const setPrompt = internalMutation({
   args: { agentId: v.id("agents"), prompt: v.string() },
   handler: (ctx, args) =>
     ctx.db.patch(args.agentId, { prompt: args.prompt, updatedAt: Date.now() }),
+});
+
+/** Patches the stored prompt and first message together, for resetToDefaultPrompt below. */
+export const setPromptAndFirstMessage = internalMutation({
+  args: { agentId: v.id("agents"), prompt: v.string(), firstMessage: v.string() },
+  handler: (ctx, args) =>
+    ctx.db.patch(args.agentId, {
+      prompt: args.prompt,
+      firstMessage: args.firstMessage,
+      updatedAt: Date.now(),
+    }),
+});
+
+/**
+ * Replaces an agent's stored prompt and first message with the current LEASING_PROMPT and
+ * DEFAULT_FIRST_MESSAGE, then pushes the result (and the tool list) to ElevenLabs.
+ *
+ * Needed because agents.prompt lives in the database: editing LEASING_PROMPT only changes agents
+ * created afterwards, and saveAgent prefers the stored snapshot forever. Without this, an existing
+ * team keeps the old prompt (and its old company name) even though the new tools are registered.
+ * It OVERWRITES any hand edits made in Settings, so pass `orgId` to do one team at a time:
+ *   npx convex run agents:resetToDefaultPrompt '{"orgId":"<organizations id>"}'
+ * Omit orgId to reset every agent in the deployment.
+ */
+export const resetToDefaultPrompt = internalAction({
+  args: { orgId: v.optional(v.string()) },
+  handler: async (ctx, args): Promise<{ reset: number; failed: string[] }> => {
+    const agents = await ctx.runQuery(internal.agents.allForMigration, {});
+    const targets = agents.filter((a) => !args.orgId || a.orgId === args.orgId);
+    const failed: string[] = [];
+    let reset = 0;
+    for (const agent of targets) {
+      try {
+        if (!agent.orgId) throw new Error("no organization yet");
+        await ctx.runMutation(internal.agents.setPromptAndFirstMessage, {
+          agentId: agent._id,
+          prompt: LEASING_PROMPT,
+          firstMessage: DEFAULT_FIRST_MESSAGE,
+        });
+        await ctx.runAction(internal.agents.pushKnowledgeBase, { orgId: agent.orgId });
+        reset += 1;
+      } catch (err) {
+        failed.push(`${agent.name}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return { reset, failed };
+  },
 });
 
 /**

@@ -37,8 +37,8 @@ export default function RootLayout({
           signInUrl="/sign-in"
           signUpUrl="/sign-up"
           afterSignOutUrl="/"
-          signInFallbackRedirectUrl="/dashboard"
-          signUpFallbackRedirectUrl="/dashboard"
+          signInFallbackRedirectUrl="/home"
+          signUpFallbackRedirectUrl="/home"
           appearance={{
             theme: shadcn,
             variables: {

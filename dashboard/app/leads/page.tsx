@@ -20,6 +20,8 @@ import { useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Dropdown } from "@/components/ui/dropdown";
+import { RequireView } from "@/components/require-view";
+import { ConversationTranscript } from "@/components/transcript";
 
 function formatDuration(seconds?: number) {
   if (seconds === undefined) return "—";
@@ -51,7 +53,7 @@ const OUTCOME_STYLES: Record<string, string> = {
 
 const OUTCOME_LABELS: Record<string, string> = {
   tour_booked: "Tour booked",
-  disqualified: "Disqualified",
+  disqualified: "Review needed",
   escalated: "Escalated",
   logged_only: "Logged only",
 };
@@ -88,6 +90,14 @@ type Qualification = {
   disqualifyReason?: string;
   nearMiss?: boolean;
   tourSlot?: string;
+  ownerProspect?: {
+    name?: string;
+    phone?: string;
+    email?: string;
+    propertyAddress?: string;
+    propertyDetails?: string;
+    notes?: string;
+  };
   screeningAnswers?: Array<{
     key: string;
     question: string;
@@ -95,7 +105,7 @@ type Qualification = {
   }>;
 } | null;
 
-export default function LeadsPage() {
+function LeadsPageInner() {
   const {
     results: history,
     status: historyStatus,
@@ -108,14 +118,7 @@ export default function LeadsPage() {
   const [outcomeFilter, setOutcomeFilter] = useState("all");
   const [search, setSearch] = useState("");
 
-  const transcript = useQuery(
-    api.conversations.transcript,
-    selected ? { conversationId: selected } : "skip",
-  );
-  const qualification = useQuery(
-    api.qualifications.forConversation,
-    selected ? { conversationId: selected } : "skip",
-  );
+  const [ownerOnly, setOwnerOnly] = useState(false);
 
   const filtered = useMemo(() => {
     if (!history) return history;
@@ -170,6 +173,18 @@ export default function LeadsPage() {
               options={INTENT_DROPDOWN_OPTIONS}
               buttonClassName="h-10 min-w-32"
             />
+            <button
+              type="button"
+              onClick={() => setOwnerOnly((v) => !v)}
+              aria-pressed={ownerOnly}
+              className={`h-10 rounded-lg border px-3 text-sm ${
+                ownerOnly
+                  ? "border-violet-300 bg-violet-50 text-violet-700"
+                  : "border-input bg-card text-muted-foreground hover:bg-accent"
+              }`}
+            >
+              Owner prospects
+            </button>
             <Dropdown
               value={outcomeFilter}
               onChange={setOutcomeFilter}
@@ -211,8 +226,7 @@ export default function LeadsPage() {
               index={index}
               expanded={selected === call._id}
               onToggle={() => setSelected(selected === call._id ? null : call._id)}
-              transcript={selected === call._id ? transcript : undefined}
-              qualification={selected === call._id ? qualification : undefined}
+              ownerOnly={ownerOnly}
             />
           ))}
         </div>
@@ -238,8 +252,7 @@ export default function LeadsPage() {
                   index={index}
                   expanded={selected === call._id}
                   onToggle={() => setSelected(selected === call._id ? null : call._id)}
-                  transcript={selected === call._id ? transcript : undefined}
-                  qualification={selected === call._id ? qualification : undefined}
+                  ownerOnly={ownerOnly}
                 />
               ))}
             </tbody>
@@ -375,7 +388,38 @@ function FunnelStep({
   );
 }
 
-function OutcomeBadge({ call }: { call: CallRow }) {
+function OutcomeBadge({
+  call,
+  qualification,
+}: {
+  call: CallRow;
+  qualification?: Qualification;
+}) {
+  const owner = qualification?.ownerProspect ? (
+    <span className="rounded-md bg-violet-50 px-2 py-1 text-[10px] font-semibold tracking-wide text-violet-700 uppercase">
+      Owner prospect → Alex
+    </span>
+  ) : null;
+  const match =
+    qualification?.qualifies === true ? (
+      <span className="rounded-md bg-emerald-50 px-2 py-1 text-[10px] font-semibold tracking-wide text-emerald-600 uppercase">
+        Matches criteria
+      </span>
+    ) : qualification?.qualifies === false && call.outcome !== "disqualified" ? (
+      <span className="rounded-md bg-amber-50 px-2 py-1 text-[10px] font-semibold tracking-wide text-amber-700 uppercase">
+        Review needed
+      </span>
+    ) : null;
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5">
+      <OutcomeBase call={call} />
+      {match}
+      {owner}
+    </span>
+  );
+}
+
+function OutcomeBase({ call }: { call: CallRow }) {
   if (call.outcome) {
     return (
       <span
@@ -403,16 +447,18 @@ function CallTableRow({
   index,
   expanded,
   onToggle,
-  transcript,
-  qualification,
+  ownerOnly,
 }: {
   call: CallRow;
   index: number;
   expanded: boolean;
   onToggle: () => void;
-  transcript?: Array<{ _id: string; role: string; text: string }>;
-  qualification?: Qualification;
+  ownerOnly: boolean;
 }) {
+  const qualification = useQuery(api.qualifications.forConversation, { conversationId: call._id }) as
+    | Qualification
+    | undefined;
+  if (ownerOnly && !qualification?.ownerProspect) return null;
   return (
     <>
       <motion.tr
@@ -443,7 +489,7 @@ function CallTableRow({
         </td>
         <td className="px-3 py-3.5">{call.callerNumber ?? "—"}</td>
         <td className="px-3 py-3.5">
-          <OutcomeBadge call={call} />
+          <OutcomeBadge call={call} qualification={qualification} />
         </td>
         <td className="px-3 py-3.5 tabular-nums">{formatDuration(call.durationSec)}</td>
         <td className="px-3 py-3.5 text-muted-foreground">
@@ -462,7 +508,7 @@ function CallTableRow({
               >
                 <div className="p-5">
                   <ExpandedDetail
-                    transcript={transcript}
+                    conversationId={call._id}
                     qualification={qualification}
                     summary={call.summary}
                   />
@@ -481,16 +527,18 @@ function CallCard({
   index,
   expanded,
   onToggle,
-  transcript,
-  qualification,
+  ownerOnly,
 }: {
   call: CallRow;
   index: number;
   expanded: boolean;
   onToggle: () => void;
-  transcript?: Array<{ _id: string; role: string; text: string }>;
-  qualification?: Qualification;
+  ownerOnly: boolean;
 }) {
+  const qualification = useQuery(api.qualifications.forConversation, { conversationId: call._id }) as
+    | Qualification
+    | undefined;
+  if (ownerOnly && !qualification?.ownerProspect) return null;
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
@@ -503,7 +551,7 @@ function CallCard({
           <p className="text-xs text-muted-foreground">{new Date(call.startedAt).toLocaleString()}</p>
           <div className="mt-2 flex items-center gap-2">
             <span className="text-sm font-medium">{call.callerNumber ?? "Browser call"}</span>
-            <OutcomeBadge call={call} />
+            <OutcomeBadge call={call} qualification={qualification} />
           </div>
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -523,7 +571,7 @@ function CallCard({
           >
             <div className="p-4">
               <ExpandedDetail
-                transcript={transcript}
+                conversationId={call._id}
                 qualification={qualification}
                 summary={call.summary}
               />
@@ -536,11 +584,11 @@ function CallCard({
 }
 
 function ExpandedDetail({
-  transcript,
+  conversationId,
   qualification,
   summary,
 }: {
-  transcript?: Array<{ _id: string; role: string; text: string }>;
+  conversationId: Id<"conversations">;
   qualification?: Qualification;
   summary?: string;
 }) {
@@ -580,7 +628,7 @@ function ExpandedDetail({
             </p>
           ) : (
             <p className="mb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">
-              Why they didn&apos;t qualify
+              Staff note: criteria not met
             </p>
           )}
           <p className={qualification.nearMiss ? "text-amber-900" : "text-foreground"}>
@@ -609,25 +657,22 @@ function ExpandedDetail({
           </div>
         </div>
       ) : null}
-      <div className="space-y-3">
-        {transcript?.length ? (
-          transcript.map((line) => (
-            <div key={line._id} className={line.role === "user" ? "text-right" : "text-left"}>
-              <span
-                className={`inline-block max-w-[80%] rounded-2xl px-3 py-2 text-sm ${
-                  line.role === "user"
-                    ? "bg-secondary text-secondary-foreground"
-                    : "bg-accent text-accent-foreground"
-                }`}
-              >
-                {line.text}
-              </span>
-            </div>
-          ))
-        ) : (
-          <p className="text-sm text-muted-foreground">No transcript recorded for this call.</p>
-        )}
-      </div>
+      {qualification?.ownerProspect ? (
+        <div className="rounded-xl border border-violet-200 bg-violet-50 p-3 text-sm">
+          <p className="mb-1 text-xs font-semibold tracking-wide text-violet-700 uppercase">
+            Owner prospect → Alex
+          </p>
+          <div className="grid gap-x-6 gap-y-1 sm:grid-cols-2">
+            <Field label="Name" value={qualification.ownerProspect.name} />
+            <Field label="Phone" value={qualification.ownerProspect.phone} />
+            <Field label="Email" value={qualification.ownerProspect.email} />
+            <Field label="Property" value={qualification.ownerProspect.propertyAddress} />
+            <Field label="Details" value={qualification.ownerProspect.propertyDetails} />
+            <Field label="Notes" value={qualification.ownerProspect.notes} />
+          </div>
+        </div>
+      ) : null}
+      <ConversationTranscript conversationId={conversationId} />
     </div>
   );
 }
@@ -639,5 +684,13 @@ function Field({ label, value }: { label: string; value?: string }) {
       <span className="text-muted-foreground">{label}: </span>
       <span>{value}</span>
     </div>
+  );
+}
+
+export default function LeadsPage() {
+  return (
+    <RequireView views={["admin", "asset_manager"]}>
+      <LeadsPageInner />
+    </RequireView>
   );
 }

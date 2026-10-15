@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { internalQuery, mutation, query } from "./_generated/server";
+import { requireOrgAdmin } from "./authz";
 
 // --- Reads ----------------------------------------------------------------
 
@@ -25,6 +26,7 @@ export const staffPhoneNumberInternal = internalQuery({
 export const save = mutation({
   args: { staffPhoneNumber: v.string() },
   handler: async (ctx, args) => {
+    await requireOrgAdmin(ctx);
     const existing = await ctx.db.query("orgSettings").first();
     if (existing) await ctx.db.patch(existing._id, { staffPhoneNumber: args.staffPhoneNumber });
     else await ctx.db.insert("orgSettings", { staffPhoneNumber: args.staffPhoneNumber });

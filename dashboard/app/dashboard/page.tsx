@@ -6,13 +6,31 @@ import { motion } from "framer-motion";
 import {
   ArrowRight,
   ArrowUpRight,
+  AlertTriangle,
   CalendarCheck,
+  CheckCircle2,
   ChevronRight,
+  ClipboardList,
   PhoneCall,
+  Siren,
   UsersRound,
+  Wallet,
+  Wrench,
 } from "lucide-react";
 import Link from "next/link";
+import { useState } from "react";
 import { api } from "@/convex/_generated/api";
+import { RequireView } from "@/components/require-view";
+import { useToast } from "@/components/toast";
+import {
+  btnOutline,
+  cleanError,
+  mrNumber,
+  SeverityBadge,
+  StatusPill,
+  timeAgo,
+} from "@/components/maintenance/shared";
+import type { Id } from "@/convex/_generated/dataModel";
 
 type LeadStatus = "tour_booked" | "escalated" | "disqualified" | "qualified" | "contacted" | "new";
 
@@ -75,11 +93,17 @@ function formatBedrooms(value: string): string {
   return match ? `${match[1]} Bedroom` : value;
 }
 
-export default function DashboardPage() {
+function DashboardPageInner() {
   const { user } = useUser();
   const data = useQuery(api.dashboard.overview, { fallbackTimeZone: browserTimeZone() });
-  const tasks = useQuery(api.tasks.list);
+  const tasks = useQuery(api.tasks.list, { mine: true });
   const toggleTask = useMutation(api.tasks.toggleComplete);
+  const access = useQuery(api.team.myAccess);
+  const view = access?.view;
+  const isAdmin = view === "admin";
+  const isAccountant = view === "accountant";
+  const showMaintenance = isAdmin || view === "asset_manager";
+  const m = data?.maintenance;
 
   const now = new Date();
   const firstName = user?.firstName?.trim() || user?.fullName?.split(" ")[0] || "there";
@@ -117,6 +141,7 @@ export default function DashboardPage() {
 
       <div className="grid grid-cols-1 items-start gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
         <div className="space-y-5">
+          {!isAccountant ? (
           <div className="grid grid-cols-1 gap-5 sm:grid-cols-3">
             <StatCard
               icon={UsersRound}
@@ -137,7 +162,94 @@ export default function DashboardPage() {
               changePct={data?.stats.toursBooked.changePct ?? null}
             />
           </div>
+          ) : null}
 
+          {showMaintenance ? (
+            <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-4">
+              <LinkStat icon={ClipboardList} label="Open requests" value={m?.openRequests} href="/maintenance" />
+              <LinkStat icon={Siren} label="Emergencies (24h)" value={m?.emergencies24h} href="/maintenance" />
+              <LinkStat icon={Wrench} label="Work orders in progress" value={m?.woInProgress} href="/work-orders?status=in_progress" />
+              <LinkStat icon={CheckCircle2} label="Completed this week" value={m?.completedThisWeek} href="/work-orders?status=completed" />
+            </div>
+          ) : null}
+
+          {isAccountant ? (
+            <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+              <LinkStat icon={CheckCircle2} label="Work orders completed this week" value={m?.completedThisWeek} href="/work-orders?status=completed" />
+              <Card>
+                <div className="flex items-center gap-3">
+                  <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-50 text-primary">
+                    <Wallet className="h-5 w-5" />
+                  </span>
+                  <div>
+                    <h2 className="text-sm font-semibold text-foreground">Finance</h2>
+                    <p className="text-xs text-muted-foreground">Payments and owner statements are coming soon.</p>
+                  </div>
+                </div>
+              </Card>
+            </div>
+          ) : null}
+
+          {isAdmin ? (
+            <Card>
+              <CardHeader title="Needs attention" href="/maintenance" linkLabel="Maintenance" />
+              <div className="flex flex-col">
+                {[
+                  { label: "Exceptions in the queue", n: m?.exceptions, href: "/maintenance/exceptions" },
+                  { label: "Stuck in New for over 4 hours", n: m?.stuckNew, href: "/maintenance" },
+                  { label: "Awaiting Pat's review", n: m?.awaitingReview, href: "/work-orders?status=completed" },
+                  { label: "Overdue work orders", n: m?.overdue, href: "/work-orders" },
+                ].map((row, i) => (
+                  <Link
+                    key={row.label}
+                    href={row.href}
+                    className={`flex items-center justify-between gap-3 py-3 text-xs hover:bg-muted/40 ${i > 0 ? "border-t border-slate-100" : ""}`}
+                  >
+                    <span className="flex items-center gap-2 text-foreground">
+                      <AlertTriangle className={`h-3.5 w-3.5 ${row.n ? "text-amber-500" : "text-muted-foreground-subtle"}`} />
+                      {row.label}
+                    </span>
+                    <span className={`font-semibold ${row.n ? "text-foreground" : "text-muted-foreground-subtle"}`}>
+                      {row.n ?? "—"}
+                    </span>
+                  </Link>
+                ))}
+              </div>
+            </Card>
+          ) : null}
+
+          {showMaintenance ? (
+            <Card>
+              <CardHeader title="Recent maintenance" href="/maintenance" linkLabel="View all" />
+              {m && m.recent.length === 0 ? (
+                <EmptyState>No open maintenance requests.</EmptyState>
+              ) : (
+                <div className="flex flex-col">
+                  {(m?.recent ?? []).map((r, i) => (
+                    <Link
+                      key={r._id}
+                      href={`/maintenance/${r._id}`}
+                      className={`flex items-center gap-3 py-3 hover:bg-muted/40 ${i > 0 ? "border-t border-slate-100" : ""}`}
+                    >
+                      <span className="w-16 shrink-0 text-xs font-medium text-muted-foreground">{mrNumber(r.number)}</span>
+                      <span className="min-w-0 flex-1 truncate text-xs text-foreground">
+                        {r.propertyName ?? "Unknown property"}
+                        {r.unitNumber ? ` · ${r.unitNumber}` : ""} · {r.description}
+                      </span>
+                      <SeverityBadge severity={r.severity} />
+                      <StatusPill status={r.status} />
+                      <span className="w-8 shrink-0 text-right text-[11px] text-muted-foreground-subtle">{timeAgo(r.createdAt)}</span>
+                    </Link>
+                  ))}
+                  {!m ? <div className="h-4 w-full animate-pulse rounded bg-muted" /> : null}
+                </div>
+              )}
+            </Card>
+          ) : null}
+
+          {isAdmin ? <FollowUpCard /> : null}
+
+          {!isAccountant ? (
           <Card>
             <CardHeader title="Recent Leads" href="/leads" linkLabel="View all" />
             {data && data.recentLeads.length === 0 ? (
@@ -196,9 +308,11 @@ export default function DashboardPage() {
               </div>
             )}
           </Card>
+          ) : null}
         </div>
 
         <div className="space-y-5">
+          {!isAccountant ? (
           <Card>
             <CardHeader title="Today's Schedule" href="/calendar" linkLabel="View Calendar" />
             {data && data.todaysTours.length === 0 ? (
@@ -233,6 +347,7 @@ export default function DashboardPage() {
               </div>
             )}
           </Card>
+          ) : null}
 
           <Card>
             <CardHeader title="My Tasks" href="/tasks" linkLabel="View all" />
@@ -281,6 +396,80 @@ export default function DashboardPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+function FollowUpCard() {
+  const calls = useQuery(api.conversations.needsFollowUp);
+  const markFollowedUp = useMutation(api.conversations.markFollowedUp);
+  const toast = useToast();
+  const [busy, setBusy] = useState<string | null>(null);
+
+  async function mark(id: Id<"conversations">) {
+    setBusy(id);
+    try {
+      await markFollowedUp({ conversationId: id });
+      toast("Marked as followed up.");
+    } catch (e) {
+      toast(cleanError(e), "error");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader title="Failed / unclear calls" href="/leads" linkLabel="View leads" />
+      {calls && calls.length === 0 ? (
+        <EmptyState>No calls need a follow-up.</EmptyState>
+      ) : (
+        <div className="flex flex-col">
+          {(calls ?? []).map((c, i) => (
+            <div key={c._id} className={`flex items-start justify-between gap-3 py-3 ${i > 0 ? "border-t border-slate-100" : ""}`}>
+              <div className="min-w-0">
+                <div className="text-xs font-medium text-foreground">
+                  {c.callerNumber ?? "Unknown caller"}
+                  <span className="ml-2 font-normal text-muted-foreground-subtle">
+                    {c.status === "failed" ? "Failed" : "Unclear"} · {timeAgo(c.startedAt)} ago
+                  </span>
+                </div>
+                {c.summary ? <p className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{c.summary}</p> : null}
+              </div>
+              <button type="button" disabled={busy === c._id} onClick={() => void mark(c._id)} className={`${btnOutline} shrink-0 !px-3 !py-1 !text-xs`}>
+                Mark followed up
+              </button>
+            </div>
+          ))}
+          {!calls ? <div className="h-4 w-full animate-pulse rounded bg-muted" /> : null}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function LinkStat({
+  icon: Icon,
+  label,
+  value,
+  href,
+}: {
+  icon: typeof UsersRound;
+  label: string;
+  value?: number;
+  href: string;
+}) {
+  return (
+    <Link href={href} className="block rounded-2xl border border-border/90 bg-card p-5 shadow-[0_1px_2px_rgba(0,0,0,0.03)] transition-colors hover:bg-muted/40">
+      <div className="flex items-center gap-3">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-primary">
+          <Icon className="h-5 w-5" />
+        </span>
+        <span className="text-xs font-medium text-muted-foreground">{label}</span>
+      </div>
+      <div className="mt-4 text-3xl font-bold tracking-tight text-foreground">
+        {value === undefined ? <span className="text-muted-foreground-subtle">—</span> : value}
+      </div>
+    </Link>
   );
 }
 
@@ -370,5 +559,13 @@ function StatCard({
         )}
       </div>
     </motion.div>
+  );
+}
+
+export default function DashboardPage() {
+  return (
+    <RequireView views={["admin", "accountant", "asset_manager"]}>
+      <DashboardPageInner />
+    </RequireView>
   );
 }

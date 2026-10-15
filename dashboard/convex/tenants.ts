@@ -2,7 +2,7 @@ import { v } from "convex/values";
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { clampSeverity } from "./severity";
 import { realValue, realPhone } from "./sanitize";
-import { currentOrg } from "./authz";
+import { currentOrg, requireAdminView, requireOrgAdmin, viewFor } from "./authz";
 
 // --- Reads ----------------------------------------------------------------
 
@@ -17,6 +17,9 @@ export const issues = query({
   handler: async (ctx) => {
     const org = await currentOrg(ctx);
     if (!org) return [];
+    // Resident-call detail is not for technicians or accountants.
+    const view = viewFor(org.isAdmin, org.jobRoles);
+    if (view === "technician" || view === "accountant") return [];
     const rows = await ctx.db
       .query("tenantIssues")
       .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
@@ -101,6 +104,8 @@ export const logIssue = internalMutation({
     category: v.optional(v.string()),
     severity: v.number(),
     severityReason: v.optional(v.string()),
+    // Non-maintenance resident call type (rent, portal_login, ...); validated by the HTTP layer.
+    callType: v.optional(v.string()),
     // Set by the escalate handler's safety net, which only needs a row to EXIST so the call is
     // classified as a resident call. Without this it reused the normal upsert and overwrote a
     // row Sarah had already written from log_tenant_issue -- replacing her reason, her unit and
@@ -218,9 +223,9 @@ export const updateIssue = mutation({
     status: v.optional(v.union(v.literal("open"), v.literal("resolved"))),
   },
   handler: async (ctx, args) => {
-    const org = await currentOrg(ctx);
+    const org = await requireAdminView(ctx);
     const issue = await ctx.db.get(args.issueId);
-    if (!issue || !org || issue.orgId !== org.orgId) return;
+    if (!issue || issue.orgId !== org.orgId) return;
 
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
     if (args.reason !== undefined) patch.reason = args.reason;
@@ -245,9 +250,9 @@ export const updateIssue = mutation({
 export const removeIssue = mutation({
   args: { issueId: v.id("tenantIssues") },
   handler: async (ctx, args) => {
-    const org = await currentOrg(ctx);
+    const org = await requireOrgAdmin(ctx);
     const issue = await ctx.db.get(args.issueId);
-    if (!issue || !org || issue.orgId !== org.orgId) return;
+    if (!issue || issue.orgId !== org.orgId) return;
     await ctx.db.delete(args.issueId);
   },
 });

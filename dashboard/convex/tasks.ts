@@ -3,6 +3,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import { mutation, query } from "./_generated/server";
 import { currentOrg, requireOrg } from "./authz";
+import type { OrgContext } from "./authz";
 
 async function ownedTask(
   ctx: MutationCtx,
@@ -14,21 +15,61 @@ async function ownedTask(
   return task;
 }
 
+/**
+ * Validates the optional record links a task can carry. Ids come from the client, so each one
+ * is checked to belong to this team (and the assignee to be a member of it) before it is stored.
+ */
+async function checkLinks(
+  ctx: MutationCtx,
+  org: OrgContext,
+  links: {
+    assigneeUserId?: Id<"users">;
+    unitId?: Id<"units">;
+    requestId?: Id<"maintenanceRequests">;
+    workOrderId?: Id<"workOrders">;
+  },
+): Promise<void> {
+  if (links.assigneeUserId) {
+    const membership = await ctx.db
+      .query("memberships")
+      .withIndex("by_user", (q) => q.eq("userId", links.assigneeUserId!))
+      .first();
+    if (!membership || membership.orgId !== org.orgId) throw new Error("Assignee not found.");
+  }
+  if (links.unitId) {
+    const unit = await ctx.db.get(links.unitId);
+    if (!unit || unit.orgId !== org.orgId) throw new Error("Unit not found.");
+  }
+  if (links.requestId) {
+    const request = await ctx.db.get(links.requestId);
+    if (!request || request.orgId !== org.orgId) throw new Error("Request not found.");
+  }
+  if (links.workOrderId) {
+    const wo = await ctx.db.get(links.workOrderId);
+    if (!wo || wo.orgId !== org.orgId) throw new Error("Work order not found.");
+  }
+}
+
 function displayName(user: Doc<"users">): string {
   return [user.firstName, user.lastName].filter(Boolean).join(" ").trim() || user.email || "Someone";
 }
 
-/** The signed-in team's tasks. Empty (not an error) when signed out. */
+/**
+ * The signed-in team's tasks. Empty (not an error) when signed out. `mine` narrows it to tasks
+ * the caller created or is assigned to.
+ */
 export const list = query({
-  args: {},
-  handler: async (ctx) => {
+  args: { mine: v.optional(v.boolean()) },
+  handler: async (ctx, args) => {
     const org = await currentOrg(ctx);
     if (!org) return [];
-    return ctx.db
+    const rows = await ctx.db
       .query("tasks")
       .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
       .order("desc")
       .collect();
+    if (!args.mine) return rows;
+    return rows.filter((t) => t.userId === org.user._id || t.assigneeUserId === org.user._id);
   },
 });
 
@@ -46,9 +87,15 @@ export const create = mutation({
     // Files uploaded through the Create task modal's Attach files button before the task
     // existed — see taskAttachments in schema.ts. Linked to the new row right after insert.
     attachmentIds: v.optional(v.array(v.id("taskAttachments"))),
+    assigneeUserId: v.optional(v.id("users")),
+    unitId: v.optional(v.id("units")),
+    requestId: v.optional(v.id("maintenanceRequests")),
+    workOrderId: v.optional(v.id("workOrders")),
   },
   handler: async (ctx, args) => {
-    const { orgId, user } = await requireOrg(ctx);
+    const org = await requireOrg(ctx);
+    const { orgId, user } = org;
+    await checkLinks(ctx, org, args);
     const title = args.title.trim();
     if (!title) throw new Error("Task title is required.");
 
@@ -63,6 +110,10 @@ export const create = mutation({
       category: args.category?.trim() || undefined,
       dueDate: args.dueDate,
       tags: args.tags?.length ? args.tags : undefined,
+      assigneeUserId: args.assigneeUserId,
+      unitId: args.unitId,
+      requestId: args.requestId,
+      workOrderId: args.workOrderId,
       createdAt: now,
       updatedAt: now,
     });
@@ -112,10 +163,19 @@ export const update = mutation({
     dueDate: v.optional(v.number()),
     clearDueDate: v.optional(v.boolean()),
     tags: v.optional(v.array(v.string())),
+    assigneeUserId: v.optional(v.id("users")),
+    clearAssignee: v.optional(v.boolean()),
+    unitId: v.optional(v.id("units")),
+    requestId: v.optional(v.id("maintenanceRequests")),
+    workOrderId: v.optional(v.id("workOrders")),
+    // Same reason as clearDueDate: "not provided" and "remove the links" are different requests.
+    clearLinks: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const { orgId } = await requireOrg(ctx);
+    const org = await requireOrg(ctx);
+    const { orgId } = org;
     await ownedTask(ctx, args.taskId, orgId);
+    await checkLinks(ctx, org, args);
 
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
     if (args.title !== undefined) {
@@ -129,6 +189,17 @@ export const update = mutation({
     if (args.tags !== undefined) patch.tags = args.tags;
     if (args.clearDueDate) patch.dueDate = undefined;
     else if (args.dueDate !== undefined) patch.dueDate = args.dueDate;
+    if (args.clearAssignee) patch.assigneeUserId = undefined;
+    else if (args.assigneeUserId !== undefined) patch.assigneeUserId = args.assigneeUserId;
+    if (args.clearLinks) {
+      patch.unitId = undefined;
+      patch.requestId = undefined;
+      patch.workOrderId = undefined;
+    } else {
+      if (args.unitId !== undefined) patch.unitId = args.unitId;
+      if (args.requestId !== undefined) patch.requestId = args.requestId;
+      if (args.workOrderId !== undefined) patch.workOrderId = args.workOrderId;
+    }
 
     await ctx.db.patch(args.taskId, patch);
   },

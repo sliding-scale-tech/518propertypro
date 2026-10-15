@@ -66,3 +66,26 @@ export function clampSeverity(value: unknown): number {
   if (typeof n !== "number" || !Number.isFinite(n)) return 5;
   return Math.min(MAX_SEVERITY, Math.max(1, Math.round(n)));
 }
+
+/**
+ * The named levels log_maintenance_request speaks (the maintenance.severity union), as opposed
+ * to the 1-10 score above that the older log_tenant_issue tool uses. The numeric value is only
+ * the representative score for the level, kept so the two vocabularies can sit side by side on
+ * the Tenants and Maintenance pages.
+ */
+export const SEVERITY_LEVELS = ["emergency", "urgent", "routine", "informational"] as const;
+export type SeverityLevel = (typeof SEVERITY_LEVELS)[number];
+
+export const SEVERITY_LEVEL_SCORE: Record<SeverityLevel, number> = {
+  emergency: 10,
+  urgent: 7,
+  routine: 4,
+  informational: 2,
+};
+
+/** The model's value as a known level, or null. Never guesses: an unknown level is rejected upstream. */
+export function parseSeverityLevel(value: unknown): SeverityLevel | null {
+  if (typeof value !== "string") return null;
+  const v = value.trim().toLowerCase();
+  return (SEVERITY_LEVELS as readonly string[]).includes(v) ? (v as SeverityLevel) : null;
+}

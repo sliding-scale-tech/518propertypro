@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import { query } from "./_generated/server";
 import type { Doc } from "./_generated/dataModel";
 import { currentOrg } from "./authz";
+import { maintenanceOverview } from "./maintenance";
 import { isLeasingLead } from "./conversations";
 import { localDateKey, startOfLocalDay, addDays, isValidTimeZone } from "./tourSchedule";
 
@@ -175,6 +176,10 @@ export const overview = query({
         };
       });
 
-    return { timeZone, propertyName, stats, recentLeads, todaysTours };
+    // Maintenance cards, scoped to what this viewer may see (admin: team, AM: own units,
+    // technician: own jobs, accountant: finished work).
+    const maintenance = await maintenanceOverview(ctx, org);
+
+    return { timeZone, propertyName, stats, recentLeads, todaysTours, maintenance };
   },
 });

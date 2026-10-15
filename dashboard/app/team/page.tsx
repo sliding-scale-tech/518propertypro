@@ -1,11 +1,19 @@
 "use client";
 
-import { useAction, useMutation, useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import { motion } from "framer-motion";
-import { Globe, Mail, Shield, Trash2, UserPlus, Users, X } from "lucide-react";
+import { Globe, Mail, Shield, Trash2, Users, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import { useToast } from "@/components/toast";
+import { MemberDetails } from "@/components/team/member-details";
+import {
+  InvitePanel,
+  ROLE_FILTERS,
+  inviteTypeLabel,
+  matchesRoleFilter,
+  type RoleFilter,
+} from "@/components/team/invite-panel";
 
 const inputClass =
   "h-11 w-full rounded-lg border border-input bg-card px-3 text-sm outline-none focus:ring-2 focus:ring-ring/20";
@@ -26,17 +34,15 @@ export default function TeamPage() {
   // Same underlying query the Calendar page uses for tour settings — timeZone is the one field
   // of it this page needs.
   const availability = useQuery(api.tours.availabilitySettings);
-  const invite = useAction(api.team.invite);
   const revokeInvite = useMutation(api.team.revokeInvite);
   const removeMember = useMutation(api.team.removeMember);
   const rename = useMutation(api.team.rename);
   const setTakingTours = useMutation(api.tours.setTakingTours);
   const toast = useToast();
 
-  const [email, setEmail] = useState("");
-  const [role, setRole] = useState<"admin" | "member">("member");
   const [name, setName] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [roleFilter, setRoleFilter] = useState<RoleFilter>("all");
 
   // `name` starts null and only takes the stored value until the admin edits it, so a live
   // update from someone else cannot yank the text out from under them mid-type.
@@ -109,49 +115,7 @@ export default function TeamPage() {
 
       <TimeZoneSection isAdmin={data.isAdmin} timeZone={availability?.timeZone ?? null} />
 
-      {data.isAdmin ? (
-        <section className="rounded-2xl border border-border bg-card p-5 shadow-sm sm:p-7">
-          <div className="mb-5 flex items-center gap-2">
-            <UserPlus className="h-5 w-5 text-muted-foreground" />
-            <h2 className="text-base font-semibold">Invite someone</h2>
-          </div>
-          <div className="flex flex-col gap-3 sm:flex-row">
-            <input
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              placeholder="teammate@company.com"
-              type="email"
-              className={inputClass}
-            />
-            <select
-              value={role}
-              onChange={(event) => setRole(event.target.value as "admin" | "member")}
-              className={`${inputClass} sm:w-44`}
-            >
-              <option value="member">Member</option>
-              <option value="admin">Admin</option>
-            </select>
-            <button
-              onClick={() =>
-                void run(async () => {
-                  await invite({ email, role });
-                  setEmail("");
-                }, `Invite sent to ${email.trim()}`)
-              }
-              disabled={busy || !email.trim()}
-              className="flex h-11 shrink-0 items-center justify-center gap-2 rounded-lg bg-primary px-5 text-sm font-semibold text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
-            >
-              <Mail className="h-4 w-4" />
-              Send invite
-            </button>
-          </div>
-          <p className="mt-3 text-xs text-muted-foreground">
-            They get an email with a link that expires in 7 days and works once. Once they
-            accept, they see this same dashboard — the same agent, property, knowledge base and
-            leads. Only admins can open this page.
-          </p>
-        </section>
-      ) : null}
+      <InvitePanel />
 
       <section className="rounded-2xl border border-border bg-card p-5 shadow-sm sm:p-7">
         <div className="mb-5 flex items-center gap-2">
@@ -165,10 +129,33 @@ export default function TeamPage() {
           {data.isAdmin ? "You can switch anyone's." : "You can switch your own; an admin can switch anyone's."}
         </p>
 
+        <div className="mb-4 flex flex-wrap gap-2">
+          {ROLE_FILTERS.map((f) => (
+            <button
+              key={f.value}
+              type="button"
+              onClick={() => setRoleFilter(f.value)}
+              aria-pressed={roleFilter === f.value}
+              className={`rounded-full border px-3 py-1 text-xs font-medium ${
+                roleFilter === f.value
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-input hover:bg-accent"
+              }`}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+
         <div className="space-y-2">
-          {data.members.map((member) => {
+          {data.members.filter((m) => matchesRoleFilter(roleFilter, m)).map((member) => {
             const canSwitch = data.isAdmin || member.isSelf;
             const status = TOUR_STATUS[member.tourStatus];
+            const viewer = data.members.find((m) => m.isSelf);
+            const canSetUnavailable =
+              data.isAdmin ||
+              member.isSelf ||
+              (viewer?.jobRoles ?? []).some((r) => r === "executive" || r === "maintenance_lead");
             return (
             <motion.div
               key={member.membershipId}
@@ -227,32 +214,37 @@ export default function TeamPage() {
                   />
                 </button>
               </label>
-              <span
-                className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-medium ${
-                  member.role === "admin"
-                    ? "bg-blue-50 text-blue-700"
-                    : "bg-muted text-muted-foreground"
-                }`}
-              >
-                {member.role === "admin" ? "Admin" : "Member"}
-              </span>
               {data.isAdmin && !member.isSelf ? (
-                <button
-                  onClick={() =>
-                    void run(
-                      () => removeMember({ membershipId: member.membershipId }),
-                      `${member.name} removed from the team`,
-                    )
+                <span
+                  title={
+                    member.unitsOwned > 0
+                      ? `Reassign their ${member.unitsOwned} unit${member.unitsOwned === 1 ? "" : "s"} first.`
+                      : undefined
                   }
-                  disabled={busy}
-                  aria-label={`Remove ${member.name}`}
-                  className="shrink-0 rounded-lg p-2 text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
+                  className="shrink-0"
                 >
-                  <Trash2 className="h-4 w-4" />
-                </button>
+                  <button
+                    onClick={() =>
+                      void run(
+                        () => removeMember({ membershipId: member.membershipId }),
+                        `${member.name} removed from the team`,
+                      )
+                    }
+                    disabled={busy || member.unitsOwned > 0}
+                    aria-label={`Remove ${member.name}`}
+                    className="rounded-lg p-2 text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </span>
               ) : (
                 <span className="w-8 shrink-0" />
               )}
+              <MemberDetails
+                member={member}
+                isAdmin={data.isAdmin}
+                canSetUnavailable={canSetUnavailable}
+              />
             </motion.div>
             );
           })}
@@ -287,7 +279,7 @@ export default function TeamPage() {
                     <p className="truncate text-sm font-medium">{invitation.email}</p>
                     <p className="text-xs text-muted-foreground">
                       Invited {new Date(invitation.createdAt).toLocaleDateString()} ·{" "}
-                      {invitation.role === "admin" ? "Admin" : "Member"}
+                      {inviteTypeLabel(invitation)}
                     </p>
                   </div>
                   <button
