@@ -75,6 +75,16 @@ const levelValidator = v.union(
   v.literal("informational"),
 );
 
+/** Texts Sarah's team sends to a tenant. Each needs Pat's approval before any SMS goes out. */
+export const TENANT_MESSAGE_KEYS = ["photoRequest", "outOfScope", "received"] as const;
+export type TenantMessageKey = (typeof TENANT_MESSAGE_KEYS)[number];
+
+const tenantMessageValidator = v.object({
+  wording: v.string(),
+  approved: v.boolean(),
+  ...approvalFields,
+});
+
 export const sarahConfigValidator = v.object({
   identity: v.object({ companyName: v.string(), firstMessage: v.string() }),
   callTypes: v.array(
@@ -128,15 +138,46 @@ export const sarahConfigValidator = v.object({
     minLeadMinutes: v.number(),
     captureOnly: v.boolean(),
   }),
+  // Optional so configs stored before tenant messages existed stay valid; normalizeConfig fills
+  // the draft defaults on read.
+  tenantMessages: v.optional(
+    v.object({
+      photoRequest: tenantMessageValidator,
+      outOfScope: tenantMessageValidator,
+      received: tenantMessageValidator,
+    }),
+  ),
 });
 
 export type SarahConfig = Infer<typeof sarahConfigValidator>;
+export type TenantMessage = Infer<typeof tenantMessageValidator>;
+export type TenantMessages = Record<TenantMessageKey, TenantMessage>;
 export type EmergencyScript = SarahConfig["emergencyScripts"][number];
 
 // --- Defaults (the current hard-coded behaviour) ---------------------------------------------
 
 export const DEFAULT_COMPANY_NAME = "518 Property Pro";
 export const DEFAULT_FIRST_MESSAGE = `Thanks for calling ${DEFAULT_COMPANY_NAME}, this is Sarah! Are you calling about renting an apartment, a maintenance issue, or something else?`;
+
+/** Draft wording only: nothing is ever texted to a tenant until Pat approves it. */
+export function defaultTenantMessages(): TenantMessages {
+  return {
+    photoRequest: {
+      wording:
+        "Hi, this is 518 Property Pro. To help us with your repair request, please upload a photo or short video of the issue here:",
+      approved: false,
+    },
+    outOfScope: {
+      wording:
+        "Hi, this is 518 Property Pro. We reviewed your request and it isn't something our maintenance team can send someone for. Please call us if you have questions.",
+      approved: false,
+    },
+    received: {
+      wording: "Hi, this is 518 Property Pro. We received your maintenance request and the team will follow up.",
+      approved: false,
+    },
+  };
+}
 
 export function defaultConfig(): SarahConfig {
   return {
@@ -242,6 +283,7 @@ export function defaultConfig(): SarahConfig {
       minLeadMinutes: 120,
       captureOnly: true,
     },
+    tenantMessages: defaultTenantMessages(),
   };
 }
 
@@ -254,6 +296,7 @@ export function normalizeConfig(c: SarahConfig): SarahConfig {
     severityLevels: d.severityLevels.map((s) => c.severityLevels.find((x) => x.level === s.level) ?? s),
     emergencyScripts: d.emergencyScripts.map((s) => c.emergencyScripts.find((x) => x.incident === s.incident) ?? s),
     escalationContacts: d.escalationContacts.map((e) => c.escalationContacts.find((x) => x.level === e.level) ?? e),
+    tenantMessages: { ...defaultTenantMessages(), ...(c.tenantMessages ?? {}) },
   };
 }
 
@@ -337,6 +380,12 @@ export function validateConfigShape(c: SarahConfig): void {
   }
   if (c.routingDirectory.enabled && c.routingDirectory.entries.some((e) => e.phone.trim() === "")) {
     throw new Error("The routing directory cannot be enabled while any entry has no phone number.");
+  }
+
+  for (const key of TENANT_MESSAGE_KEYS) {
+    const m = c.tenantMessages?.[key];
+    if (!m) continue;
+    text(m.wording, "A tenant message", 320); // one SMS segment-ish; keeps the link and wording in range
   }
 
   const l = c.leasing;
@@ -514,6 +563,8 @@ conversation_id and:
 - description: one or two plain sentences, in their words
 - severity: one of these four levels
 ${severityText(c)}
+- also severity_score: a 1-10 score using those severity levels (emergency 9-10, urgent 7-8,
+  routine 3-6, informational 1-2)
 - optionally severity_reason, caller_name, spoken_address, spoken_unit, first_noticed, pets,
   preferred_access_times, callback_phone and answers.
 Score the issue, never the caller. A calm person with no heat is urgent or worse; someone
@@ -597,6 +648,11 @@ export function composeSarahSections(c: SarahConfig): { lifeSafety: string; resi
     resident: composeResidentCalls(c),
     extra: [composeCallTypes(c), composeLeasing(c)].filter(Boolean).join("\n\n"),
   };
+}
+
+/** The config's tenant messages, defaults filled in. Pure; the approved check lives in sarahConfigRead. */
+export function tenantMessagesOf(c: SarahConfig): TenantMessages {
+  return { ...defaultTenantMessages(), ...(c.tenantMessages ?? {}) };
 }
 
 export function severityOf(level: string): SeverityLevel | null {

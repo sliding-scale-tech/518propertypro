@@ -23,7 +23,7 @@ export default function TechLayout({ children }: { children: ReactNode }) {
         <span className="min-w-0 truncate text-sm font-semibold">{name}</span>
         <button
           onClick={() => void signOut({ redirectUrl: "/" })}
-          className="inline-flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium hover:bg-muted"
+          className="inline-flex shrink-0 items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium hover:bg-muted"
         >
           <LogOut className="h-4 w-4" />
           Sign out

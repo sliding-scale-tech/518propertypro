@@ -9,6 +9,7 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { LiveWaveform } from "@/components/ui/live-waveform";
 import { RequireView } from "@/components/require-view";
+import { PageHeader } from "@/components/ui";
 
 function CallPageInner() {
   return (
@@ -202,14 +203,7 @@ function CallScreen() {
 
   return (
     <div className="relative isolate space-y-8 pb-16 sm:pb-20">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight text-foreground sm:text-3xl">
-          {agent?.name ?? "Support agent"}
-        </h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Start a browser call to test the voice agent.
-        </p>
-      </div>
+      <PageHeader title={agent?.name ?? "Support agent"} subtitle="Start a browser call to test the voice agent." />
 
       <AnimatePresence>
         {error && (
@@ -217,7 +211,7 @@ function CallScreen() {
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
-            className="flex items-center gap-2 overflow-hidden rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive-foreground"
+            className="flex items-center gap-2 overflow-hidden rounded-2xl bg-danger-soft px-4 py-3 text-sm text-danger-ink"
           >
             <AlertCircle className="h-4 w-4 shrink-0" />
             {error}

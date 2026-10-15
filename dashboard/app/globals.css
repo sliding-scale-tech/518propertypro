@@ -33,6 +33,19 @@
   --color-warning: var(--warning);
   --color-warning-foreground: var(--warning-foreground);
   --color-accent-foreground: var(--accent-foreground);
+  --color-success-soft: var(--success-soft);
+  --color-success-ink: var(--success-ink);
+  --color-warning-soft: var(--warning-soft);
+  --color-warning-ink: var(--warning-ink);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-ink: var(--danger-ink);
+  --color-violet: var(--violet);
+  --color-violet-soft: var(--violet-soft);
+  --color-accent-line: var(--accent-line);
+  --color-border-strong: var(--border-strong);
+  --color-faint: var(--faint);
+  --color-scrim: var(--scrim);
+  --shadow-card: var(--elev-card);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
   --color-muted-foreground-subtle: var(--muted-foreground-subtle);
@@ -116,6 +129,25 @@
   --sidebar-accent-foreground: var(--palette-blue-600);
   --sidebar-border: var(--palette-slate-200);
   --sidebar-ring: var(--palette-blue-600);
+
+  /* Ops-prototype design tokens (Pat view). *-ink = readable text colour on the matching *-soft tint. */
+  --success-soft: #ecfdf5;
+  --success-ink: #047857;
+  --warning-soft: #fffbeb;
+  --warning-ink: #b45309;
+  --danger-soft: #fef2f2;
+  --danger-ink: #b91c1c;
+  --violet: #6d28d9;
+  --violet-soft: #f5f3ff;
+  --accent-line: #bfdbfe;
+  --border-strong: #cbd5e1;
+  --faint: #94a3b8;
+  --glow: rgba(59, 130, 246, 0.22);
+  --scrim: rgba(15, 23, 42, 0.38);
+  --elev-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.06);
+  --radius-card: 20px;
+  --radius-kpi: 18px;
+  --radius-control: 12px;
 }
 
 .dark {
@@ -158,6 +190,21 @@
   --sidebar-accent-foreground: oklch(0.82 0.08 255);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.62 0.19 255);
+
+  --success-soft: oklch(0.3 0.06 165);
+  --success-ink: oklch(0.8 0.15 165);
+  --warning-soft: oklch(0.32 0.06 70);
+  --warning-ink: oklch(0.82 0.14 75);
+  --danger-soft: oklch(0.3 0.08 25);
+  --danger-ink: oklch(0.8 0.13 22);
+  --violet: oklch(0.78 0.12 295);
+  --violet-soft: oklch(0.31 0.07 295);
+  --accent-line: oklch(0.42 0.09 255);
+  --border-strong: oklch(1 0 0 / 22%);
+  --faint: oklch(0.55 0.02 255);
+  --glow: rgba(59, 130, 246, 0.16);
+  --scrim: rgba(0, 0, 0, 0.6);
+  --elev-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.25);
 }
 
 @layer base {
@@ -193,4 +240,16 @@
   .animate-pulse-ring {
     animation: none;
   }
+}
+
+/* Native date/time inputs: keep native pickers, match control radius/border. */
+input[type="date"],
+input[type="time"],
+input[type="datetime-local"],
+input[type="month"] {
+  border-radius: 12px;
+  border-color: var(--input);
+  background-color: var(--card);
+  font-size: 13.5px;
+  color-scheme: light dark;
 }

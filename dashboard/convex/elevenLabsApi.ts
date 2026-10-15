@@ -213,6 +213,8 @@ export type ToolDefinition = {
   url: string;
   properties: Record<string, ToolProperty>;
   required: string[];
+  // Static headers ElevenLabs sends with every call to this webhook tool (e.g. a shared secret).
+  requestHeaders?: Record<string, string>;
 };
 
 function toApiProperty(p: ToolProperty) {
@@ -234,6 +236,7 @@ function toolConfigBody(def: ToolDefinition) {
     api_schema: {
       url: def.url,
       method: "POST",
+      ...(def.requestHeaders ? { request_headers: def.requestHeaders } : {}),
       request_body_schema: {
         type: "object",
         description: def.description,
@@ -323,6 +326,53 @@ export async function deleteKbDoc(docId: string, ragIndexId?: string) {
  */
 export function deleteAgent(agentId: string) {
   return request<void>(`/convai/agents/${agentId}`, { method: "DELETE" });
+}
+
+// --- Phone numbers --------------------------------------------------------
+
+export type ElevenLabsPhoneNumber = {
+  phone_number?: string;
+  phone_number_id?: string;
+  label?: string;
+  assigned_agent?: { agent_id?: string; agent_name?: string } | null;
+};
+
+export async function listPhoneNumbers(): Promise<ElevenLabsPhoneNumber[]> {
+  // The endpoint returns a bare array; tolerate a wrapped shape in case that changes.
+  const res = await request<ElevenLabsPhoneNumber[] | { phone_numbers?: ElevenLabsPhoneNumber[] }>(
+    "/convai/phone-numbers",
+  );
+  return Array.isArray(res) ? res : (res?.phone_numbers ?? []);
+}
+
+/**
+ * Imports a Twilio number into ElevenLabs. The SID and token are forwarded to ElevenLabs only
+ * (it uses them to repoint the number's voice webhook); callers must read them from server-side
+ * env and never log or return them.
+ */
+export function importTwilioPhoneNumber(input: {
+  phoneNumber: string;
+  label: string;
+  sid: string;
+  token: string;
+}) {
+  return request<{ phone_number_id: string }>("/convai/phone-numbers", {
+    method: "POST",
+    body: {
+      provider: "twilio",
+      phone_number: input.phoneNumber,
+      label: input.label,
+      sid: input.sid,
+      token: input.token,
+    },
+  });
+}
+
+export function assignPhoneNumberAgent(phoneNumberId: string, agentId: string) {
+  return request<unknown>(`/convai/phone-numbers/${encodeURIComponent(phoneNumberId)}`, {
+    method: "PATCH",
+    body: { agent_id: agentId },
+  });
 }
 
 // --- Account --------------------------------------------------------------

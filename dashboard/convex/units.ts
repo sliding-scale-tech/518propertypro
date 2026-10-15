@@ -3,8 +3,10 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { internalQuery, mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { writeAudit } from "./audit";
-import { hasJobRole, requireJobRole, requireOrg, requireOrgAdmin } from "./authz";
+import { hasJobRole, requireJobRole, requireOrg, requireOrgAdmin, viewFor } from "./authz";
 import type { OrgContext } from "./authz";
+import { amScope } from "./amScope";
+import { scheduleNotify } from "./notify";
 
 /**
  * Units: the ONLY module that writes the `units` table.
@@ -17,6 +19,12 @@ import type { OrgContext } from "./authz";
  */
 
 const MAX_BULK = 500;
+const OPEN_REQUEST_STATUSES: Array<Doc<"maintenanceRequests">["status"]> = [
+  "new",
+  "under_review",
+  "more_info_needed",
+  "forwarded_to_pat",
+];
 const MAX_TEXT = 2000;
 
 // --- Helpers --------------------------------------------------------------
@@ -42,7 +50,7 @@ export function normalizeUnitKey(s: string): string {
  * asset_manager job role; a user id from the client is never trusted on its own, and another
  * team's user (or a plain member) cannot be made an AM.
  */
-async function assertValidAssetManager(
+export async function assertValidAssetManager(
   ctx: QueryCtx | MutationCtx,
   orgId: string,
   userId: Id<"users">,
@@ -114,10 +122,16 @@ async function assertNoDuplicate(
  * assigned to them. A member with no job role yet (not backfilled) is not locked out.
  */
 function canViewUnits(org: OrgContext): boolean {
-  return org.isAdmin || org.jobRoles.length === 0 || org.jobRoles.some((r) => r !== "technician");
+  const view = viewFor(org.isAdmin, org.jobRoles);
+  return view !== "technician" && view !== "none";
 }
 
-async function withManagers(ctx: QueryCtx, org: OrgContext, units: Doc<"units">[]) {
+async function withManagers(
+  ctx: QueryCtx,
+  org: OrgContext,
+  units: Doc<"units">[],
+  coveringIds: Set<Id<"units">>,
+) {
   const names = new Map<string, string>();
   for (const id of new Set(units.map((u) => u.assetManagerUserId))) {
     const user = await ctx.db.get(id);
@@ -127,9 +141,27 @@ async function withManagers(ctx: QueryCtx, org: OrgContext, units: Doc<"units">[
   return units.map((u) => ({
     ...u,
     assetManagerName: names.get(u.assetManagerUserId) ?? "Unknown",
-    // An AM sees every unit (to know the building) but this flag marks the ones they act on.
+    // True for the units this person is the AM of (the ones they act on).
     isMine: u.assetManagerUserId === org.user._id,
+    // True for an AM's read-only units: owned by a colleague who is out of office and named
+    // this person to cover. Always false outside the AM view.
+    covering: coveringIds.has(u._id),
   }));
+}
+
+/**
+ * An asset manager sees only the units they manage plus the ones they cover (amScope); every
+ * other role keeps the team-wide list. Returns the units to show and the covered ids.
+ */
+async function scopeForViewer(ctx: QueryCtx, org: OrgContext, units: Doc<"units">[]) {
+  if (viewFor(org.isAdmin, org.jobRoles) !== "asset_manager") {
+    return { units, coveringIds: new Set<Id<"units">>() };
+  }
+  const scope = await amScope(ctx, org);
+  return {
+    units: units.filter((u) => scope.managed.has(u._id) || scope.covering.has(u._id)),
+    coveringIds: scope.covering,
+  };
 }
 
 export const listByProperty = query({
@@ -143,7 +175,8 @@ export const listByProperty = query({
       .query("units")
       .withIndex("by_property", (q) => q.eq("propertyId", args.propertyId))
       .collect();
-    return await withManagers(ctx, org, units);
+    const scoped = await scopeForViewer(ctx, org, units.filter((u) => u.orgId === org.orgId));
+    return await withManagers(ctx, org, scoped.units, scoped.coveringIds);
   },
 });
 
@@ -164,11 +197,8 @@ export const list = query({
           .collect();
     // The by_property index isn't org-scoped, so filter: a client-supplied property id from
     // another team must come back empty.
-    return await withManagers(
-      ctx,
-      org,
-      units.filter((u) => u.orgId === org.orgId),
-    );
+    const scoped = await scopeForViewer(ctx, org, units.filter((u) => u.orgId === org.orgId));
+    return await withManagers(ctx, org, scoped.units, scoped.coveringIds);
   },
 });
 
@@ -188,7 +218,8 @@ export const create = mutation({
   args: {
     propertyId: v.id("properties"),
     unitNumber: v.string(),
-    assetManagerUserId: v.id("users"),
+    // Omit to use the property's default asset manager; required when it has none.
+    assetManagerUserId: v.optional(v.id("users")),
     floor: v.optional(v.number()),
     isTopFloor: v.optional(v.boolean()),
     bedrooms: v.string(),
@@ -207,7 +238,9 @@ export const create = mutation({
 
     const { unitNumber, unitNumberKey } = requireUnitNumber(args.unitNumber);
     await assertNoDuplicate(ctx, args.propertyId, unitNumberKey);
-    await assertValidAssetManager(ctx, org.orgId, args.assetManagerUserId);
+    const assetManagerUserId = args.assetManagerUserId ?? property.defaultAssetManagerUserId;
+    if (!assetManagerUserId) throw new Error("Pick an asset manager for this unit.");
+    await assertValidAssetManager(ctx, org.orgId, assetManagerUserId);
 
     const bedrooms = cleanText(args.bedrooms, "Bedrooms", 20);
     if (!bedrooms) throw new Error("Enter the number of bedrooms.");
@@ -228,7 +261,7 @@ export const create = mutation({
       availableFrom: args.availableFrom,
       leasingFacts:
         args.leasingFacts === undefined ? undefined : cleanText(args.leasingFacts, "Leasing facts"),
-      assetManagerUserId: args.assetManagerUserId,
+      assetManagerUserId,
       // An AM is guaranteed above, so intake can be live from the first minute.
       maintenanceIntakeActive: true,
       createdAt: now,
@@ -360,6 +393,50 @@ export const bulkAssignAssetManager = mutation({
   },
 });
 
+/**
+ * Sets a property's default asset manager and, per `applyTo`, moves its units to them through
+ * the same reassign() as every other AM change (so each move is audited and the hard rule
+ * stays in this module). "Without an override" means the unit's AM equals the property's
+ * PREVIOUS default (units store their AM, so an override is simply a different one); a property
+ * that had no default yet has no overrides to protect, so all its units count.
+ */
+export async function applyDefaultAssetManager(
+  ctx: MutationCtx,
+  org: OrgContext,
+  property: Doc<"properties">,
+  userId: Id<"users">,
+  applyTo: "units_without_override" | "all",
+): Promise<{ changed: number; total: number }> {
+  await assertValidAssetManager(ctx, org.orgId, userId);
+  const units = (
+    await ctx.db
+      .query("units")
+      .withIndex("by_property", (q) => q.eq("propertyId", property._id))
+      .collect()
+  ).filter((u) => u.orgId === org.orgId);
+
+  const previous = property.defaultAssetManagerUserId;
+  let changed = 0;
+  for (const unit of units) {
+    const inherits = previous === undefined || unit.assetManagerUserId === previous;
+    if (applyTo === "all" || inherits) {
+      if (await reassign(ctx, org, unit, userId)) changed += 1;
+    }
+  }
+  await ctx.db.patch(property._id, { defaultAssetManagerUserId: userId, updatedAt: Date.now() });
+  await writeAudit(ctx, {
+    orgId: org.orgId,
+    entity: "property",
+    entityId: property._id,
+    action: "default_am_set",
+    actorUserId: org.user._id,
+    from: previous,
+    to: userId,
+    note: `${applyTo === "all" ? "All units" : "Units without an override"}: ${changed} of ${units.length} changed`,
+  });
+  return { changed, total: units.length };
+}
+
 /** Shared by the single and bulk paths so the audit trail is identical. Returns false on no-op. */
 async function reassign(
   ctx: MutationCtx,
@@ -378,6 +455,42 @@ async function reassign(
     from: unit.assetManagerUserId,
     to,
   });
+
+  // Open requests follow the unit: the new AM must see (and be able to act on) them, and the
+  // old AM must stop seeing them. Each moved request gets its own audit row.
+  // Walk every request on the unit (no take cap) so none is left with the old AM.
+  const open: Doc<"maintenanceRequests">[] = [];
+  for await (const r of ctx.db
+    .query("maintenanceRequests")
+    .withIndex("by_unit_and_created", (q) => q.eq("unitId", unit._id))
+    .order("desc")) {
+    if (r.orgId === org.orgId && OPEN_REQUEST_STATUSES.includes(r.status)) open.push(r);
+  }
+  for (const r of open) {
+    await ctx.db.patch(r._id, { assignedAssetManagerUserId: to, updatedAt: Date.now() });
+    await writeAudit(ctx, {
+      orgId: org.orgId,
+      entity: "request",
+      entityId: r._id,
+      action: "reassigned_with_unit",
+      actorUserId: org.user._id,
+      from: r.assignedAssetManagerUserId,
+      to,
+      note: `Unit ${unit.unitNumber} reassigned`,
+    });
+  }
+  if (open.length > 0 && to !== org.user._id) {
+    await scheduleNotify(ctx, {
+      orgId: org.orgId,
+      userIds: [to],
+      template: "request_reassigned",
+      data: {
+        unit: unit.unitNumber,
+        number: open.length === 1 ? open[0].number : undefined,
+        path: open.length === 1 ? `/maintenance/${open[0]._id}` : "/maintenance",
+      },
+    });
+  }
   return true;
 }
 

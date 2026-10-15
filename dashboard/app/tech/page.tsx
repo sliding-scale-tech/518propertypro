@@ -4,6 +4,7 @@ import { useQuery } from "convex/react";
 import { ClipboardList, Loader2 } from "lucide-react";
 import { useState } from "react";
 import { RequireView } from "@/components/require-view";
+import { Seg } from "@/components/ui";
 import { JobCard } from "@/components/tech/job-card";
 import { api } from "@/convex/_generated/api";
 
@@ -20,20 +21,16 @@ function MyJobs() {
   return (
     <div>
       <h1 className="text-xl font-semibold">My jobs</h1>
-      <div role="tablist" className="mt-4 grid grid-cols-2 gap-1 rounded-xl bg-muted p-1">
-        {(["open", "done"] as const).map((t) => (
-          <button
-            key={t}
-            role="tab"
-            aria-selected={tab === t}
-            onClick={() => setTab(t)}
-            className={`min-h-11 rounded-lg text-sm font-semibold ${
-              tab === t ? "bg-background shadow-sm" : "text-muted-foreground"
-            }`}
-          >
-            {t === "open" ? `Open (${open.length})` : `Done (${done.length})`}
-          </button>
-        ))}
+      <div className="mt-4">
+        <Seg
+          label="Job list"
+          value={tab}
+          onChange={setTab}
+          options={[
+            { value: "open", label: `Open (${open.length})` },
+            { value: "done", label: `Done (${done.length})` },
+          ]}
+        />
       </div>
 
       {jobs === undefined ? (
@@ -41,7 +38,7 @@ function MyJobs() {
           <Loader2 className="h-6 w-6 animate-spin text-primary" />
         </div>
       ) : shown.length === 0 ? (
-        <div className="mt-8 rounded-2xl border border-dashed border-border p-8 text-center">
+        <div className="mt-8 rounded-[20px] border border-dashed border-border p-8 text-center">
           <ClipboardList className="mx-auto h-8 w-8 text-muted-foreground" />
           <p className="mt-3 font-medium">{tab === "open" ? "No open jobs right now" : "Nothing finished yet"}</p>
           <p className="mt-1 text-sm text-muted-foreground">

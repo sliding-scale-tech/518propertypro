@@ -3,9 +3,11 @@ import { internalMutation, internalQuery, mutation, query } from "./_generated/s
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { writeAudit } from "./audit";
-import { currentOrg, requireAdminView, requireOrg, viewFor } from "./authz";
+import { currentOrg, requireAdminView, requireJobRole, viewFor } from "./authz";
 import { requireE164 } from "./phone";
 import { propertyAddressValidator } from "./placesApi";
+import { amScope } from "./amScope";
+import { applyDefaultAssetManager } from "./units";
 
 const DEFAULT_PROPERTY = {
   name: "Maple Court Apartments",
@@ -135,7 +137,7 @@ export const save = mutation({
     address: v.optional(propertyAddressValidator),
   },
   handler: async (ctx, args) => {
-    const { orgId, user } = await requireOrg(ctx);
+    const { orgId, user } = await requireAdminView(ctx);
     const existing = await ctx.db
       .query("properties")
       .withIndex("by_org", (q) => q.eq("orgId", orgId))
@@ -161,7 +163,10 @@ export const list = query({
   handler: async (ctx) => {
     const org = await currentOrg(ctx);
     if (!org) return [];
-    if (viewFor(org.isAdmin, org.jobRoles) === "technician") return [];
+    const view = viewFor(org.isAdmin, org.jobRoles);
+    if (view === "technician") return [];
+    // An asset manager sees only buildings holding a unit they manage or cover.
+    const scope = view === "asset_manager" ? await amScope(ctx, org) : null;
     const rows = await ctx.db
       .query("properties")
       .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
@@ -172,6 +177,10 @@ export const list = query({
         .query("units")
         .withIndex("by_property", (q) => q.eq("propertyId", p._id))
         .collect();
+      const yourUnits = scope
+        ? units.filter((u) => scope.managed.has(u._id) || scope.covering.has(u._id)).length
+        : units.length;
+      if (scope && yourUnits === 0) continue;
       out.push({
         _id: p._id,
         name: p.name,
@@ -179,7 +188,19 @@ export const list = query({
         isPilot: p.isPilot ?? false,
         utilityGasPhone: p.utilityGasPhone,
         petsAllowed: p.petsAllowed,
+        defaultAssetManagerUserId: p.defaultAssetManagerUserId,
+        // Owner contact details and override counts are admin-only.
+        ownerName: scope ? undefined : p.ownerName,
+        ownerEmail: scope ? undefined : p.ownerEmail,
         unitCount: units.length,
+        // Units in this building the viewer manages or covers (all of them outside the AM view).
+        yourUnits,
+        // Units whose AM differs from the default (overrides); 0 when there is no default.
+        overrideCount: scope
+          ? 0
+          : p.defaultAssetManagerUserId
+          ? units.filter((u) => u.assetManagerUserId !== p.defaultAssetManagerUserId).length
+          : 0,
         updatedAt: p.updatedAt,
       });
     }
@@ -237,6 +258,8 @@ export const updateProfile = mutation({
     isPilot: v.optional(v.boolean()),
     utilityGasPhone: v.optional(v.string()),
     clearGasPhone: v.optional(v.boolean()),
+    ownerName: v.optional(v.string()), // "" clears it
+    ownerEmail: v.optional(v.string()), // "" clears it
   },
   handler: async (ctx, args) => {
     const org = await requireAdminView(ctx);
@@ -251,6 +274,18 @@ export const updateProfile = mutation({
     else if (args.utilityGasPhone !== undefined) {
       patch.utilityGasPhone = requireE164(args.utilityGasPhone, "Gas phone");
     }
+    if (args.ownerName !== undefined) {
+      const name = args.ownerName.trim();
+      if (name.length > 120) throw new Error("Owner name is too long.");
+      patch.ownerName = name === "" ? undefined : name;
+    }
+    if (args.ownerEmail !== undefined) {
+      const email = args.ownerEmail.trim();
+      if (email.length > 200 || (email !== "" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
+        throw new Error("Enter a valid owner email.");
+      }
+      patch.ownerEmail = email === "" ? undefined : email;
+    }
     await ctx.db.patch(property._id, patch);
     await writeAudit(ctx, {
       orgId: org.orgId,
@@ -259,5 +294,24 @@ export const updateProfile = mutation({
       action: "property_profile_updated",
       actorUserId: org.user._id,
     });
+  },
+});
+
+/**
+ * Pat/executive picks the property's default asset manager and chooses how far it spreads.
+ * The unit writes themselves are done by units.applyDefaultAssetManager (the only module that
+ * writes the units table), so each change is audited and the AM is validated there.
+ */
+export const setDefaultAssetManager = mutation({
+  args: {
+    propertyId: v.id("properties"),
+    userId: v.id("users"),
+    applyTo: v.union(v.literal("units_without_override"), v.literal("all")),
+  },
+  handler: async (ctx, args): Promise<{ changed: number; total: number }> => {
+    const org = await requireJobRole(ctx, "executive", "maintenance_lead");
+    const property = await ctx.db.get(args.propertyId);
+    if (!property || property.orgId !== org.orgId) throw new Error("Property not found.");
+    return await applyDefaultAssetManager(ctx, org, property, args.userId, args.applyTo);
   },
 });

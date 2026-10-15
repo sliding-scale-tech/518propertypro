@@ -12,13 +12,13 @@ import {
   ShoppingBag,
   Sparkles,
   Trash2,
-  X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useToast } from "@/components/toast";
 import { RequireView } from "@/components/require-view";
+import { Btn, Modal, PageHeader } from "@/components/ui";
 
 const SYNC_LABELS: Record<string, { label: string; className: string }> = {
   pending: { label: "Queued", className: "bg-muted text-muted-foreground" },
@@ -78,23 +78,16 @@ function DocsPageInner() {
 
   return (
     <div className="space-y-8 pb-10">
-      <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Knowledge</h1>
-          <p className="mt-1 max-w-2xl text-sm leading-5 text-muted-foreground">
-            What the agent answers from. Type an answer or upload a PDF or Word file. Saving
-            pushes the text to the ElevenLabs knowledge base and rebuilds its RAG index; Sarah
-            can use it once the badge reads Live.
-          </p>
-        </div>
-        <button
-          onClick={() => setSelected("new")}
-          className="flex h-11 shrink-0 items-center justify-center gap-2 rounded-lg bg-primary px-5 text-sm font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
-        >
-          <Plus className="h-4 w-4" />
-          Add Knowledge
-        </button>
-      </header>
+      <PageHeader
+        title="Knowledge"
+        subtitle="What the agent answers from. Type an answer or upload a PDF or Word file. Saving pushes the text to the ElevenLabs knowledge base and rebuilds its RAG index; Sarah can use it once the badge reads Live."
+        actions={
+          <Btn variant="pri" onClick={() => setSelected("new")}>
+            <Plus className="h-4 w-4" />
+            Add Knowledge
+          </Btn>
+        }
+      />
 
       {docs?.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-border bg-card py-16 text-center text-sm text-muted-foreground">
@@ -116,7 +109,7 @@ function DocsPageInner() {
               transition={{ delay: Math.min(index, 8) * 0.04 }}
               whileHover={{ y: -2 }}
               onClick={() => setSelected(doc)}
-              className="flex min-h-64 flex-col overflow-hidden rounded-2xl border border-border bg-card text-left shadow-sm transition-shadow hover:shadow-md"
+              className="flex min-h-64 flex-col overflow-hidden rounded-[20px] border border-border bg-card text-left  transition-shadow hover:shadow-md"
             >
               <div className="flex flex-1 flex-col p-5">
                 <div className="flex items-start justify-between gap-3">
@@ -236,31 +229,7 @@ function KnowledgeModal({
   };
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-[2px]"
-      onClick={onClose}
-    >
-      <motion.div
-        initial={{ opacity: 0, scale: 0.97, y: 8 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.97, y: 8 }}
-        transition={{ type: "spring", damping: 25, stiffness: 350 }}
-        onClick={(event) => event.stopPropagation()}
-        className="flex max-h-[90vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-2xl"
-      >
-        <div className="flex items-center justify-between border-b border-border px-6 py-5">
-          <h2 className="text-lg font-bold">{doc ? "Edit Knowledge" : "Add Knowledge"}</h2>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent"
-          >
-            <X className="h-5 w-5" />
-          </button>
-        </div>
+    <Modal title={doc ? "Edit Knowledge" : "Add Knowledge"} onClose={onClose} bare>
 
         <div className="space-y-5 overflow-y-auto px-6 py-5">
           <label className="block">
@@ -366,8 +335,7 @@ function KnowledgeModal({
             </button>
           </div>
         </div>
-      </motion.div>
-    </motion.div>
+      </Modal>
   );
 }
 

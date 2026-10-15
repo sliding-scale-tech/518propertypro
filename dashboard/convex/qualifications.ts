@@ -1,6 +1,6 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery, query } from "./_generated/server";
-import { currentOrg } from "./authz";
+import { canReadConversation } from "./conversations";
 
 // --- Reads ----------------------------------------------------------------
 
@@ -8,16 +8,21 @@ import { currentOrg } from "./authz";
  * This table has no orgId column of its own — access is controlled through the parent
  * conversation instead, the same way conversations.transcript does it. A conversation with no
  * team (the public landing-page demo, or a phone call not yet reconciled) stays readable by
- * anyone who already has its id.
+ * anyone who already has its id (demo only; see canReadConversation).
  */
 export const forConversation = query({
   args: { conversationId: v.id("conversations") },
   handler: async (ctx, args) => {
     const conv = await ctx.db.get(args.conversationId);
     if (!conv) return null;
-    if (conv.orgId) {
-      const org = await currentOrg(ctx);
-      if (!org || org.orgId !== conv.orgId) return null;
+    if (!(await canReadConversation(ctx, conv))) return null;
+    const elId = conv.elevenLabsConversationId;
+    if (elId) {
+      const byEl = await ctx.db
+        .query("qualifications")
+        .withIndex("by_elevenlabs_conversation_id", (x) => x.eq("elevenLabsConversationId", elId))
+        .first();
+      if (byEl) return byEl;
     }
     const rows = await ctx.db.query("qualifications").collect();
     return rows.find((r) => r.conversationId === args.conversationId) ?? null;

@@ -4,11 +4,12 @@ import { useAction, useMutation, useQuery } from "convex/react";
 import { ArrowDown, ArrowUp, CheckCircle2, Loader2, Lock, Plus, Trash2 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { api } from "@/convex/_generated/api";
-import { CALL_TYPES, isApprovalRequired } from "@/convex/sarahConfigLib";
+import { CALL_TYPES, isApprovalRequired, tenantMessagesOf, type TenantMessageKey } from "@/convex/sarahConfigLib";
 import type { SarahConfig } from "@/convex/sarahConfigLib";
 import { RequireView } from "@/components/require-view";
 import { BuiltInQuestions, ScreeningQuestions } from "@/components/screening-questions";
-import { Field, Modal, btnDanger, btnOutline, btnPrimary, cleanError, formatWhen, inputClass } from "@/components/maintenance/shared";
+import { Modal, btnDanger, btnOutline, btnPrimary, cleanError, formatWhen, inputClass } from "@/components/maintenance/shared";
+import { Btn, Card, CardHead, Field, PageHeader, Pill, Seg } from "@/components/ui";
 import { useToast } from "@/components/toast";
 
 /**
@@ -25,6 +26,7 @@ const TABS = [
   { id: "escalation", label: "Escalation contacts" },
   { id: "routing", label: "Routing directory" },
   { id: "leasing", label: "Leasing" },
+  { id: "tenant-messages", label: "Tenant messages" },
   { id: "identity", label: "Identity" },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
@@ -36,6 +38,16 @@ const INCIDENT_LABEL: Record<SarahConfig["emergencyScripts"][number]["incident"]
   gas_slight: "Slight gas smell, no hissing",
   other: "Anything else life-threatening",
 };
+
+const TENANT_MESSAGE_FIELDS: ReadonlyArray<{ key: TenantMessageKey; label: string; hint: string }> = [
+  {
+    key: "photoRequest",
+    label: "Photo request",
+    hint: "Sent when the team asks for photos. The secure upload link is added after this text.",
+  },
+  { key: "outOfScope", label: "Out-of-scope notice", hint: "Sent when a request is closed and the team chooses to notify the tenant." },
+  { key: "received", label: "Received confirmation", hint: "Sent to confirm we received the maintenance request." },
+];
 
 const LEVEL_LABEL = { emergency: "Emergency", urgent: "Urgent", routine: "Routine", informational: "Informational" } as const;
 
@@ -51,13 +63,10 @@ function when(ms?: number) {
 
 function Section({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
   return (
-    <section className="space-y-3 rounded-2xl border border-border bg-card p-4 sm:p-5">
-      <div>
-        <h2 className="text-base font-semibold">{title}</h2>
-        {hint ? <p className="mt-0.5 text-sm text-muted-foreground">{hint}</p> : null}
-      </div>
+    <Card className="space-y-3">
+      <CardHead title={title} hint={hint} />
       {children}
-    </section>
+    </Card>
   );
 }
 
@@ -83,11 +92,11 @@ function Toggle({
       disabled={locked}
       onClick={() => onChange(!checked)}
       className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-        checked ? "bg-primary" : "bg-muted"
+        checked ? "bg-primary" : "bg-border-strong"
       }`}
     >
       <span
-        className={`inline-flex h-5 w-5 transform items-center justify-center rounded-full bg-background shadow transition-transform ${
+        className={`inline-flex h-5 w-5 transform items-center justify-center rounded-full bg-white shadow transition-transform ${
           checked ? "translate-x-5" : "translate-x-0.5"
         }`}
       >
@@ -164,23 +173,23 @@ function ApprovalLine({
 }) {
   if (by) {
     return (
-      <span className="inline-flex items-center gap-1 text-xs text-success-foreground">
-        <CheckCircle2 className="h-3.5 w-3.5 text-success" /> Approved by {by}
+      <Pill tone="ok">
+        <CheckCircle2 className="h-3.5 w-3.5" /> Approved by {by}
         {at ? ` on ${new Date(at).toLocaleDateString()}` : ""}
-      </span>
+      </Pill>
     );
   }
   if (!canApprove) return <span className="text-xs text-muted-foreground">Needs approval from the maintenance lead</span>;
   return (
-    <button
-      type="button"
-      className={btnOutline}
+    <Btn
+      sm
+      variant="ok"
       disabled={unsaved || busy}
       title={unsaved ? "Save the draft first, so you approve exactly what is saved." : undefined}
       onClick={onApprove}
     >
       Approve
-    </button>
+    </Btn>
   );
 }
 
@@ -257,7 +266,7 @@ function SarahPageInner() {
       toast("Draft saved", "success");
     });
 
-  const onApprove = (kind: "callType" | "emergencyScript" | "tenantResponsibility", key: string) =>
+  const onApprove = (kind: "callType" | "emergencyScript" | "tenantResponsibility" | "tenantMessage", key: string) =>
     run("approve", async () => {
       await approve({ kind, key });
       toast("Approved", "success");
@@ -288,32 +297,22 @@ function SarahPageInner() {
 
   return (
     <div className="space-y-5 pb-44 lg:pb-28">
-      <header>
-        <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Sarah configuration</h1>
-        <p className="mt-1 max-w-3xl text-sm leading-5 text-muted-foreground">
-          Change what Sarah asks and says without a developer. You edit a draft; nothing changes on
-          live calls until you publish.{" "}
-          {data.version > 0
-            ? `Live: version ${data.version}, published ${when(data.publishedAt ?? undefined)}.`
-            : "Nothing has been published from here yet, so Sarah is still running her built-in setup."}
-          {!canEdit ? " You can view this page but not change it." : ""}
-        </p>
-      </header>
+      <PageHeader
+        title="Sarah config"
+        subtitle={
+          <>
+            Change what Sarah asks and says without a developer. You edit a draft; nothing changes on live calls
+            until you publish.{" "}
+            {data.version > 0
+              ? `Live: version ${data.version}, published ${when(data.publishedAt ?? undefined)}.`
+              : "Nothing has been published from here yet, so Sarah is still running her built-in setup."}
+            {!canEdit ? " You can view this page but not change it." : ""}
+          </>
+        }
+      />
 
-      <div role="tablist" className="flex gap-1 overflow-x-auto border-b border-border">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            role="tab"
-            aria-selected={tab === t.id}
-            onClick={() => setTab(t.id)}
-            className={`shrink-0 border-b-2 px-3 py-2 text-sm font-medium transition-colors ${
-              tab === t.id ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
+      <div className="max-w-full overflow-x-auto pb-1">
+        <Seg label="Sarah config sections" value={tab} onChange={setTab} options={TABS.map((t) => ({ value: t.id, label: t.label }))} />
       </div>
 
       {/* Disabled for anyone who cannot edit: the server rejects their writes anyway. */}
@@ -431,6 +430,10 @@ function SarahPageInner() {
             title="Severity levels"
             hint="Sarah picks one of these for each maintenance request. Pre-filled from the current rubric: needs Pat's approval before you rely on it."
           >
+            <p className="rounded-xl bg-accent px-3 py-2 text-[12.5px] text-accent-foreground">
+              Sarah also gives each request a 1–10 severity score using these levels. The named level stays the
+              source of truth; the score only shows as the &quot;n/10&quot; chip.
+            </p>
             <div className="space-y-4">
               {local.severityLevels.map((s) => {
                 const upd = (patch: Partial<typeof s>) =>
@@ -663,6 +666,48 @@ function SarahPageInner() {
           </Section>
         ) : null}
 
+        {tab === "tenant-messages" ? (
+          <Section
+            title="Tenant messages"
+            hint="Texts sent to a tenant about their maintenance request. Nothing is texted until the wording is approved by the maintenance lead and published. Editing the wording removes its approval."
+          >
+            <div className="space-y-4">
+              {TENANT_MESSAGE_FIELDS.map(({ key, label, hint }) => {
+                const m = tenantMessagesOf(local)[key];
+                return (
+                  <div key={key} className="space-y-2 rounded-2xl border border-border p-3">
+                    <div className="text-sm font-semibold">{label}</div>
+                    <Field label="Wording" hint={hint}>
+                      <textarea
+                        className={`${inputClass} min-h-20`}
+                        maxLength={600}
+                        value={m.wording}
+                        onChange={(e) =>
+                          set((c) => ({
+                            ...c,
+                            tenantMessages: {
+                              ...tenantMessagesOf(c),
+                              [key]: { wording: e.target.value, approved: false },
+                            },
+                          }))
+                        }
+                      />
+                    </Field>
+                    <ApprovalLine
+                      by={m.approved ? m.approvedBy : undefined}
+                      at={m.approvedAt}
+                      canApprove={canApprove}
+                      unsaved={unsaved}
+                      busy={approving}
+                      onApprove={() => onApprove("tenantMessage", key)}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          </Section>
+        ) : null}
+
         {tab === "identity" ? (
           <Section title="Greeting and identity">
             <Field label="Company name Sarah says">
@@ -721,7 +766,7 @@ function SarahPageInner() {
         </Section>
       ) : null}
 
-      <div className="fixed inset-x-0 bottom-[4.25rem] z-30 border-t border-border bg-card/95 px-4 py-3 backdrop-blur lg:bottom-0 lg:left-64">
+      <div className="fixed inset-x-0 bottom-[4.25rem] z-30 border-t border-border bg-card/95 px-4 py-3 backdrop-blur lg:bottom-0 lg:left-[236px]">
         <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-2">
           <span className="mr-auto text-sm text-muted-foreground">
             {unsaved ? "Unsaved changes" : data.dirty ? "Draft saved, not published" : "Draft matches what is live"}

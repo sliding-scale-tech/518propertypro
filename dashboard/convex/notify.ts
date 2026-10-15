@@ -31,6 +31,12 @@ export const TEMPLATES = [
   "wo_sent_back",
   "wo_submitted",
   "owner_prospect",
+  "tenant_message",
+  "request_media",
+  "request_withdrawn",
+  "request_note",
+  "request_sent_back",
+  "request_reassigned",
 ] as const;
 export type NotifyTemplate = (typeof TEMPLATES)[number];
 
@@ -44,6 +50,12 @@ const templateValidator = v.union(
   v.literal("wo_sent_back"),
   v.literal("wo_submitted"),
   v.literal("owner_prospect"),
+  v.literal("tenant_message"),
+  v.literal("request_media"),
+  v.literal("request_withdrawn"),
+  v.literal("request_note"),
+  v.literal("request_sent_back"),
+  v.literal("request_reassigned"),
 );
 
 /** Deliberately narrow: nothing free-form from a tenant can reach an SMS body. */
@@ -53,6 +65,9 @@ export const notifyDataValidator = v.object({
   firstName: v.optional(v.string()), // tenant or prospect first name only
   severity: v.optional(v.string()),
   path: v.optional(v.string()), // in-app path the link points at, e.g. /maintenance/abc
+  // tenant_message only: the Sarah-config wording, already approved (sarahConfigRead.tenantMessage).
+  // Never populated from anything a tenant typed.
+  text: v.optional(v.string()),
 });
 
 export type NotifyArgs = {
@@ -66,6 +81,7 @@ export type NotifyArgs = {
     firstName?: string;
     severity?: string;
     path?: string;
+    text?: string;
   };
 };
 
@@ -108,6 +124,19 @@ function bodyFor(template: NotifyTemplate, data: NotifyArgs["data"]): string {
       return `${wo}${at} was submitted as completed.`;
     case "owner_prospect":
       return `New owner prospect${name ? `: ${name}` : ""}.`;
+    case "request_media":
+      return `${mr}${at}${who} added photos.`;
+    case "request_withdrawn":
+      return `${mr}${at} was pulled back from the maintenance lead.`;
+    case "request_note":
+      return `${mr}${at} has a new note.`;
+    case "request_sent_back":
+      return `${mr}${at} was sent back to the asset manager.`;
+    case "request_reassigned":
+      return `${mr}${at} is now yours (unit reassigned to you).`;
+    case "tenant_message":
+      // Approved wording only; control characters stripped, one SMS-sized chunk.
+      return (data.text ?? "").replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 320);
   }
 }
 
@@ -248,10 +277,15 @@ export const send = internalAction({
         if (phone) targets.push({ phone, wantsSms: true });
       }
 
-      const body = `Simplr: ${bodyFor(args.template, args.data)}`;
+      // Tenant texts are the company's approved wording, so no staff-tool "Simplr:" prefix, and
+      // a link only when the caller gave one (the photo-upload page).
+      const isTenant = args.template === "tenant_message";
+      const text = bodyFor(args.template, args.data);
+      if (isTenant && !text) return; // never send an empty tenant text
+      const body = isTenant ? text : `Simplr: ${text}`;
       let link = "";
       try {
-        link = ` ${appBaseUrl()}${safePath(args.data.path)}`;
+        if (!isTenant || args.data.path) link = ` ${appBaseUrl()}${safePath(args.data.path)}`;
       } catch (err) {
         // A missing APP_BASE_URL should not stop the alert itself; the text still goes out.
         console.error("notify: no app url", err);

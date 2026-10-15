@@ -22,6 +22,7 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { Dropdown } from "@/components/ui/dropdown";
 import { RequireView } from "@/components/require-view";
 import { ConversationTranscript } from "@/components/transcript";
+import { Btn, Card, CardHead, Kpi, KpiRow, PageHeader, Pill, type Tone } from "@/components/ui";
 
 function formatDuration(seconds?: number) {
   if (seconds === undefined) return "—";
@@ -44,11 +45,11 @@ const INTENT_DROPDOWN_OPTIONS = [
   ...INTENT_FILTER_OPTIONS.map(([value, label]) => ({ value, label })),
 ];
 
-const OUTCOME_STYLES: Record<string, string> = {
-  tour_booked: "bg-emerald-50 text-emerald-600",
-  disqualified: "bg-amber-50 text-amber-700",
-  escalated: "bg-red-50 text-red-600",
-  logged_only: "bg-blue-50 text-blue-600",
+const OUTCOME_TONES: Record<string, Tone> = {
+  tour_booked: "ok",
+  disqualified: "warn",
+  escalated: "bad",
+  logged_only: "acc",
 };
 
 const OUTCOME_LABELS: Record<string, string> = {
@@ -106,6 +107,7 @@ type Qualification = {
 } | null;
 
 function LeadsPageInner() {
+  // TODO(★ leads scoping): all AMs currently see all leads; revisit.
   const {
     results: history,
     status: historyStatus,
@@ -139,32 +141,24 @@ function LeadsPageInner() {
   }, [history, intentFilter, outcomeFilter, search]);
 
   return (
-    <div className="space-y-7 pb-10">
-      <header>
-        <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Leads</h1>
-        <p className="mt-1 text-sm text-muted-foreground">Every Lead, with its full transcript.</p>
-      </header>
+    <div className="space-y-5 pb-10">
+      <PageHeader title="Leads" subtitle="Every Lead, with its full transcript." />
 
       {usage ? (
-        <div className="grid gap-4 sm:grid-cols-2">
-          <StatCard
-            icon={PhoneCall}
-            label="Leads this month"
-            value={String(usage.callCount)}
-            accent="blue"
-          />
-          <StatCard
-            icon={Clock3}
+        <KpiRow>
+          <Kpi icon={<PhoneCall />} label="Leads this month" value={String(usage.callCount)} sub="Current month" />
+          <Kpi
+            icon={<Clock3 />}
             label="Avg lead duration"
             value={formatDuration(usage.avgDurationSec)}
-            accent="violet"
+            sub="Current month"
           />
-        </div>
+        </KpiRow>
       ) : null}
 
       {funnel ? <FunnelChart funnel={funnel} /> : null}
 
-      <section className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+      <section className="overflow-hidden rounded-[20px] border border-border bg-card">
         <div className="flex flex-col gap-3 border-b border-border px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
           <div className="flex flex-wrap gap-3">
             <Dropdown
@@ -177,10 +171,10 @@ function LeadsPageInner() {
               type="button"
               onClick={() => setOwnerOnly((v) => !v)}
               aria-pressed={ownerOnly}
-              className={`h-10 rounded-lg border px-3 text-sm ${
+              className={`h-10 rounded-xl border px-3 text-[13px] ${
                 ownerOnly
-                  ? "border-violet-300 bg-violet-50 text-violet-700"
-                  : "border-input bg-card text-muted-foreground hover:bg-accent"
+                  ? "border-violet bg-violet-soft text-violet"
+                  : "border-border bg-card text-muted-foreground hover:bg-muted"
               }`}
             >
               Owner prospects
@@ -199,13 +193,13 @@ function LeadsPageInner() {
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
                 placeholder="Search calls..."
-                className="h-10 w-full rounded-lg border border-input bg-card pr-3 pl-9 text-sm outline-none placeholder:text-muted-foreground-subtle focus:ring-2 focus:ring-ring/20"
+                className="h-10 w-full rounded-xl border border-input bg-card pr-3 pl-9 text-[13.5px] outline-none placeholder:text-faint focus:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
               />
             </label>
             <button
               type="button"
               aria-label="More filters"
-              className="flex h-10 w-10 items-center justify-center rounded-lg border border-input text-muted-foreground hover:bg-accent"
+              className="flex h-10 w-10 items-center justify-center rounded-xl border border-border text-muted-foreground hover:bg-muted"
             >
               <SlidersHorizontal className="h-4 w-4" />
             </button>
@@ -234,7 +228,7 @@ function LeadsPageInner() {
         <div className="hidden sm:block">
           <table className="w-full border-collapse text-sm">
             <thead>
-              <tr className="border-b border-border bg-muted/45 text-left text-[11px] tracking-wide text-muted-foreground uppercase">
+              <tr className="border-b border-border bg-muted text-left text-[11px] tracking-[0.06em] text-muted-foreground uppercase">
                 <th className="w-10 px-5 py-3 font-medium" />
                 <th className="px-2 py-3 font-medium">Timestamp</th>
                 <th className="px-3 py-3 font-medium">Channel</th>
@@ -262,57 +256,16 @@ function LeadsPageInner() {
 
       {historyStatus !== "Exhausted" ? (
         <div className="flex justify-center">
-          <button
-            onClick={() => loadMore(15)}
-            disabled={historyStatus !== "CanLoadMore"}
-            className="flex items-center gap-2 rounded-lg border border-input bg-card px-4 py-2 text-sm shadow-sm hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
-          >
+          <Btn onClick={() => loadMore(15)} disabled={historyStatus !== "CanLoadMore"}>
             {historyStatus === "LoadingMore" ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
               <ChevronsDown className="h-3.5 w-3.5" />
             )}
             {historyStatus === "LoadingMore" ? "Loading…" : "Show more"}
-          </button>
+          </Btn>
         </div>
       ) : null}
-    </div>
-  );
-}
-
-function StatCard({
-  icon: Icon,
-  label,
-  value,
-  accent,
-}: {
-  icon: typeof PhoneCall;
-  label: string;
-  value: string;
-  accent: "blue" | "violet";
-}) {
-  return (
-    <div className="flex min-h-24 items-center rounded-2xl border border-border bg-card px-5 py-4 shadow-sm">
-      <div
-        className={`mr-4 flex h-10 w-10 items-center justify-center rounded-xl ${
-          accent === "blue" ? "bg-blue-50 text-blue-600" : "bg-violet-50 text-violet-600"
-        }`}
-      >
-        <Icon className="h-5 w-5" />
-      </div>
-      <div>
-        <p className="text-[11px] tracking-wide text-muted-foreground uppercase">{label}</p>
-        <p className="mt-0.5 text-2xl font-bold tabular-nums text-foreground">{value}</p>
-        <p className="mt-0.5 text-[11px] text-emerald-600">Current month</p>
-      </div>
-      <svg viewBox="0 0 80 34" aria-hidden className="ml-auto h-9 w-20">
-        <path
-          d="M2 25 C16 23 20 28 34 24 S48 18 56 24 S68 29 78 7"
-          fill="none"
-          stroke={accent === "blue" ? "#3b82f6" : "#8b5cf6"}
-          strokeWidth="1.5"
-        />
-      </svg>
     </div>
   );
 }
@@ -327,11 +280,8 @@ function FunnelChart({
   const toursPercent = Math.round((funnel.toursBooked / max) * 100);
 
   return (
-    <section className="rounded-2xl border border-border bg-card px-5 py-5 shadow-sm sm:px-7 sm:py-6">
-      <div className="mb-7 flex items-center gap-2">
-        <Filter className="h-4 w-4 text-blue-600" />
-        <h2 className="text-sm font-semibold">Conversion funnel</h2>
-      </div>
+    <Card>
+      <CardHead title="Conversion funnel" icon={<Filter />} />
       <div className="grid gap-7 md:grid-cols-[140px_1fr_1fr] md:items-end">
         <div>
           <p className="text-3xl font-semibold tabular-nums">
@@ -341,18 +291,18 @@ function FunnelChart({
         </div>
         <FunnelStep
           value={funnel.leadsQualified}
-          label="Leads qualified"
+          label="Matches criteria"
           percent={leadsPercent}
-          color="bg-blue-500"
+          color="bg-primary"
         />
         <FunnelStep
           value={funnel.toursBooked}
           label="Tours booked"
           percent={toursPercent}
-          color="bg-emerald-500"
+          color="bg-success-ink"
         />
       </div>
-    </section>
+    </Card>
   );
 }
 
@@ -395,20 +345,13 @@ function OutcomeBadge({
   call: CallRow;
   qualification?: Qualification;
 }) {
-  const owner = qualification?.ownerProspect ? (
-    <span className="rounded-md bg-violet-50 px-2 py-1 text-[10px] font-semibold tracking-wide text-violet-700 uppercase">
-      Owner prospect → Alex
-    </span>
-  ) : null;
+  const owner = qualification?.ownerProspect ? <Pill tone="vio">Owner prospect → Alex</Pill> : null;
+  // Capture only: the pill reports whether the answers match the criteria, never a verdict on the lead.
   const match =
     qualification?.qualifies === true ? (
-      <span className="rounded-md bg-emerald-50 px-2 py-1 text-[10px] font-semibold tracking-wide text-emerald-600 uppercase">
-        Matches criteria
-      </span>
+      <Pill tone="ok">Matches criteria</Pill>
     ) : qualification?.qualifies === false && call.outcome !== "disqualified" ? (
-      <span className="rounded-md bg-amber-50 px-2 py-1 text-[10px] font-semibold tracking-wide text-amber-700 uppercase">
-        Review needed
-      </span>
+      <Pill tone="warn">Review needed</Pill>
     ) : null;
   return (
     <span className="inline-flex flex-wrap items-center gap-1.5">
@@ -421,22 +364,13 @@ function OutcomeBadge({
 
 function OutcomeBase({ call }: { call: CallRow }) {
   if (call.outcome) {
-    return (
-      <span
-        className={`rounded-md px-2 py-1 text-[10px] font-semibold tracking-wide uppercase ${
-          OUTCOME_STYLES[call.outcome] ?? "bg-muted text-muted-foreground"
-        }`}
-      >
-        {OUTCOME_LABELS[call.outcome] ?? call.outcome}
-      </span>
-    );
+    return <Pill tone={OUTCOME_TONES[call.outcome] ?? "neutral"}>{OUTCOME_LABELS[call.outcome] ?? call.outcome}</Pill>;
   }
   if (call.status === "active") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-md bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-600 uppercase">
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+      <Pill tone="ok" dot>
         Live
-      </span>
+      </Pill>
     );
   }
   return <span className="text-muted-foreground">—</span>;
@@ -466,12 +400,12 @@ function CallTableRow({
         animate={{ opacity: 1 }}
         transition={{ delay: Math.min(index, 8) * 0.03 }}
         onClick={onToggle}
-        className="cursor-pointer border-b border-border last:border-0 hover:bg-blue-50/40"
+        className="cursor-pointer border-b border-border last:border-0 hover:bg-muted"
       >
         <td className="px-5 py-3.5">
           <motion.span
             animate={{ rotate: expanded ? 90 : 0 }}
-            className="block text-blue-500"
+            className="block text-primary"
           >
             <ChevronRight className="h-3.5 w-3.5" />
           </motion.span>
@@ -499,7 +433,7 @@ function CallTableRow({
       <AnimatePresence initial={false}>
         {expanded ? (
           <tr>
-            <td colSpan={7} className="border-b border-border bg-muted/20 p-0">
+            <td colSpan={7} className="border-b border-border bg-muted p-0">
               <motion.div
                 initial={{ height: 0, opacity: 0 }}
                 animate={{ height: "auto", opacity: 1 }}
@@ -544,7 +478,7 @@ function CallCard({
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: Math.min(index, 8) * 0.04 }}
-      className="overflow-hidden rounded-xl border border-border bg-card"
+      className="overflow-hidden rounded-2xl border border-border bg-card"
     >
       <button onClick={onToggle} className="flex w-full items-center justify-between gap-3 p-4 text-left">
         <div className="min-w-0">
@@ -617,13 +551,13 @@ function ExpandedDetail({
       ) : null}
       {qualification?.qualifies === false && qualification.disqualifyReason ? (
         <div
-          className={`rounded-xl border p-3 text-sm ${
-            qualification.nearMiss ? "border-amber-200 bg-amber-50" : "border-border bg-muted/30"
+          className={`rounded-2xl border p-3 text-sm ${
+            qualification.nearMiss ? "border-border bg-warning-soft" : "border-border bg-muted"
           }`}
         >
           {qualification.nearMiss ? (
-            <p className="mb-1 flex items-center gap-1.5 text-xs font-semibold tracking-wide text-amber-700 uppercase">
-              <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+            <p className="mb-1 flex items-center gap-1.5 text-xs font-semibold tracking-wide text-warning-ink uppercase">
+              <span className="h-1.5 w-1.5 rounded-full bg-warning-ink" />
               Close — worth a follow-up
             </p>
           ) : (
@@ -631,13 +565,13 @@ function ExpandedDetail({
               Staff note: criteria not met
             </p>
           )}
-          <p className={qualification.nearMiss ? "text-amber-900" : "text-foreground"}>
+          <p className={qualification.nearMiss ? "text-warning-ink" : "text-foreground"}>
             {qualification.disqualifyReason}
           </p>
         </div>
       ) : null}
       {qualification?.screeningAnswers?.length ? (
-        <div className="rounded-xl border border-border p-3">
+        <div className="rounded-2xl border border-border p-3">
           <p className="mb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">
             Screening answers
           </p>
@@ -658,8 +592,8 @@ function ExpandedDetail({
         </div>
       ) : null}
       {qualification?.ownerProspect ? (
-        <div className="rounded-xl border border-violet-200 bg-violet-50 p-3 text-sm">
-          <p className="mb-1 text-xs font-semibold tracking-wide text-violet-700 uppercase">
+        <div className="rounded-2xl bg-violet-soft p-3 text-sm">
+          <p className="mb-1 text-xs font-semibold tracking-wide text-violet uppercase">
             Owner prospect → Alex
           </p>
           <div className="grid gap-x-6 gap-y-1 sm:grid-cols-2">

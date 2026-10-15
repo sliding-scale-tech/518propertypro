@@ -1,5 +1,5 @@
 import type { Doc } from "./_generated/dataModel";
-import type { MutationCtx } from "./_generated/server";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { randomToken, sha256 } from "./team";
 
 /**
@@ -39,6 +39,27 @@ export async function createPublicLink(
     createdAt: now,
   });
   return { token, expiresAt };
+}
+
+/**
+ * Same checks as consumePublicLink but spends nothing, for read-only screens (is this link
+ * still good?) and for steps that only count once they succeed (handing out an upload URL).
+ */
+export async function peekPublicLink(
+  ctx: QueryCtx | MutationCtx,
+  token: string,
+  purpose: Doc<"publicLinks">["purpose"],
+): Promise<Doc<"publicLinks"> | null> {
+  const trimmed = token.trim();
+  if (!trimmed || trimmed.length > 200) return null;
+  const tokenHash = await sha256(trimmed);
+  const link = await ctx.db
+    .query("publicLinks")
+    .withIndex("by_token_hash", (q) => q.eq("tokenHash", tokenHash))
+    .unique();
+  if (!link || link.purpose !== purpose) return null;
+  if (link.expiresAt <= Date.now() || link.useCount >= link.maxUses) return null;
+  return link;
 }
 
 /**

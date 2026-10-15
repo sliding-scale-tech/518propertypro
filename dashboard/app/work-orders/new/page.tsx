@@ -16,11 +16,12 @@ import {
   type ChecklistDraftItem,
 } from "@/components/work-orders/checklist-editor";
 import type { WoPriority } from "@/components/work-orders/shared";
+import { WindowField } from "@/components/work-orders/window-field";
+import { Btn, Card, CardHead, DatePicker, PageHeader, Select } from "@/components/ui";
 
 const inputClass =
-  "h-10 w-full rounded-lg border border-input bg-card px-3 text-sm outline-none focus:ring-2 focus:ring-ring/20 disabled:opacity-50";
-const areaClass =
-  "w-full rounded-lg border border-input bg-card px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring/20";
+  "w-full rounded-xl border border-input bg-card px-[11px] py-2 text-[13.5px] text-foreground outline-none transition-colors placeholder:text-faint focus:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:opacity-60";
+const areaClass = `${inputClass} leading-[1.45]`;
 
 const ISSUE_TYPES = [
   "electrical",
@@ -49,6 +50,7 @@ type Initial = {
   priority: WoPriority;
   accessNotes: string;
   checklist: string[];
+  window: string;
 };
 
 function NewWorkOrderInner() {
@@ -87,13 +89,15 @@ function NewWorkOrderInner() {
       priority: sev === "emergency" ? "emergency" : sev === "urgent" ? "urgent" : "routine",
       accessNotes: access,
       checklist: template ?? [],
+      // Prefilled from the tenant's preferred times; Pat can pick a preset or type another.
+      window: r.preferredAccessTimes ?? "",
     };
     return <Form initial={initial} />;
   }
 
   return (
     <Form
-      initial={{ unitId: "", issueType: "other", title: "", scope: "", priority: "routine", accessNotes: "", checklist: [] }}
+      initial={{ unitId: "", issueType: "other", title: "", scope: "", priority: "routine", accessNotes: "", checklist: [], window: "" }}
     />
   );
 }
@@ -127,9 +131,15 @@ function Form({ initial }: { initial: Initial }) {
   const [technician, setTechnician] = useState("");
   const [req, setReq] = useState({ photos: true, hours: true, receipts: false, notes: false });
   const [due, setDue] = useState("");
+  const [windowText, setWindowText] = useState(initial.window);
+  const [techTouched, setTechTouched] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const typeTemplate = useQuery(api.workOrders.checklistFor, { issueType });
+  // Pat gets a suggested technician (skill match, else least loaded); returns null for anyone else.
+  const suggestion = useQuery(api.workOrders.suggestTechnician, { issueType });
+  // Preselect the suggestion until Pat picks someone (or "Assign later") themselves.
+  const technicianValue = techTouched ? technician : (suggestion?.userId ?? "");
   const canTemplate = access?.canManageMaintenance ?? false;
   const technicians = (team?.members ?? []).filter((m) => m.appRole === "technician");
   // The server enforces ownership; this only keeps the picker honest for asset managers.
@@ -146,10 +156,11 @@ function Form({ initial }: { initial: Initial }) {
         scope,
         priority,
         checklist: toChecklistArgs(items),
-        technicianUserId: technician ? (technician as Id<"users">) : undefined,
+        technicianUserId: technicianValue ? (technicianValue as Id<"users">) : undefined,
         accessNotes: accessNotes.trim() || undefined,
         requiredOnSubmit: req,
         dueDate: due ? new Date(`${due}T12:00:00`).getTime() : undefined,
+        window: windowText.trim() || undefined,
       });
       toast("Work order created");
       router.push(`/work-orders/${id}`);
@@ -172,34 +183,32 @@ function Form({ initial }: { initial: Initial }) {
   const cap = "text-sm font-medium";
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6 pb-10">
-      <header>
-        <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">New work order</h1>
-        {initial.requestId ? (
-          <p className="mt-1 text-sm text-muted-foreground">Prefilled from the maintenance request. Review before creating.</p>
-        ) : null}
-      </header>
+    <div className="mx-auto max-w-3xl space-y-5 pb-10">
+      <PageHeader
+        title="New work order"
+        subtitle={initial.requestId ? "Prefilled from the maintenance request. Review before creating." : undefined}
+      />
 
-      <div className="space-y-5 rounded-2xl border border-border bg-card p-5 shadow-sm">
+      <Card className="space-y-5">
         <div className="grid gap-4 sm:grid-cols-2">
           <label className={field}>
             <span className={cap}>Unit</span>
-            <select value={unitId} disabled={lockedUnit} onChange={(e) => setUnitId(e.target.value)} className={inputClass}>
+            <Select value={unitId} disabled={lockedUnit} onChange={(e) => setUnitId(e.target.value)}>
               <option value="">Select a unit</option>
               {unitOptions.map((u) => (
                 <option key={u._id} value={u._id}>
                   {u.unitNumber}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
           <label className={field}>
             <span className={cap}>Priority</span>
-            <select value={priority} onChange={(e) => setPriority(e.target.value as WoPriority)} className={inputClass}>
+            <Select value={priority} onChange={(e) => setPriority(e.target.value as WoPriority)}>
               <option value="routine">Routine</option>
               <option value="urgent">Urgent</option>
               <option value="emergency">Emergency</option>
-            </select>
+            </Select>
           </label>
         </div>
 
@@ -221,46 +230,59 @@ function Form({ initial }: { initial: Initial }) {
         <div className="grid gap-4 sm:grid-cols-2">
           <label className={field}>
             <span className={cap}>Technician (optional)</span>
-            <select value={technician} onChange={(e) => setTechnician(e.target.value)} className={inputClass}>
+            <Select
+              value={technicianValue}
+              onChange={(e) => {
+                setTechTouched(true);
+                setTechnician(e.target.value);
+              }}
+            >
               <option value="">Assign later</option>
               {technicians.map((m) => (
                 <option key={m.userId} value={m.userId}>
                   {m.name}
+                  {m.skill ? ` · ${m.skill}` : ""}
                 </option>
               ))}
-            </select>
+            </Select>
+            {suggestion ? (
+              <span className="block text-xs text-muted-foreground">
+                Suggested: {suggestion.name}
+                {suggestion.reason === "skill" ? " (skill match)" : " (fewest active jobs)"}
+              </span>
+            ) : null}
           </label>
           <label className={field}>
             <span className={cap}>Due date</span>
-            <input type="date" value={due} onChange={(e) => setDue(e.target.value)} className={inputClass} />
+            <DatePicker value={due} onChange={setDue} className="h-10" />
           </label>
         </div>
-      </div>
 
-      <div className="space-y-4 rounded-2xl border border-border bg-card p-5 shadow-sm">
+        <div className={field}>
+          <span className={cap}>Time window</span>
+          <WindowField value={windowText} onChange={setWindowText} />
+        </div>
+      </Card>
+
+      <Card className="space-y-4">
         <div className="flex flex-wrap items-end justify-between gap-3">
-          <h2 className="text-base font-semibold">Checklist</h2>
+          <CardHead title="Checklist" />
           <div className="flex flex-wrap items-center gap-2">
-            <select
+            <Select
               aria-label="Issue type"
+              className="w-auto"
               value={issueType}
               onChange={(e) => setIssueType(e.target.value)}
-              className="h-9 rounded-lg border border-input bg-card px-2 text-sm"
             >
               {ISSUE_TYPES.map((t) => (
                 <option key={t} value={t}>
                   {label(t)}
                 </option>
               ))}
-            </select>
-            <button
-              type="button"
-              disabled={!typeTemplate}
-              onClick={() => typeTemplate && setItems(typeTemplate.map((l) => newDraftItem(l)))}
-              className="h-9 rounded-lg border border-input px-3 text-sm font-medium hover:bg-accent disabled:opacity-40"
-            >
+            </Select>
+            <Btn disabled={!typeTemplate} onClick={() => typeTemplate && setItems(typeTemplate.map((l) => newDraftItem(l)))}>
               Load template
-            </button>
+            </Btn>
           </div>
         </div>
         <ChecklistEditor items={items} onChange={setItems} />
@@ -274,10 +296,10 @@ function Form({ initial }: { initial: Initial }) {
             Save checklist as template for {label(issueType)}
           </button>
         ) : null}
-      </div>
+      </Card>
 
-      <div className="space-y-3 rounded-2xl border border-border bg-card p-5 shadow-sm">
-        <h2 className="text-base font-semibold">Required when the technician submits</h2>
+      <Card className="space-y-3">
+        <CardHead title="Required when the technician submits" />
         <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
           {(["photos", "hours", "receipts", "notes"] as const).map((k) => (
             <label key={k} className="flex items-center gap-2">
@@ -286,20 +308,22 @@ function Form({ initial }: { initial: Initial }) {
             </label>
           ))}
         </div>
-      </div>
+      </Card>
 
       <div className="flex justify-end gap-2">
-        <Link href="/work-orders" className="rounded-lg border border-input bg-card px-4 py-2 text-sm font-medium hover:bg-accent">
+        <Link
+          href="/work-orders"
+          className="inline-flex items-center rounded-xl border border-border bg-card px-3.5 py-2 text-[13.5px] font-medium hover:bg-muted"
+        >
           Cancel
         </Link>
-        <button
-          type="button"
+        <Btn
+          variant="pri"
           onClick={() => void submit()}
           disabled={busy || !unitId || !title.trim() || !scope.trim()}
-          className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
         >
           {busy ? "Creating…" : "Create work order"}
-        </button>
+        </Btn>
       </div>
     </div>
   );

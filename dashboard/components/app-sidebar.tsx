@@ -20,15 +20,13 @@ import {
   LayoutDashboard,
   LogOut,
   CalendarRange,
-  DoorOpen,
   Wrench,
-  Inbox,
-  AlertTriangle,
-  ListChecks,
   Sparkles,
-  History,
   Wallet,
-  Home,
+  Box,
+  ShieldCheck,
+  Target,
+  CircleUser,
 } from "lucide-react";
 import { useState } from "react";
 import { useQuery } from "convex/react";
@@ -41,11 +39,18 @@ type NavLeaf = {
   icon: typeof Phone;
   // Which views see this link. Undefined = every view.
   views?: AppView[];
-  // Live count badge: the maintenance inbox (new + unread) or the exception queue.
-  badge?: "inbox" | "exceptions";
+  // Live count badge: open work (new + waiting + forwarded), with a red dot when exceptions need routing.
+  badge?: "workorders";
+  // Extra path prefixes that light this link up (detail pages and legacy URLs).
+  alsoActive?: string[];
 };
 
 type NavEntry = NavLeaf | { group: string; icon: typeof Phone; items: NavLeaf[] };
+
+function isActiveLink(pathname: string, link: NavLeaf): boolean {
+  if (isActiveHref(pathname, link.href)) return true;
+  return (link.alsoActive ?? []).some((p) => pathname === p || pathname.startsWith(`${p}/`));
+}
 
 /** Exact match, or a nested route when no other nav link matches it more closely. */
 function isActiveHref(pathname: string, href: string): boolean {
@@ -59,70 +64,81 @@ function isGroup(entry: NavEntry): entry is { group: string; icon: typeof Phone;
 }
 
 /**
- * The sidebar, as the design has it: four standalone destinations and three collapsible
- * groups.
+ * The sidebar, as the Pat (admin) prototype has it: standalone destinations plus collapsible
+ * groups. Asset managers and accountants get flat, trimmed lists of the same destinations.
  *
  * WhatsApp, Messages and Agent settings are deliberately absent rather than hidden behind a
  * flag — each route, page and backend still works and is reachable by URL, they just aren't
  * linked from anywhere while they're off the roadmap.
+ *
+ * Old URLs (/maintenance, /work-orders/queue, /units, /residents, /audit) now redirect to their
+ * new homes; `alsoActive` keeps the right link lit on the detail pages that still live there.
  */
 const NAV: NavEntry[] = [
-  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, views: ["admin", "accountant"] },
-  { href: "/maintenance", label: "My inbox", icon: Inbox, views: ["asset_manager"], badge: "inbox" },
+  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, views: ["admin", "accountant", "asset_manager"] },
+  { href: "/call", label: "Call", icon: Phone, views: ["admin"] },
+  // Accountant flat list (admins and asset managers reach the same pages through the groups below).
   {
-    group: "Maintenance",
-    icon: Wrench,
-    items: [
-      { href: "/maintenance", label: "All requests", icon: Inbox, views: ["admin"], badge: "inbox" },
-      { href: "/maintenance/exceptions", label: "Exceptions", icon: AlertTriangle, views: ["admin"], badge: "exceptions" },
-      { href: "/work-orders/queue", label: "Validated queue", icon: ListChecks, views: ["admin"] },
-      { href: "/work-orders", label: "Work orders", icon: ClipboardList, views: ["admin"] },
-    ],
+    href: "/work-orders",
+    label: "Work orders",
+    icon: ClipboardList,
+    views: ["accountant"],
+    badge: "workorders",
+    alsoActive: ["/maintenance"],
   },
-  { href: "/work-orders", label: "Work orders", icon: ClipboardList, views: ["asset_manager", "accountant"] },
-  { href: "/leads", label: "Leads", icon: UserRoundSearch, views: ["asset_manager"] },
-  { href: "/units", label: "Units", icon: DoorOpen, views: ["asset_manager", "accountant"] },
+  { href: "/properties", label: "Property", icon: Building2, views: ["accountant"], alsoActive: ["/units"] },
   {
     group: "Customers",
     icon: UsersRound,
     items: [
-      { href: "/leads", label: "Leads", icon: UserRoundSearch, views: ["admin"] },
-      { href: "/residents", label: "Residents", icon: Home, views: ["admin"] },
-      { href: "/tenants", label: "Resident calls", icon: FileText, views: ["admin"] },
+      { href: "/leads", label: "Leads", icon: UserRoundSearch, views: ["admin", "asset_manager"] },
+      { href: "/tenants", label: "Tenants", icon: FileText, views: ["admin", "asset_manager"], alsoActive: ["/residents"] },
     ],
   },
   {
-    group: "Properties",
-    icon: Building2,
+    group: "Knowledge",
+    icon: Box,
     items: [
-      { href: "/properties", label: "Properties", icon: Building2, views: ["admin"] },
-      { href: "/units", label: "Units", icon: DoorOpen, views: ["admin"] },
-    ],
-  },
-  { href: "/calendar", label: "Calendar", icon: CalendarRange, views: ["admin", "asset_manager"] },
-  { href: "/tasks", label: "Tasks", icon: ClipboardCheck, views: ["admin", "asset_manager"] },
-  {
-    group: "Sarah",
-    icon: Sparkles,
-    items: [
-      { href: "/sarah", label: "Sarah config", icon: Sparkles, views: ["admin"] },
       { href: "/docs", label: "Knowledge", icon: BookOpen, views: ["admin"] },
-      { href: "/call", label: "Test call", icon: Phone, views: ["admin"] },
+      { href: "/properties", label: "Property", icon: Building2, views: ["admin", "asset_manager"], alsoActive: ["/units"] },
     ],
   },
-  // Visible to every view: members get a read-only roster so they can see who they share the
-  // dashboard with. The page itself hides every control they cannot use, and convex/team.ts
-  // re-checks the role on every write; the nav flag was never the boundary.
-  { href: "/team", label: "Team", icon: UserPlus },
-  { href: "/audit", label: "Audit log", icon: History, views: ["admin"] },
+  {
+    group: "Maintenance",
+    icon: Wrench,
+    items: [
+      {
+        href: "/work-orders",
+        label: "Work orders",
+        icon: ClipboardList,
+        views: ["admin", "asset_manager"],
+        badge: "workorders",
+        alsoActive: ["/maintenance"],
+      },
+      { href: "/asset-managers", label: "Asset managers", icon: ShieldCheck, views: ["admin"] },
+    ],
+  },
   { href: "/finance", label: "Finance", icon: Wallet, views: ["admin"] },
+  {
+    group: "Productivity",
+    icon: Target,
+    items: [
+      { href: "/tasks", label: "Tasks", icon: ClipboardCheck, views: ["admin", "asset_manager"] },
+      { href: "/calendar", label: "Calendar", icon: CalendarRange, views: ["admin", "asset_manager"] },
+    ],
+  },
+  { href: "/sarah", label: "Sarah config", icon: Sparkles, views: ["admin"] },
+  { href: "/profile", label: "Profile", icon: CircleUser, views: ["asset_manager"] },
+  // The roster: hidden from asset managers, who manage themselves on /profile. The page hides
+  // every control a viewer cannot use, and convex/team.ts re-checks the role on every write.
+  { href: "/team", label: "Team", icon: UserPlus, views: ["admin", "accountant", "technician"] },
 ];
 
 const NAV_HREFS = NAV.flatMap((e) => (isGroup(e) ? e.items.map((i) => i.href) : [e.href]));
 
 // The bottom nav only has room for a handful of items; whichever of these the view can see,
 // in this order, take the slots. The rest live in the "More" sheet.
-const BOTTOM_NAV_ORDER = ["/dashboard", "/call", "/maintenance", "/leads", "/units"];
+const BOTTOM_NAV_ORDER = ["/dashboard", "/work-orders", "/leads", "/properties"];
 const BOTTOM_NAV_SLOTS = 3;
 
 /**
@@ -153,13 +169,30 @@ function useAppView(): AppView | undefined {
   return useQuery(api.team.myAccess)?.view;
 }
 
-function NavBadge({ kind }: { kind: "inbox" | "exceptions" }) {
-  const counts = useQuery(api.maintenance.counts);
-  const n = counts ? (kind === "inbox" ? counts.new + counts.unread : counts.exceptions) : 0;
-  if (n <= 0) return null;
+function NavBadge() {
+  const counts = useQuery(api.board.counts);
+  if (!counts) return null;
+  const n = counts.review + counts.pat;
+  const exceptions = counts.exceptions > 0;
+  if (n <= 0 && !exceptions) return null;
   return (
-    <span className="relative z-10 ml-auto rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold leading-none text-primary-foreground">
-      {n > 99 ? "99+" : n}
+    <span className="inline-flex items-center gap-1">
+      {n > 0 ? (
+        <span
+          className="rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold leading-none text-primary-foreground"
+          aria-label={`${n} open`}
+        >
+          {n > 99 ? "99+" : n}
+        </span>
+      ) : null}
+      {exceptions ? (
+        <span
+          className="h-2 w-2 rounded-full bg-danger-ink"
+          role="img"
+          aria-label={`${counts.exceptions} need routing`}
+          title={`${counts.exceptions} need routing`}
+        />
+      ) : null}
     </span>
   );
 }
@@ -180,32 +213,18 @@ function NavRow({
     <Link
       href={link.href}
       onClick={onNavigate}
-      className={`relative flex items-center rounded-xl transition-colors ${
-        nested ? "gap-3 px-3 py-2 text-sm" : "gap-3 px-3.5 py-2.5 text-sm"
-      } ${active ? "" : "hover:bg-sidebar-accent/60"}`}
+      aria-current={active ? "page" : undefined}
+      className={`flex items-center gap-2.5 rounded-2xl px-[11px] text-sm transition-colors ${
+        nested ? "ml-5 py-1.5" : "py-[7px]"
+      } ${active ? "bg-accent font-medium text-primary" : "text-sidebar-foreground/80 hover:bg-muted"}`}
     >
-      {active && (
-        <motion.div
-          layoutId="sidebar-active"
-          className="absolute inset-0 rounded-xl bg-sidebar-accent"
-          transition={{ type: "spring", damping: 25, stiffness: 300 }}
-        />
-      )}
-      <Icon
-        className={`relative z-10 h-4 w-4 shrink-0 ${
-          active ? "text-sidebar-accent-foreground" : "text-sidebar-foreground/55"
-        }`}
-      />
-      <span
-        className={`relative z-10 ${
-          active
-            ? "font-semibold text-sidebar-accent-foreground"
-            : "font-medium text-sidebar-foreground/80"
-        }`}
-      >
-        {link.label}
-      </span>
-      {link.badge ? <NavBadge kind={link.badge} /> : null}
+      <Icon className={`h-4 w-4 shrink-0 ${active ? "text-primary" : "text-muted-foreground"}`} />
+      <span>{link.label}</span>
+      {link.badge ? (
+        <span className="ml-auto flex items-center gap-1.5">
+          <NavBadge />
+        </span>
+      ) : null}
     </Link>
   );
 }
@@ -226,14 +245,14 @@ function NavGroup({
   const [open, setOpen] = useState(true);
 
   return (
-    <div className="pt-1">
+    <div>
       <button
         type="button"
         onClick={() => setOpen((current) => !current)}
         aria-expanded={open}
-        className="flex w-full items-center gap-3 rounded-xl px-3.5 py-2.5 text-sm transition-colors hover:bg-sidebar-accent/60"
+        className="flex w-full items-center gap-2.5 rounded-2xl px-[11px] pb-[5px] pt-[9px] text-sm transition-colors hover:bg-muted"
       >
-        <Icon className="h-4 w-4 shrink-0 text-sidebar-foreground/55" />
+        <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
         <span className="flex-1 text-left font-medium text-sidebar-foreground/80">{group}</span>
         <ChevronDown
           className={`h-4 w-4 shrink-0 text-sidebar-foreground/40 transition-transform ${
@@ -243,13 +262,13 @@ function NavGroup({
       </button>
 
       {open ? (
-        <div className="flex flex-col gap-1 py-1 pl-6">
+        <div className="flex flex-col gap-0.5">
           {items.map((item) => (
             <NavRow
               key={item.href}
               link={item}
               nested
-              active={isActiveHref(pathname, item.href)}
+              active={isActiveLink(pathname, item)}
               onNavigate={onNavigate}
             />
           ))}
@@ -264,7 +283,7 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
   const view = useAppView();
 
   return (
-    <nav className="flex flex-1 flex-col gap-1 overflow-y-auto">
+    <nav aria-label="Main" className="flex flex-1 flex-col gap-0.5 overflow-y-auto">
       {entriesFor(view).map((entry) => {
         if (isGroup(entry)) {
           return (
@@ -282,7 +301,7 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
           <NavRow
             key={entry.href}
             link={entry}
-            active={isActiveHref(pathname, entry.href)}
+            active={isActiveLink(pathname, entry)}
             onNavigate={onNavigate}
           />
         );
@@ -376,7 +395,7 @@ function UserProfile({ compact = false }: { compact?: boolean }) {
               initial={{ opacity: 0, y: 6 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 6 }}
-              className={`absolute z-50 w-56 rounded-xl border border-sidebar-border bg-card p-2 shadow-lg ${
+              className={`absolute z-50 w-56 rounded-[16px] border border-border bg-card p-2 shadow-card ${
                 compact ? "right-0 top-11" : "bottom-14 left-0 right-0"
               }`}
             >
@@ -412,15 +431,15 @@ export function AppSidebar() {
     BOTTOM_NAV_SLOTS,
   );
   const moreLinks = leaves.filter((l) => !bottomLinks.includes(l));
-  const moreActive = moreLinks.some((l) => isActiveHref(pathname, l.href));
+  const moreActive = moreLinks.some((l) => isActiveLink(pathname, l));
 
   return (
     <>
       {/* Desktop sidebar */}
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-64 flex-col gap-6 border-r border-sidebar-border bg-sidebar px-3.5 py-5 lg:flex">
+      <aside className="fixed inset-y-0 left-0 z-30 hidden w-[236px] flex-col gap-5 border-r border-sidebar-border bg-sidebar px-[11px] pb-3 pt-3.5 lg:flex">
         <Brand />
         <NavLinks />
-        <div className="mt-auto border-t border-sidebar-border pt-3">
+        <div className="mt-auto border-t border-sidebar-border pt-2.5">
           <UserProfile />
         </div>
       </aside>
@@ -434,7 +453,7 @@ export function AppSidebar() {
       {/* Mobile bottom nav */}
       <nav className="fixed inset-x-0 bottom-0 z-40 flex items-stretch justify-around border-t border-sidebar-border bg-sidebar/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-sm lg:hidden">
         {bottomLinks.map((link) => {
-          const active = isActiveHref(pathname, link.href);
+          const active = isActiveLink(pathname, link);
           const Icon = link.icon;
           return (
             <Link
@@ -493,7 +512,7 @@ export function AppSidebar() {
               </div>
               <div className="flex flex-col gap-1">
                 {moreLinks.map((link) => {
-                  const active = isActiveHref(pathname, link.href);
+                  const active = isActiveLink(pathname, link);
                   const Icon = link.icon;
                   return (
                     <Link

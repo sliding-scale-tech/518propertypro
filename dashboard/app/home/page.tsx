@@ -9,7 +9,7 @@ import { api } from "@/convex/_generated/api";
 
 const DESTINATION = {
   admin: "/dashboard",
-  asset_manager: "/maintenance",
+  asset_manager: "/dashboard",
   technician: "/tech",
   accountant: "/dashboard",
 } as const;

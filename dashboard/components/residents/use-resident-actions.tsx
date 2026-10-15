@@ -5,7 +5,9 @@ import { useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useToast } from "@/components/toast";
-import { Modal, btnDanger, btnOutline, cleanError } from "@/components/maintenance/shared";
+import { cleanError } from "@/components/maintenance/shared";
+import { Dialog } from "@/components/properties/dialog";
+import { Btn } from "@/components/ui";
 import { ResidentModal, type ResidentFormValue, type UnitOption } from "./resident-modal";
 
 export type ResidentRow = {
@@ -76,16 +78,14 @@ export function useResidentActions(onDeactivated?: () => void) {
         />
       ) : null}
       {confirming ? (
-        <Modal title={`Deactivate ${confirming.fullName}?`} onClose={() => setConfirming(null)}>
+        <Dialog title={`Deactivate ${confirming.fullName}?`} onClose={() => setConfirming(null)}>
           <p className="text-sm text-muted-foreground">
             Their phone numbers stop matching incoming calls. The record and history are kept.
           </p>
           <div className="mt-4 flex justify-end gap-2">
-            <button className={btnOutline} onClick={() => setConfirming(null)}>
-              Cancel
-            </button>
-            <button
-              className={btnDanger}
+            <Btn onClick={() => setConfirming(null)}>Cancel</Btn>
+            <Btn
+              variant="dng"
               disabled={busy}
               onClick={async () => {
                 setBusy(true);
@@ -102,9 +102,9 @@ export function useResidentActions(onDeactivated?: () => void) {
               }}
             >
               Deactivate
-            </button>
+            </Btn>
           </div>
-        </Modal>
+        </Dialog>
       ) : null}
     </>
   );

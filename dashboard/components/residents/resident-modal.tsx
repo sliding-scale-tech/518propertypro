@@ -2,7 +2,8 @@
 
 import { Plus, X } from "lucide-react";
 import { useState } from "react";
-import { Field, Modal, btnOutline, btnPrimary, inputClass } from "@/components/maintenance/shared";
+import { Dialog } from "@/components/properties/dialog";
+import { Btn, DatePicker, Field, IconBtn, Input, LabeledField, Select } from "@/components/ui";
 
 export type ResidentFormValue = {
   unitId: string;
@@ -43,7 +44,7 @@ export function ResidentModal({
   const ready = unitId !== "" && fullName.trim() !== "" && phonesOk && !busy;
 
   return (
-    <Modal title={title} onClose={onClose}>
+    <Dialog title={title} onClose={onClose}>
       <form
         className="space-y-4"
         onSubmit={(e) => {
@@ -53,74 +54,69 @@ export function ResidentModal({
           }
         }}
       >
-        <Field label="Unit">
-          <select value={unitId} onChange={(e) => setUnitId(e.target.value)} className={inputClass}>
-            <option value="" disabled>
-              Select a unit
-            </option>
-            {unitOptions.map((u) => (
-              <option key={u.id} value={u.id}>
-                {u.label}
+        <LabeledField label="Unit">
+          {(id) => (
+            <Select id={id} value={unitId} onChange={(e) => setUnitId(e.target.value)}>
+              <option value="" disabled>
+                Select a unit
               </option>
+              {unitOptions.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.label}
+                </option>
+              ))}
+            </Select>
+          )}
+        </LabeledField>
+        <LabeledField label="Full name">
+          {(id) => <Input id={id} value={fullName} maxLength={120} onChange={(e) => setFullName(e.target.value)} />}
+        </LabeledField>
+        <Field
+          label="Phone numbers"
+          hint={<span className={phonesOk ? undefined : "text-danger-ink"}>E.164 format, e.g. +15185551234. Up to 5.</span>}
+        >
+          <div className="space-y-1.5">
+            {phones.map((p, i) => (
+              <div key={i} className="flex gap-2">
+                <Input
+                  value={p}
+                  inputMode="tel"
+                  aria-label={`Phone ${i + 1}`}
+                  placeholder="+15185551234"
+                  onChange={(e) => setPhones(phones.map((x, j) => (j === i ? e.target.value : x)))}
+                />
+                {phones.length > 1 ? (
+                  <IconBtn label="Remove phone" onClick={() => setPhones(phones.filter((_, j) => j !== i))}>
+                    <X />
+                  </IconBtn>
+                ) : null}
+              </div>
             ))}
-          </select>
+            {phones.length < 5 ? (
+              <button
+                type="button"
+                onClick={() => setPhones([...phones, ""])}
+                className="inline-flex items-center gap-1 text-xs font-medium text-primary"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Add phone
+              </button>
+            ) : null}
+          </div>
         </Field>
-        <Field label="Full name">
-          <input value={fullName} maxLength={120} onChange={(e) => setFullName(e.target.value)} className={inputClass} />
-        </Field>
-        <div className="space-y-1.5">
-          <span className="text-xs font-medium text-muted-foreground">Phone numbers</span>
-          {phones.map((p, i) => (
-            <div key={i} className="flex gap-2">
-              <input
-                value={p}
-                inputMode="tel"
-                aria-label={`Phone ${i + 1}`}
-                placeholder="+15185551234"
-                onChange={(e) => setPhones(phones.map((x, j) => (j === i ? e.target.value : x)))}
-                className={inputClass}
-              />
-              {phones.length > 1 ? (
-                <button
-                  type="button"
-                  aria-label="Remove phone"
-                  onClick={() => setPhones(phones.filter((_, j) => j !== i))}
-                  className="rounded-lg p-2 text-muted-foreground hover:bg-accent"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              ) : null}
-            </div>
-          ))}
-          <p className={`text-[11px] ${phonesOk ? "text-muted-foreground" : "text-destructive"}`}>
-            E.164 format, e.g. +15185551234. Up to 5.
-          </p>
-          {phones.length < 5 ? (
-            <button
-              type="button"
-              onClick={() => setPhones([...phones, ""])}
-              className="inline-flex items-center gap-1 text-xs font-medium text-primary"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              Add phone
-            </button>
-          ) : null}
-        </div>
-        <Field label="Email (optional)">
-          <input type="email" value={email} maxLength={200} onChange={(e) => setEmail(e.target.value)} className={inputClass} />
-        </Field>
-        <Field label="Lease end (optional)">
-          <input type="date" value={leaseEnd} onChange={(e) => setLeaseEnd(e.target.value)} className={inputClass} />
-        </Field>
+        <LabeledField label="Email (optional)">
+          {(id) => <Input id={id} type="email" value={email} maxLength={200} onChange={(e) => setEmail(e.target.value)} />}
+        </LabeledField>
+        <LabeledField label="Lease end (optional)">
+          {(id) => <DatePicker id={id} value={leaseEnd} onChange={setLeaseEnd} />}
+        </LabeledField>
         <div className="flex justify-end gap-2">
-          <button type="button" className={btnOutline} onClick={onClose}>
-            Cancel
-          </button>
-          <button type="submit" className={btnPrimary} disabled={!ready}>
+          <Btn onClick={onClose}>Cancel</Btn>
+          <Btn type="submit" variant="pri" disabled={!ready}>
             {busy ? "Saving…" : "Save"}
-          </button>
+          </Btn>
         </div>
       </form>
-    </Modal>
+    </Dialog>
   );
 }

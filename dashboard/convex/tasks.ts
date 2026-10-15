@@ -1,17 +1,67 @@
 import { v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
-import type { MutationCtx } from "./_generated/server";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { mutation, query } from "./_generated/server";
-import { currentOrg, requireOrg } from "./authz";
+import { currentOrg, requireOrg, viewFor } from "./authz";
 import type { OrgContext } from "./authz";
+import { amScope, canSeeUnit, EMPTY_AM_SCOPE } from "./amScope";
+import type { AmScope } from "./amScope";
+import { checkStorageUsable } from "./maintenance";
 
-async function ownedTask(
-  ctx: MutationCtx,
-  taskId: Id<"tasks">,
-  orgId: string,
-): Promise<Doc<"tasks">> {
+/**
+ * Task access, enforced server-side:
+ *   read  - admin view: the whole team. Everyone else: tasks they created or are assigned to.
+ *           An asset manager (AM) also reads tasks linked (unit / request / work order) to a unit
+ *           they manage or cover.
+ *   write - admin view; the creator or assignee; an AM on tasks linked to a unit they MANAGE
+ *           (covering is read-only).
+ * A task outside the caller's access reads as "not found".
+ */
+type TaskCtx = QueryCtx | MutationCtx;
+
+async function scopeOf(ctx: TaskCtx, org: OrgContext): Promise<AmScope> {
+  return viewFor(org.isAdmin, org.jobRoles) === "asset_manager" ? await amScope(ctx, org) : EMPTY_AM_SCOPE;
+}
+
+/** The unit a task is tied to: its own link, else its request's or work order's unit. */
+async function linkedUnitId(
+  ctx: TaskCtx,
+  links: { unitId?: Id<"units">; requestId?: Id<"maintenanceRequests">; workOrderId?: Id<"workOrders"> },
+): Promise<Id<"units"> | undefined> {
+  if (links.unitId) return links.unitId;
+  if (links.requestId) {
+    const r = await ctx.db.get(links.requestId);
+    if (r?.unitId) return r.unitId;
+  }
+  if (links.workOrderId) {
+    const w = await ctx.db.get(links.workOrderId);
+    if (w?.unitId) return w.unitId;
+  }
+  return undefined;
+}
+
+function isOwnTask(org: OrgContext, task: Doc<"tasks">): boolean {
+  return task.userId === org.user._id || task.assigneeUserId === org.user._id;
+}
+
+async function canReadTask(ctx: TaskCtx, org: OrgContext, scope: AmScope, task: Doc<"tasks">): Promise<boolean> {
+  if (task.orgId !== org.orgId) return false;
+  if (viewFor(org.isAdmin, org.jobRoles) === "admin") return true;
+  if (isOwnTask(org, task)) return true;
+  return canSeeUnit(scope, await linkedUnitId(ctx, task));
+}
+
+async function canWriteTask(ctx: TaskCtx, org: OrgContext, scope: AmScope, task: Doc<"tasks">): Promise<boolean> {
+  if (task.orgId !== org.orgId) return false;
+  if (viewFor(org.isAdmin, org.jobRoles) === "admin") return true;
+  if (isOwnTask(org, task)) return true;
+  const unitId = await linkedUnitId(ctx, task);
+  return unitId !== undefined && scope.managed.has(unitId);
+}
+
+async function ownedTask(ctx: MutationCtx, taskId: Id<"tasks">, org: OrgContext): Promise<Doc<"tasks">> {
   const task = await ctx.db.get(taskId);
-  if (!task || task.orgId !== orgId) throw new Error("Task not found.");
+  if (!task || !(await canWriteTask(ctx, org, await scopeOf(ctx, org), task))) throw new Error("Task not found.");
   return task;
 }
 
@@ -36,17 +86,49 @@ async function checkLinks(
       .first();
     if (!membership || membership.orgId !== org.orgId) throw new Error("Assignee not found.");
   }
+  // Admin view may link anything in the team; everyone else only records in their own scope.
+  const admin = viewFor(org.isAdmin, org.jobRoles) === "admin";
+  const scope = admin ? EMPTY_AM_SCOPE : await scopeOf(ctx, org);
   if (links.unitId) {
     const unit = await ctx.db.get(links.unitId);
-    if (!unit || unit.orgId !== org.orgId) throw new Error("Unit not found.");
+    if (!unit || unit.orgId !== org.orgId || (!admin && !canSeeUnit(scope, unit._id))) {
+      throw new Error("Unit not found.");
+    }
   }
   if (links.requestId) {
     const request = await ctx.db.get(links.requestId);
-    if (!request || request.orgId !== org.orgId) throw new Error("Request not found.");
+    if (
+      !request ||
+      request.orgId !== org.orgId ||
+      (!admin && request.assignedAssetManagerUserId !== org.user._id && !canSeeUnit(scope, request.unitId))
+    ) {
+      throw new Error("Request not found.");
+    }
   }
   if (links.workOrderId) {
     const wo = await ctx.db.get(links.workOrderId);
-    if (!wo || wo.orgId !== org.orgId) throw new Error("Work order not found.");
+    if (
+      !wo ||
+      wo.orgId !== org.orgId ||
+      (!admin && wo.technicianUserId !== org.user._id && !canSeeUnit(scope, wo.unitId))
+    ) {
+      throw new Error("Work order not found.");
+    }
+  }
+}
+
+function isAdminView(org: OrgContext): boolean {
+  return viewFor(org.isAdmin, org.jobRoles) === "admin";
+}
+
+/**
+ * Assignment rule: only the admin view may assign to anyone (membership checked in checkLinks).
+ * Everyone else may only leave it empty or name themself.
+ */
+function checkAssigneeRule(org: OrgContext, assigneeUserId: Id<"users"> | undefined): void {
+  if (isAdminView(org)) return;
+  if (assigneeUserId !== undefined && assigneeUserId !== org.user._id) {
+    throw new Error("You can only assign tasks to yourself.");
   }
 }
 
@@ -68,8 +150,14 @@ export const list = query({
       .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
       .order("desc")
       .collect();
-    if (!args.mine) return rows;
-    return rows.filter((t) => t.userId === org.user._id || t.assigneeUserId === org.user._id);
+    if (args.mine) return rows.filter((t) => isOwnTask(org, t));
+    if (viewFor(org.isAdmin, org.jobRoles) === "admin") return rows;
+    const scope = await scopeOf(ctx, org);
+    const out: Doc<"tasks">[] = [];
+    for (const t of rows) {
+      if (await canReadTask(ctx, org, scope, t)) out.push(t);
+    }
+    return out;
   },
 });
 
@@ -95,6 +183,7 @@ export const create = mutation({
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
     const { orgId, user } = org;
+    checkAssigneeRule(org, args.assigneeUserId);
     await checkLinks(ctx, org, args);
     const title = args.title.trim();
     if (!title) throw new Error("Task title is required.");
@@ -110,7 +199,8 @@ export const create = mutation({
       category: args.category?.trim() || undefined,
       dueDate: args.dueDate,
       tags: args.tags?.length ? args.tags : undefined,
-      assigneeUserId: args.assigneeUserId,
+      // Non-admin tasks are always self-assigned (checkAssigneeRule rejected anyone else).
+      assigneeUserId: isAdminView(org) ? args.assigneeUserId : user._id,
       unitId: args.unitId,
       requestId: args.requestId,
       workOrderId: args.workOrderId,
@@ -122,7 +212,12 @@ export const create = mutation({
       const attachment = await ctx.db.get(attachmentId);
       // Only link an attachment this same org uploaded and that isn't already claimed by
       // another task — guards against a stale or tampered id from the client.
-      if (attachment && attachment.orgId === orgId && !attachment.taskId) {
+      if (
+        attachment &&
+        attachment.orgId === orgId &&
+        !attachment.taskId &&
+        attachment.uploadedByUserId === user._id
+      ) {
         await ctx.db.patch(attachmentId, { taskId });
       }
     }
@@ -136,8 +231,8 @@ export const create = mutation({
 export const toggleComplete = mutation({
   args: { taskId: v.id("tasks") },
   handler: async (ctx, args) => {
-    const { orgId } = await requireOrg(ctx);
-    const task = await ownedTask(ctx, args.taskId, orgId);
+    const org = await requireOrg(ctx);
+    const task = await ownedTask(ctx, args.taskId, org);
     await ctx.db.patch(args.taskId, {
       status: task.status === "completed" ? "todo" : "completed",
       updatedAt: Date.now(),
@@ -173,8 +268,8 @@ export const update = mutation({
   },
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
-    const { orgId } = org;
-    await ownedTask(ctx, args.taskId, orgId);
+    await ownedTask(ctx, args.taskId, org);
+    checkAssigneeRule(org, args.assigneeUserId);
     await checkLinks(ctx, org, args);
 
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
@@ -189,7 +284,11 @@ export const update = mutation({
     if (args.tags !== undefined) patch.tags = args.tags;
     if (args.clearDueDate) patch.dueDate = undefined;
     else if (args.dueDate !== undefined) patch.dueDate = args.dueDate;
-    if (args.clearAssignee) patch.assigneeUserId = undefined;
+    // Non-admins can't unassign either: that would reassign away from themselves.
+    if (args.clearAssignee) {
+      if (!isAdminView(org)) throw new Error("Only an admin can change who a task is assigned to.");
+      patch.assigneeUserId = undefined;
+    }
     else if (args.assigneeUserId !== undefined) patch.assigneeUserId = args.assigneeUserId;
     if (args.clearLinks) {
       patch.unitId = undefined;
@@ -229,8 +328,12 @@ export const attach = mutation({
     taskId: v.optional(v.id("tasks")),
   },
   handler: async (ctx, args) => {
-    const { orgId, user } = await requireOrg(ctx);
-    if (args.taskId) await ownedTask(ctx, args.taskId, orgId);
+    const org = await requireOrg(ctx);
+    const { orgId, user } = org;
+    if (args.taskId) await ownedTask(ctx, args.taskId, org);
+    // Must be a fresh, unclaimed upload; never delete or adopt a file another record owns.
+    const unusable = await checkStorageUsable(ctx, orgId, args.storageId);
+    if (unusable) throw new Error(unusable);
 
     return ctx.db.insert("taskAttachments", {
       taskId: args.taskId,
@@ -254,7 +357,7 @@ export const attachments = query({
     const org = await currentOrg(ctx);
     if (!org) return [];
     const task = await ctx.db.get(args.taskId);
-    if (!task || task.orgId !== org.orgId) return [];
+    if (!task || !(await canReadTask(ctx, org, await scopeOf(ctx, org), task))) return [];
 
     const rows = await ctx.db
       .query("taskAttachments")
@@ -276,11 +379,22 @@ export const attachments = query({
 export const removeAttachment = mutation({
   args: { attachmentId: v.id("taskAttachments") },
   handler: async (ctx, args) => {
-    const { orgId } = await requireOrg(ctx);
+    const org = await requireOrg(ctx);
     const attachment = await ctx.db.get(args.attachmentId);
-    if (!attachment || attachment.orgId !== orgId) throw new Error("Attachment not found.");
+    if (!attachment || attachment.orgId !== org.orgId) throw new Error("Attachment not found.");
+    // Uploader, or anyone who may write the parent task.
+    if (attachment.uploadedByUserId !== org.user._id) {
+      const task = attachment.taskId ? await ctx.db.get(attachment.taskId) : null;
+      if (!task || !(await canWriteTask(ctx, org, await scopeOf(ctx, org), task))) {
+        throw new Error("Attachment not found.");
+      }
+    }
 
-    await ctx.storage.delete(attachment.storageId);
+    // Only delete the blob when no media / work-order file also points at it.
+    const sharedElsewhere =
+      (await ctx.db.query("maintenanceMedia").withIndex("by_storage", (q) => q.eq("storageId", attachment.storageId)).first()) ||
+      (await ctx.db.query("workOrderFiles").withIndex("by_storage", (q) => q.eq("storageId", attachment.storageId)).first());
+    if (!sharedElsewhere) await ctx.storage.delete(attachment.storageId);
     await ctx.db.delete(args.attachmentId);
   },
 });

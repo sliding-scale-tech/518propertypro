@@ -1,9 +1,10 @@
 "use client";
 
 import { useMutation, useQuery } from "convex/react";
-import { AlertTriangle, ArrowLeft, Camera, Check, Loader2, MapPin, PawPrint, Receipt, RotateCw } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Camera, Check, Loader2, MapPin, Minus, PawPrint, Plus, Receipt, RotateCw } from "lucide-react";
 import Link from "next/link";
 import { Component, useRef, useState, type ReactNode } from "react";
+import { DatePicker, Pill } from "@/components/ui";
 import { useToast } from "@/components/toast";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -11,12 +12,12 @@ import { STATUS_LABEL, compressImage, dollarsToCents, errorMessage, formatCents,
 
 function NotFound() {
   return (
-    <div className="rounded-2xl border border-border bg-card p-8 text-center">
+    <div className="rounded-[20px] border border-border bg-card p-8 text-center">
       <h1 className="text-lg font-semibold">Job not found</h1>
       <p className="mt-2 text-sm text-muted-foreground">It may have been reassigned or removed.</p>
       <Link
         href="/tech"
-        className="mt-5 inline-flex min-h-11 items-center gap-2 rounded-xl bg-primary px-5 text-sm font-semibold text-primary-foreground"
+        className="mt-5 inline-flex min-h-11 items-center gap-2 rounded-[14px] bg-primary px-5 text-sm font-semibold text-primary-foreground"
       >
         <ArrowLeft className="h-4 w-4" /> Back to my jobs
       </Link>
@@ -43,15 +44,17 @@ export function JobDetail({ id }: { id: string }) {
   );
 }
 
-const inputCls = "min-h-11 w-full rounded-xl border border-border bg-background px-3 text-base";
+const inputCls = "min-h-11 w-full rounded-xl border border-input bg-card px-3 text-base outline-none focus:border-ring";
 const btnCls =
-  "inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-border px-4 text-sm font-semibold disabled:opacity-50";
+  "inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-border bg-card px-4 text-sm font-semibold hover:bg-muted disabled:opacity-45";
+const bigBtnCls =
+  "flex min-h-[52px] w-full items-center justify-center gap-2 rounded-[14px] bg-primary text-[15px] font-semibold text-primary-foreground disabled:opacity-40";
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="mt-6 rounded-2xl border border-border bg-card p-4 shadow-sm">
-      <h2 className="text-base font-semibold">{title}</h2>
-      <div className="mt-3 space-y-3">{children}</div>
+    <section className="mt-3 flex flex-col gap-2.5 rounded-2xl border border-border bg-card px-3.5 py-3">
+      <h2 className="text-xs font-semibold uppercase tracking-[0.06em] text-muted-foreground">{title}</h2>
+      <div className="space-y-3">{children}</div>
     </section>
   );
 }
@@ -220,16 +223,17 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
       </Link>
 
       <h1 className="mt-1 text-xl font-semibold leading-snug">{wo.title}</h1>
-      <p className="mt-1 text-sm text-muted-foreground">
-        {STATUS_LABEL[wo.status] ?? wo.status}
-        {wo.dueDate !== undefined ? ` · Due ${formatDate(wo.dueDate)}` : ""}
+      <p className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+        <Pill>{STATUS_LABEL[wo.status] ?? wo.status}</Pill>
+        {wo.window ? <Pill tone="warn">{wo.window}</Pill> : null}
+        {wo.dueDate !== undefined ? <span>Due {formatDate(wo.dueDate)}</span> : null}
       </p>
 
       <a
         href={mapsUrl(place || unit.unitNumber)}
         target="_blank"
         rel="noopener noreferrer"
-        className="mt-3 flex min-h-11 items-center gap-2 rounded-xl bg-muted px-3 text-sm font-medium text-primary"
+        className="mt-3 flex min-h-11 items-center gap-2 rounded-2xl bg-muted px-3 text-sm font-medium text-primary"
       >
         <MapPin className="h-4 w-4 shrink-0" />
         <span className="min-w-0">
@@ -238,7 +242,7 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
       </a>
 
       {wo.accessNotes && (
-        <p className={`mt-3 flex gap-2 rounded-xl p-3 text-sm ${hasPets ? "bg-warning/15 font-medium" : "bg-muted"}`}>
+        <p className={`mt-3 flex gap-2 rounded-2xl p-3 text-sm ${hasPets ? "bg-warning-soft font-medium text-warning-ink" : "bg-muted"}`}>
           {hasPets && <PawPrint className="mt-0.5 h-4 w-4 shrink-0" />}
           <span>
             <span className="block text-xs font-semibold uppercase text-muted-foreground">Access</span>
@@ -252,20 +256,20 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
       </Section>
 
       {(justSubmitted || wo.status === "completed") && (
-        <div className="mt-6 flex items-center gap-3 rounded-2xl border border-success/30 bg-success/10 p-4 text-sm font-medium">
-          <Check className="h-5 w-5 shrink-0 text-success" />
+        <div className="mt-3 flex items-center gap-3 rounded-2xl bg-success-soft p-4 text-sm font-medium text-success-ink">
+          <Check className="h-5 w-5 shrink-0" />
           Sent to Pat for review
         </div>
       )}
       {wo.status === "reviewed_closed" && (
-        <div className="mt-6 rounded-2xl bg-muted p-4 text-sm font-medium">This job is closed.</div>
+        <div className="mt-3 rounded-2xl bg-muted p-4 text-sm font-medium">This job is closed.</div>
       )}
 
       {canStart && (
         <button
           onClick={() => void run("start", async () => { await start({ workOrderId: id }); }, "Job started.")}
           disabled={busy !== null}
-          className="mt-6 flex min-h-14 w-full items-center justify-center gap-2 rounded-2xl bg-primary text-base font-semibold text-primary-foreground disabled:opacity-50"
+          className={`mt-3 ${bigBtnCls}`}
         >
           {busy === "start" && <Loader2 className="h-5 w-5 animate-spin" />}
           Start job
@@ -293,7 +297,7 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
                     />
                     <span className={`text-sm ${done ? "text-muted-foreground line-through" : ""}`}>
                       {c.label}
-                      {c.required && <span className="ml-1 text-xs text-destructive">required</span>}
+                      {c.required && <span className="ml-1 text-xs text-danger-ink">required</span>}
                     </span>
                   </label>
                 </li>
@@ -310,7 +314,7 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
               {photos.map((f) =>
                 f.url ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img key={f._id} src={f.url} alt="Completion photo" className="aspect-square w-full rounded-lg object-cover" />
+                  <img key={f._id} src={f.url} alt="Completion photo" className="aspect-square w-full rounded-xl object-cover" />
                 ) : null,
               )}
             </div>
@@ -320,7 +324,7 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
               <div className="flex items-center justify-between gap-2">
                 <span className="min-w-0 truncate">{u.name}</span>
                 {u.state === "working" && <span>{u.pct}%</span>}
-                {u.state === "done" && <Check className="h-4 w-4 text-success" />}
+                {u.state === "done" && <Check className="h-4 w-4 text-success-ink" />}
               </div>
               {u.state === "working" && (
                 <div className="mt-2 h-2 rounded-full bg-muted">
@@ -328,7 +332,7 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
                 </div>
               )}
               {u.state === "error" && (
-                <div className="mt-2 flex items-center justify-between gap-2 text-destructive">
+                <div className="mt-2 flex items-center justify-between gap-2 text-danger-ink">
                   <span>{u.error}</span>
                   {u.retry ? (
                     <button onClick={() => void uploadOne(u.key)} className={`${btnCls} text-foreground`}>
@@ -395,7 +399,7 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
       )}
 
       {(canEdit || time.length > 0) && (
-        <Section title={`Hours (${totals.hours} h)`}>
+        <Section title={`Hours on site (${totals.hours} h)`}>
           {time.map((t) => (
             <p key={t._id} className="flex justify-between text-sm">
               <span>{t.date}</span>
@@ -403,19 +407,39 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
             </p>
           ))}
           {canEdit && (
-            <div className="flex gap-2">
-              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={inputCls} />
-              <input
-                type="number"
-                inputMode="decimal"
-                step={0.25}
-                min={0.25}
-                max={24}
-                value={hours}
-                onChange={(e) => setHours(e.target.value)}
-                className={`${inputCls} w-24`}
-                aria-label="Hours"
+            <div className="space-y-3">
+              <DatePicker
+                value={date}
+                onChange={setDate}
+                className="min-h-11 text-base"
+                aria-label="Date worked"
               />
+              <div className="flex items-center justify-center gap-3">
+                <button
+                  type="button"
+                  aria-label="Less time"
+                  disabled={busy !== null || !(Number(hours) > 0)}
+                  onClick={() => setHours(String(Math.max(0, (Number(hours) || 0) - 0.25)))}
+                  className={`${btnCls} w-11 px-0`}
+                >
+                  <Minus className="h-4 w-4" />
+                </button>
+                <div className="min-w-16 text-center">
+                  <div className="text-[22px] font-semibold tabular-nums" aria-live="polite">
+                    {(Number(hours) || 0).toFixed(2)}
+                  </div>
+                  <div className="text-xs text-muted-foreground">hours</div>
+                </div>
+                <button
+                  type="button"
+                  aria-label="More time"
+                  disabled={busy !== null || (Number(hours) || 0) >= 24}
+                  onClick={() => setHours(String(Math.min(24, (Number(hours) || 0) + 0.25)))}
+                  className={`${btnCls} w-11 px-0`}
+                >
+                  <Plus className="h-4 w-4" />
+                </button>
+              </div>
               <button
                 disabled={busy !== null}
                 onClick={() =>
@@ -429,9 +453,9 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
                     "Hours added.",
                   )
                 }
-                className={`${btnCls} shrink-0`}
+                className={`${btnCls} w-full`}
               >
-                Add
+                Log hours
               </button>
             </div>
           )}
@@ -499,7 +523,7 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
       )}
 
       {(canEdit || notes.length > 0) && (
-        <Section title="Notes">
+        <Section title="Notes for Pat">
           {notes.map((n) => (
             <p key={n._id} className="whitespace-pre-wrap rounded-xl bg-muted p-3 text-sm">
               {n.body}
@@ -512,8 +536,8 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
                 onChange={(e) => setNote(e.target.value)}
                 rows={3}
                 maxLength={2000}
-                placeholder="What did you find or do?"
-                className="w-full rounded-xl border border-border bg-background p-3 text-base"
+                placeholder="What you found and what you did"
+                className="w-full rounded-xl border border-input bg-card p-3 text-base outline-none focus:border-ring"
               />
               <button
                 disabled={busy !== null || !note.trim()}
@@ -537,10 +561,10 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
       )}
 
       {canEdit && (
-        <div className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-background/95 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur-sm">
+        <div className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-card/95 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur-sm">
           <div className="mx-auto max-w-2xl">
             {submitError && (
-              <div role="alert" className="mb-3 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm">
+              <div role="alert" className="mb-3 rounded-2xl bg-danger-soft p-3 text-sm text-danger-ink">
                 <p className="flex items-center gap-2 font-semibold">
                   <AlertTriangle className="h-4 w-4 shrink-0" />
                   {missing ? "Can't submit yet. Still needed:" : submitError}
@@ -557,10 +581,10 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
             <button
               onClick={() => void onSubmit()}
               disabled={busy !== null}
-              className="flex min-h-14 w-full items-center justify-center gap-2 rounded-2xl bg-primary text-base font-semibold text-primary-foreground disabled:opacity-50"
+              className={bigBtnCls}
             >
               {busy === "submit" && <Loader2 className="h-5 w-5 animate-spin" />}
-              Submit as completed
+              Mark complete
             </button>
           </div>
         </div>

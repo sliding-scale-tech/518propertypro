@@ -138,33 +138,30 @@ function SignedInShell({ children }: { children: ReactNode }) {
 
   return (
     <>
+      {/* Page backdrop glow: sits behind all content (body supplies the base colour), uses the
+          theme's --glow token so it dims in dark mode, and never intercepts clicks. */}
+      <div
+        aria-hidden
+        className="pointer-events-none fixed -right-[180px] -top-[180px] z-0 h-[520px] w-[720px]"
+        style={{ background: "radial-gradient(closest-side, var(--glow), transparent)" }}
+      />
       <AppSidebar />
-      <main className="relative min-h-dvh overflow-x-hidden bg-background px-4 py-6 pb-24 sm:px-6 sm:py-8 lg:px-8 lg:py-10 lg:pb-10 lg:pl-64">
+      <main className="relative z-[1] min-h-dvh overflow-x-hidden px-4 py-6 pb-24 sm:px-6 sm:py-8 lg:px-8 lg:py-10 lg:pb-10 lg:pl-[236px]">
         {hasDashboardHeader ? (
-          <>
-            <div
-              aria-hidden
-              className="pointer-events-none absolute inset-0"
-              style={{
-                background:
-                  "radial-gradient(ellipse 58% 42% at 100% 0%, var(--header-wash-end) 0%, #d7e6ff 28%, #eef4ff 52%, transparent 72%)",
-              }}
+          <svg
+            viewBox="0 0 400 200"
+            preserveAspectRatio="none"
+            aria-hidden="true"
+            className="pointer-events-none absolute top-0 right-0 hidden h-[120px] w-[40vw] max-w-[400px] sm:block"
+          >
+            <path
+              d="M0 100 C25 67 75 67 100 100 S175 133 200 100 S275 67 300 100 S375 133 400 100"
+              fill="none"
+              stroke="var(--palette-blue-500)"
+              strokeWidth="2"
+              strokeOpacity="0.28"
             />
-            <svg
-              viewBox="0 0 400 200"
-              preserveAspectRatio="none"
-              aria-hidden="true"
-              className="pointer-events-none absolute top-0 right-0 hidden h-[120px] w-[40vw] max-w-[400px] sm:block"
-            >
-              <path
-                d="M0 100 C25 67 75 67 100 100 S175 133 200 100 S275 67 300 100 S375 133 400 100"
-                fill="none"
-                stroke="var(--palette-blue-500)"
-                strokeWidth="2"
-                strokeOpacity="0.28"
-              />
-            </svg>
-          </>
+          </svg>
         ) : null}
         <div className="relative mx-auto max-w-6xl lg:pl-10 lg:pr-6">
           <PageTransition>{children}</PageTransition>

@@ -1,300 +1,185 @@
 "use client";
 
 import { useQuery } from "convex/react";
-import type { FunctionReturnType } from "convex/server";
-import { AlertTriangle, Download, Plus, Search } from "lucide-react";
-import Link from "next/link";
-import { useMemo, useState } from "react";
+import { AlertTriangle, ChevronRight } from "lucide-react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useState } from "react";
 import { api } from "@/convex/_generated/api";
+import type { Id } from "@/convex/_generated/dataModel";
 import { RequireView } from "@/components/require-view";
-import { PriorityBadge, STATUS_META, StatusPill, type WoStatus } from "@/components/work-orders/shared";
+import { Board, ClosedTable, type ItemRef } from "@/components/board/board";
+import { ExceptionsDrawer } from "@/components/board/exceptions-drawer";
+import { ItemDrawer } from "@/components/board/item-drawer";
+import { NewWorkOrderDrawer } from "@/components/board/new-wo-drawer";
+import { LANES, type Lane } from "@/components/board/shared";
+import { Btn, Chips, PageHeader, Pill, Select } from "@/components/ui";
 
-type Row = FunctionReturnType<typeof api.workOrders.list>[number];
-
-const selectClass =
-  "h-10 rounded-lg border border-input bg-card px-3 text-sm outline-none focus:ring-2 focus:ring-ring/20";
-
-const BOARD: Array<{ status: WoStatus; label: string }> = [
-  { status: "created", label: "Created" },
-  { status: "assigned", label: "Assigned" },
-  { status: "in_progress", label: "In progress" },
-  { status: "completed", label: "Completed" },
-  { status: "reviewed_closed", label: "Closed" },
-];
-
-function fmtDate(ms: number) {
-  return new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-}
-
-/** Quotes a CSV cell and neutralises spreadsheet formulas (=, +, -, @). */
-function csvCell(value: string | number): string {
-  let s = String(value);
-  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
-  return '"' + s.replace(/"/g, '""') + '"';
-}
-
-function exportCsv(rows: Row[]) {
-  const header = ["WO number", "Property", "Unit", "Title", "Technician", "Priority", "Status", "Checklist", "Overdue", "Due", "Updated"];
-  const lines = rows.map((r) =>
-    [
-      `WO-${r.number}`,
-      r.propertyName ?? "",
-      r.unitNumber ?? "",
-      r.title,
-      r.technicianName ?? "",
-      r.priority,
-      STATUS_META[r.status].label,
-      `${r.checklistDone}/${r.checklistTotal}`,
-      r.isOverdue ? "Yes" : "No",
-      r.dueDate ? new Date(r.dueDate).toISOString().slice(0, 10) : "",
-      new Date(r.updatedAt).toISOString(),
-    ]
-      .map(csvCell)
-      .join(","),
-  );
-  const blob = new Blob([[header.map(csvCell).join(","), ...lines].join("\r\n")], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "work-orders.csv";
-  a.click();
-  URL.revokeObjectURL(url);
-}
+const LANE_LABEL: Record<Lane | "all", string> = {
+  all: "All lanes",
+  review: "Asset manager review",
+  pat: "Waiting on lead",
+  tech: "With technician",
+  signoff: "Needs sign-off",
+};
 
 function WorkOrdersInner() {
-  const rows = useQuery(api.workOrders.list, {}) as Row[] | undefined;
+  const router = useRouter();
+  const pathname = usePathname();
+  const params = useSearchParams();
+
+  const laneParam = params.get("lane");
+  const lane: Lane | null = LANES.includes(laneParam as Lane) ? (laneParam as Lane) : null;
+  const amParam = params.get("am");
+
   const access = useQuery(api.team.myAccess);
   const team = useQuery(api.team.overview);
-
-  const [status, setStatus] = useState("");
-  const [technician, setTechnician] = useState("");
-  const [property, setProperty] = useState("");
-  const [priority, setPriority] = useState("");
-  const [search, setSearch] = useState("");
-  const [mode, setMode] = useState<"table" | "board">("table");
-
+  const properties = useQuery(api.properties.list);
+  const isAdmin = access?.view === "admin";
   const canCreate = access?.view === "admin" || access?.view === "asset_manager";
-  const technicians = (team?.members ?? []).filter((m) => m.appRole === "technician");
-  const properties = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const r of rows ?? []) map.set(r.propertyId, r.propertyName ?? "Unknown");
-    return [...map.entries()];
-  }, [rows]);
 
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase().replace(/^wo-?/, "");
-    return (rows ?? []).filter((r) => {
-      if (status && r.status !== status) return false;
-      if (technician && r.technicianUserId !== technician) return false;
-      if (property && r.propertyId !== property) return false;
-      if (priority && r.priority !== priority) return false;
-      if (q && !String(r.number).includes(q) && !(r.unitNumber ?? "").toLowerCase().includes(q)) return false;
-      return true;
-    });
-  }, [rows, status, technician, property, priority, search]);
+  // Only pass an `am` that is a real team member: the query arg is a typed id, and a hand-edited
+  // URL must not crash the page. (Asset managers are scoped server-side regardless.)
+  const amMember = isAdmin ? team?.members.find((m) => m.userId === amParam) : undefined;
+  const [propertyId, setPropertyId] = useState("");
+
+  const data = useQuery(api.board.lanes, {
+    propertyId: propertyId ? (propertyId as Id<"properties">) : undefined,
+    assetManagerUserId: amMember ? (amMember.userId as Id<"users">) : undefined,
+  });
+
+  const [item, setItem] = useState<ItemRef | null>(null);
+  const [itemOpen, setItemOpen] = useState(false);
+  const [newOpen, setNewOpen] = useState(false);
+  const [excOpen, setExcOpen] = useState(false);
+
+  // Deep link: ?open=request:{id} or ?open=work_order:{id} opens that item's drawer.
+  const deepMatch = /^(request|work_order):([A-Za-z0-9_-]{10,64})$/.exec(params.get("open") ?? "");
+  const deepItem: ItemRef | null = deepMatch ? { kind: deepMatch[1] as ItemRef["kind"], id: deepMatch[2] } : null;
+
+  const setQuery = (key: string, value: string | null) => {
+    const next = new URLSearchParams(params.toString());
+    if (value) next.set(key, value);
+    else next.delete(key);
+    const qs = next.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  };
+
+  const leads = data?.maintenanceLeads ?? [];
+  const leadName = leads.length === 1 ? leads[0].name : "maintenance lead";
+  const exceptionCount = data?.exceptions.count ?? 0;
 
   return (
-    <div className="space-y-6 pb-10">
-      <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Work orders</h1>
-          <p className="mt-1 max-w-2xl text-sm leading-5 text-muted-foreground">
-            Track every job from creation to review and close-out.
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={() => exportCsv(filtered)}
-            disabled={filtered.length === 0}
-            className="flex h-11 items-center gap-2 rounded-lg border border-input bg-card px-4 text-sm font-medium hover:bg-accent disabled:opacity-40"
-          >
-            <Download className="h-4 w-4" />
-            Export CSV
-          </button>
-          {canCreate ? (
-            <Link
-              href="/work-orders/new"
-              className="flex h-11 items-center gap-2 rounded-lg bg-primary px-5 text-sm font-semibold text-primary-foreground shadow-sm hover:bg-primary/90"
-            >
-              <Plus className="h-4 w-4" />
-              New work order
-            </Link>
-          ) : null}
-        </div>
-      </header>
+    <div className="pb-10">
+      <PageHeader
+        title="Work orders"
+        subtitle={
+          isAdmin
+            ? "Sarah turns maintenance calls into requests. Asset managers validate them, you create the work order, technicians close it out from their phones."
+            : access?.view === "accountant"
+              ? "Read-only view of completed and closed work, with hours and materials."
+              : "Requests for the units you manage. Approve what’s real, ask for photos when it’s unclear."
+        }
+        actions={
+          canCreate ? (
+            <Btn variant="pri" onClick={() => setNewOpen(true)}>
+              ＋ New work order
+            </Btn>
+          ) : null
+        }
+      />
 
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="WO number or unit"
-            aria-label="Search work orders"
-            className={`${selectClass} w-52 pl-9`}
-          />
-        </div>
-        <select aria-label="Status" value={status} onChange={(e) => setStatus(e.target.value)} className={selectClass}>
-          <option value="">All statuses</option>
-          {(Object.keys(STATUS_META) as WoStatus[]).map((s) => (
-            <option key={s} value={s}>
-              {STATUS_META[s].label}
-            </option>
-          ))}
-        </select>
-        <select aria-label="Technician" value={technician} onChange={(e) => setTechnician(e.target.value)} className={selectClass}>
-          <option value="">All technicians</option>
-          {technicians.map((m) => (
-            <option key={m.userId} value={m.userId}>
-              {m.name}
-            </option>
-          ))}
-        </select>
-        <select aria-label="Property" value={property} onChange={(e) => setProperty(e.target.value)} className={selectClass}>
-          <option value="">All properties</option>
-          {properties.map(([id, name]) => (
-            <option key={id} value={id}>
-              {name}
-            </option>
-          ))}
-        </select>
-        <select aria-label="Priority" value={priority} onChange={(e) => setPriority(e.target.value)} className={selectClass}>
-          <option value="">All priorities</option>
-          <option value="emergency">Emergency</option>
-          <option value="urgent">Urgent</option>
-          <option value="routine">Routine</option>
-        </select>
-        <div className="ml-auto flex rounded-lg border border-input bg-card p-0.5 text-sm">
-          {(["table", "board"] as const).map((m) => (
+      {isAdmin && exceptionCount > 0 ? (
+        <button
+          type="button"
+          onClick={() => setExcOpen(true)}
+          className="mb-4 flex w-full items-center gap-3 rounded-2xl border border-danger-ink/30 bg-danger-soft px-4 py-3 text-left text-danger-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+        >
+          <AlertTriangle aria-hidden className="h-4 w-4 shrink-0" />
+          <span className="flex-1 text-[13.5px] font-medium">
+            {exceptionCount} {exceptionCount === 1 ? "request needs" : "requests need"} routing
+          </span>
+          <span className="inline-flex items-center gap-1 text-[13px]">
+            Review <ChevronRight aria-hidden className="h-4 w-4" />
+          </span>
+        </button>
+      ) : null}
+
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <Chips
+          label="Lane"
+          value={(lane ?? "all") as Lane | "all"}
+          options={(["all", ...LANES] as Array<Lane | "all">).map((l) => ({ value: l, label: LANE_LABEL[l] }))}
+          onChange={(v) => setQuery("lane", v === "all" ? null : v)}
+        />
+        {(properties ?? []).length > 1 ? (
+          <Select
+            aria-label="Property"
+            value={propertyId}
+            onChange={(e) => setPropertyId(e.target.value)}
+            className="!w-auto min-w-44"
+          >
+            <option value="">All properties</option>
+            {(properties ?? []).map((p) => (
+              <option key={p._id} value={p._id}>
+                {p.name}
+              </option>
+            ))}
+          </Select>
+        ) : null}
+        {amMember ? (
+          <Pill tone="acc">
+            Asset manager: {amMember.name}
             <button
-              key={m}
               type="button"
-              onClick={() => setMode(m)}
-              className={`rounded-md px-3 py-1.5 font-medium capitalize ${mode === m ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}
+              onClick={() => setQuery("am", null)}
+              aria-label="Clear asset manager filter"
+              className="ml-1 font-semibold hover:underline"
             >
-              {m}
+              Clear
             </button>
-          ))}
-        </div>
+          </Pill>
+        ) : null}
       </div>
 
-      {rows === undefined ? (
+      {data === undefined ? (
         <div className="py-16 text-center text-sm text-muted-foreground">Loading…</div>
-      ) : filtered.length === 0 ? (
+      ) : data.scope === "none" ? (
         <div className="rounded-2xl border border-dashed border-border bg-card py-16 text-center text-sm text-muted-foreground">
-          No work orders match.
+          There is no work order board for your role.
         </div>
-      ) : mode === "table" ? (
-        <TableView rows={filtered} />
       ) : (
-        <BoardView rows={filtered} />
+        <div className="flex flex-col gap-5">
+          <Board
+            data={data}
+            lane={lane}
+            onOpen={(ref) => {
+              setItem(ref);
+              setItemOpen(true);
+            }}
+          />
+          <ClosedTable
+            data={data.closedThisMonth}
+            onOpen={(ref) => {
+              setItem(ref);
+              setItemOpen(true);
+            }}
+          />
+        </div>
       )}
-    </div>
-  );
-}
 
-function ChecklistCount({ row }: { row: Row }) {
-  return (
-    <span className="tabular-nums text-muted-foreground">
-      {row.checklistDone}/{row.checklistTotal}
-    </span>
-  );
-}
-
-function Overdue() {
-  return (
-    <span className="inline-flex items-center gap-1 rounded bg-rose-50 px-1.5 py-0.5 text-[11px] font-medium text-rose-700">
-      <AlertTriangle className="h-3 w-3" />
-      Overdue
-    </span>
-  );
-}
-
-function TableView({ rows }: { rows: Row[] }) {
-  return (
-    <div className="overflow-x-auto rounded-2xl border border-border bg-card shadow-sm">
-      <table className="w-full min-w-[900px] text-left text-sm">
-        <thead className="border-b border-border bg-muted/30 text-xs text-muted-foreground">
-          <tr>
-            {["WO", "Unit", "Title", "Technician", "Priority", "Status", "Checklist", "Updated"].map((h) => (
-              <th key={h} className="px-4 py-3 font-medium">
-                {h}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r._id} className="border-t border-border/70 hover:bg-muted/30">
-              <td className="px-4 py-3 font-semibold">
-                <Link href={`/work-orders/${r._id}`} className="text-primary hover:underline">
-                  WO-{r.number}
-                </Link>
-              </td>
-              <td className="px-4 py-3">
-                <div>{r.unitNumber}</div>
-                <div className="text-xs text-muted-foreground">{r.propertyName}</div>
-              </td>
-              <td className="max-w-[260px] truncate px-4 py-3">{r.title}</td>
-              <td className="px-4 py-3">{r.technicianName ?? <span className="text-muted-foreground">Unassigned</span>}</td>
-              <td className="px-4 py-3">
-                <PriorityBadge priority={r.priority} />
-              </td>
-              <td className="px-4 py-3">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <StatusPill status={r.status} />
-                  {r.isOverdue ? <Overdue /> : null}
-                </div>
-              </td>
-              <td className="px-4 py-3">
-                <ChecklistCount row={r} />
-              </td>
-              <td className="whitespace-nowrap px-4 py-3 text-xs text-muted-foreground">{fmtDate(r.updatedAt)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function BoardView({ rows }: { rows: Row[] }) {
-  return (
-    <div className="flex gap-4 overflow-x-auto pb-2">
-      {BOARD.map((col) => {
-        const items = rows.filter((r) => r.status === col.status);
-        return (
-          <div key={col.status} className="w-72 shrink-0 rounded-2xl border border-border bg-muted/30">
-            <div className="flex items-center justify-between px-4 py-3 text-sm font-semibold">
-              {col.label}
-              <span className="text-muted-foreground">{items.length}</span>
-            </div>
-            <div className="space-y-2 px-2 pb-2">
-              {items.map((r) => (
-                <Link
-                  key={r._id}
-                  href={`/work-orders/${r._id}`}
-                  className="block space-y-2 rounded-xl border border-border bg-card p-3 shadow-sm hover:border-primary/40"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-semibold text-primary">WO-{r.number}</span>
-                    <PriorityBadge priority={r.priority} />
-                  </div>
-                  <div className="truncate text-sm">{r.title}</div>
-                  <div className="text-xs text-muted-foreground">
-                    Unit {r.unitNumber} · {r.technicianName ?? "Unassigned"}
-                  </div>
-                  <div className="flex items-center justify-between text-xs">
-                    <ChecklistCount row={r} />
-                    {r.isOverdue ? <Overdue /> : null}
-                  </div>
-                </Link>
-              ))}
-            </div>
-          </div>
-        );
-      })}
+      <ItemDrawer
+        item={deepItem ?? item}
+        open={deepItem !== null || itemOpen}
+        onClose={() => {
+          setItemOpen(false);
+          if (deepItem) setQuery("open", null);
+        }}
+        leadName={leadName}
+      />
+      {canCreate ? (
+        <NewWorkOrderDrawer open={newOpen} onClose={() => setNewOpen(false)} leadName={leadName} />
+      ) : null}
+      {isAdmin ? <ExceptionsDrawer open={excOpen} onClose={() => setExcOpen(false)} /> : null}
     </div>
   );
 }
@@ -302,7 +187,9 @@ function BoardView({ rows }: { rows: Row[] }) {
 export default function WorkOrdersPage() {
   return (
     <RequireView views={["admin", "asset_manager", "accountant"]}>
-      <WorkOrdersInner />
+      <Suspense fallback={null}>
+        <WorkOrdersInner />
+      </Suspense>
     </RequireView>
   );
 }

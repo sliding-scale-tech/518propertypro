@@ -6,6 +6,9 @@ import type { Id } from "./_generated/dataModel";
 import { isOtlpPayload, parseOtlp } from "./otlp";
 import { computeLeadScore } from "./leadScoring";
 import { currentOrg, requireAdminView, viewFor } from "./authz";
+import { amScope, canSeeUnit } from "./amScope";
+import type { QueryCtx, MutationCtx } from "./_generated/server";
+import type { Doc } from "./_generated/dataModel";
 import { writeAudit } from "./audit";
 
 // Disabled: the 15-min/month free-tier cap no longer applies now that ElevenLabs is upgraded.
@@ -67,6 +70,71 @@ export function isLeasingLead(
   );
 }
 
+// --- Access helpers -------------------------------------------------------
+
+/**
+ * Who may READ a conversation's transcript / qualification.
+ *  - Org conversation: same org only. Admin view reads all; asset_manager only leasing leads
+ *    (team-wide) or resident calls whose maintenance request sits on a unit in their scope;
+ *    technician / accountant / none are denied.
+ *  - No-org conversation: only the public landing-page demo (channel "browser"; its id is an
+ *    unguessable Convex id handed only to the demo visitor). Phone placeholders awaiting the
+ *    post-call backfill are denied.
+ */
+export async function canReadConversation(
+  ctx: QueryCtx | MutationCtx,
+  conv: Doc<"conversations">,
+): Promise<boolean> {
+  if (!conv.orgId) return conv.channel === "browser";
+  const org = await currentOrg(ctx);
+  if (!org || org.orgId !== conv.orgId) return false;
+  const view = viewFor(org.isAdmin, org.jobRoles);
+  if (view === "admin") return true;
+  if (view !== "asset_manager") return false;
+
+  const elId = conv.elevenLabsConversationId;
+  const requests = elId
+    ? await ctx.db
+        .query("maintenanceRequests")
+        .withIndex("by_conversation", (q) => q.eq("elevenLabsConversationId", elId))
+        .collect()
+    : [];
+  if (requests.length > 0) {
+    const scope = await amScope(ctx, org);
+    return requests.some((r) => r.orgId === String(conv.orgId) && canSeeUnit(scope, r.unitId));
+  }
+  // Other resident calls (tenantIssue only, unit not resolvable to an id): deny.
+  if (conv.intent === "maintenance") return false;
+  if (elId) {
+    const issue = await ctx.db
+      .query("tenantIssues")
+      .withIndex("by_elevenlabs_conversation_id", (q) => q.eq("elevenLabsConversationId", elId))
+      .first();
+    if (issue) return false;
+  }
+  if (conv.intent === "leasing") return true;
+  const qual = elId
+    ? await ctx.db
+        .query("qualifications")
+        .withIndex("by_elevenlabs_conversation_id", (q) => q.eq("elevenLabsConversationId", elId))
+        .first()
+    : null;
+  return Boolean(qual);
+}
+
+/** Who may WRITE to a conversation from the client (append / end / attach id). */
+async function canWriteConversation(
+  ctx: MutationCtx,
+  conv: Doc<"conversations">,
+): Promise<boolean> {
+  if (!conv.orgId) return conv.channel === "browser"; // anonymous demo only
+  const org = await currentOrg(ctx);
+  if (!org || org.orgId !== conv.orgId) return false;
+  // Within the team: the admin view, or the person who started this call. Any other member
+  // knowing the id must not be able to append to, end, or re-point someone else's call.
+  return viewFor(org.isAdmin, org.jobRoles) === "admin" || conv.userId === org.user._id;
+}
+
 // --- Reads ----------------------------------------------------------------
 
 /**
@@ -84,6 +152,7 @@ export function isLeasingLead(
  * some of those 15 were not leads. Fine at this volume, and the same thing the page's
  * own intent/outcome filters already do.
  */
+// TODO(★ leads scoping): revisit whether AMs should only see leads for their properties.
 export const history = query({
   args: { paginationOpts: paginationOptsValidator },
   handler: async (ctx, args) => {
@@ -93,7 +162,7 @@ export const history = query({
     }
     // Lead history is not for technicians or accountants.
     const view = viewFor(org.isAdmin, org.jobRoles);
-    if (view === "technician" || view === "accountant") {
+    if (view !== "admin" && view !== "asset_manager") {
       return { page: [], isDone: true, continueCursor: "" };
     }
 
@@ -141,16 +210,7 @@ export const transcript = query({
   handler: async (ctx, args) => {
     const conv = await ctx.db.get(args.conversationId);
     if (!conv) return [];
-    // A conversation with no team is either the public landing-page demo (never signed in, so
-    // nothing to compare against) or a phone call still waiting on the post-call webhook to
-    // backfill it — both readable by anyone who already has the id. One that DOES belong to a
-    // team is dashboard data: only that team reads it.
-    if (conv.orgId) {
-      const org = await currentOrg(ctx);
-      if (!org || org.orgId !== conv.orgId) return [];
-      const view = viewFor(org.isAdmin, org.jobRoles);
-      if (view === "technician" || view === "accountant") return [];
-    }
+    if (!(await canReadConversation(ctx, conv))) return [];
     return ctx.db
       .query("messages")
       .withIndex("by_conversation", (q) => q.eq("conversationId", args.conversationId))
@@ -264,10 +324,15 @@ export const attachElevenLabsId = mutation({
     conversationId: v.id("conversations"),
     elevenLabsConversationId: v.string(),
   },
-  handler: (ctx, args) =>
-    ctx.db.patch(args.conversationId, {
+  handler: async (ctx, args) => {
+    const conv = await ctx.db.get(args.conversationId);
+    if (!conv || !(await canWriteConversation(ctx, conv))) throw new Error("Call not found.");
+    // Set once: a later call must not re-point a conversation at another ElevenLabs id.
+    if (conv.elevenLabsConversationId) return;
+    await ctx.db.patch(args.conversationId, {
       elevenLabsConversationId: args.elevenLabsConversationId,
-    }),
+    });
+  },
 });
 
 /**
@@ -283,6 +348,8 @@ export const appendMessage = mutation({
     isFinal: v.boolean(),
   },
   handler: async (ctx, args) => {
+    const conv = await ctx.db.get(args.conversationId);
+    if (!conv || !(await canWriteConversation(ctx, conv))) throw new Error("Call not found.");
     const existing = await ctx.db
       .query("messages")
       .withIndex("by_conversation", (q) => q.eq("conversationId", args.conversationId))
@@ -310,6 +377,10 @@ export const funnel = query({
   handler: async (ctx) => {
     const org = await currentOrg(ctx);
     if (!org) return { callsAnswered: 0, leadsQualified: 0, toursBooked: 0 };
+    const view = viewFor(org.isAdmin, org.jobRoles);
+    if (view !== "admin" && view !== "asset_manager") {
+      return { callsAnswered: 0, leadsQualified: 0, toursBooked: 0 };
+    }
 
     const residentCallIds = new Set(
       (await ctx.db.query("tenantIssues").collect()).map((i) => i.elevenLabsConversationId),
@@ -451,15 +522,10 @@ export const markTenantIssue = internalMutation({
 });
 
 /**
- * The post-call webhook payload shape is not confirmed against real docs (ElevenLabs' pages
- * 404'd throughout this build) — field access here is defensive with fallbacks, and gets
- * corrected against the first real webhook delivery once configured.
+ * The post-call webhook payload shape is not confirmed against real docs; field access in
+ * ingestFromWebhook is defensive with fallbacks. (The debugWebhookLogs writer was removed:
+ * it stored raw call payloads, which contain PII.)
  */
-export const logDebugWebhook = internalMutation({
-  args: { body: v.string() },
-  handler: (ctx, args) => ctx.db.insert("debugWebhookLogs", { body: args.body, at: Date.now() }),
-});
-
 export const ingestFromWebhook = internalMutation({
   args: { payload: v.any() },
   handler: async (ctx, args) => {
@@ -704,7 +770,8 @@ export const end = mutation({
   },
   handler: async (ctx, args) => {
     const conv = await ctx.db.get(args.conversationId);
-    if (!conv || conv.status !== "active") return;
+    if (!conv || !(await canWriteConversation(ctx, conv))) return;
+    if (conv.status !== "active") return;
 
     const endedAt = Date.now();
     const durationSec = Math.round((endedAt - conv.startedAt) / 1000);

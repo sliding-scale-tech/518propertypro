@@ -8,6 +8,7 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { useToast } from "@/components/toast";
 import { Dropdown } from "@/components/ui/dropdown";
 import { RequireView } from "@/components/require-view";
+import { PageHeader } from "@/components/ui";
 import {
   Field,
   Modal,
@@ -111,19 +112,16 @@ function Exceptions() {
 
   return (
     <div className="space-y-5">
-      <div>
-        <h1 className="text-xl font-semibold">Exceptions</h1>
-        <p className="text-sm text-muted-foreground">
-          Requests that could not be routed safely.
-          {!canManage && " You have read-only access."}
-        </p>
-      </div>
+      <PageHeader
+        title="Exceptions"
+        subtitle={`Requests that could not be routed safely.${!canManage ? " You have read-only access." : ""}`}
+      />
 
       {rows === undefined ? (
         <p className="py-10 text-center text-sm text-muted-foreground">Loading…</p>
       ) : groups.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-border py-14 text-center text-sm text-muted-foreground">
-          Nothing in the exception queue 🎉
+        <div className="rounded-[20px] border border-dashed border-border py-14 text-center text-sm text-muted-foreground">
+          Nothing in the exception queue.
         </div>
       ) : (
         groups.map(([reason, items]) => (
@@ -131,7 +129,7 @@ function Exceptions() {
             <h2 className="text-sm font-semibold">
               {REASON_LABEL[reason] ?? reason} <span className="font-normal text-muted-foreground">({items.length})</span>
             </h2>
-            <div className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+            <div className="divide-y divide-border overflow-hidden rounded-[20px] border border-border bg-card">
               {items.map((r) => (
                 <div key={r._id} className="flex flex-wrap items-center justify-between gap-3 p-4">
                   <div className="min-w-0 flex-1 space-y-1">
@@ -159,7 +157,7 @@ function Exceptions() {
                         Resolve to unit
                       </button>
                       {reason === "unit has no asset manager" && (
-                        <Link href="/units" className={btnOutline}>
+                        <Link href="/properties" className={btnOutline}>
                           Assign AM to unit
                         </Link>
                       )}

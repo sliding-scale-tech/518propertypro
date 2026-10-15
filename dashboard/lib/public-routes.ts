@@ -12,6 +12,9 @@ export const PUBLIC_ROUTE_PREFIXES = [
   "/sign-up",
   "/sso-callback",
   "/accept-invite",
+  // Tenant photo-upload page reached from a texted link (token is the credential). The trailing
+  // slash matters: a bare "/m" prefix would also open /maintenance and every other /m* route.
+  "/m/",
   // Google OAuth verification requires these to be reachable without an account.
   "/privacy",
   "/terms",

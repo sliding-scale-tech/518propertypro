@@ -4,9 +4,10 @@ import { internalMutation, mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { writeAudit } from "./audit";
 import { canManageMaintenance, currentOrg, requireOrg, viewFor } from "./authz";
+import { amScope, canSeeUnit } from "./amScope";
 import type { OrgContext } from "./authz";
 import { nextNumber } from "./counters";
-import { markWorkOrderCreated } from "./maintenance";
+import { checkStorageUsable, markWorkOrderCreated } from "./maintenance";
 import { scheduleNotify, staffRecipientIds } from "./notify";
 
 /**
@@ -179,6 +180,76 @@ export const seedChecklistTemplates = internalMutation({
   },
 });
 
+/** Issue type -> words a technician's free-text skill is likely to contain. */
+const SKILL_KEYWORDS: Record<string, string[]> = {
+  electrical: ["electric", "wiring", "outlet", "lighting"],
+  water_leak: ["plumb", "leak", "water", "pipe", "hvac"],
+  broken_item: ["appliance", "handyman", "general", "carpentry", "repair", "locksmith"],
+  gas: ["gas", "plumb", "hvac", "heating"],
+  fire: ["restoration", "general"],
+  flooding: ["plumb", "water", "restoration"],
+  tenant_responsibility: [],
+  other: ["general", "handyman"],
+};
+
+/**
+ * Who to preselect when Pat creates a work order: the technician whose skill text matches the
+ * issue type (fewest active jobs wins ties), else simply the least-loaded technician. Pat can
+ * always pick someone else; this only fills the dropdown.
+ */
+export const suggestTechnician = query({
+  args: { issueType: v.string() },
+  handler: async (ctx, args) => {
+    const org = await currentOrg(ctx);
+    if (!org || !canManageMaintenance(org)) return null;
+
+    const memberships = await ctx.db
+      .query("memberships")
+      .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
+      .collect();
+    const keywords = SKILL_KEYWORDS[args.issueType] ?? [];
+    const candidates = [];
+    for (const m of memberships) {
+      if (!(m.jobRoles ?? []).includes("technician")) continue;
+      const user = await ctx.db.get(m.userId);
+      let active = 0;
+      for (const s of ACTIVE) {
+        active += (
+          await ctx.db
+            .query("workOrders")
+            .withIndex("by_technician_and_status", (q) => q.eq("technicianUserId", m.userId).eq("status", s))
+            .take(100)
+        ).length;
+      }
+      const skill = m.skill?.toLowerCase() ?? "";
+      candidates.push({
+        userId: m.userId,
+        name: [user?.firstName, user?.lastName].filter(Boolean).join(" ").trim() || user?.email || "Unknown",
+        skill: m.skill ?? null,
+        activeJobs: active,
+        matchesSkill: keywords.length > 0 && keywords.some((k) => skill.includes(k)),
+        unavailable: m.unavailableUntil !== undefined && m.unavailableUntil > Date.now(),
+      });
+    }
+    if (candidates.length === 0) return null;
+    candidates.sort(
+      (a, b) =>
+        Number(a.unavailable) - Number(b.unavailable) ||
+        Number(b.matchesSkill) - Number(a.matchesSkill) ||
+        a.activeJobs - b.activeJobs ||
+        a.name.localeCompare(b.name),
+    );
+    const best = candidates[0];
+    return {
+      userId: best.userId,
+      name: best.name,
+      skill: best.skill,
+      activeJobs: best.activeJobs,
+      reason: best.matchesSkill ? ("skill" as const) : ("least_loaded" as const),
+    };
+  },
+});
+
 // --- Helpers ---------------------------------------------------------------------
 
 function requireText(raw: string, label: string, max: number): string {
@@ -231,7 +302,9 @@ async function readable(
   if (!unit) return null;
   const view = viewFor(org.isAdmin, org.jobRoles);
   if (view === "admin") return { wo, unit };
-  if (view === "asset_manager" && unit.assetManagerUserId === org.user._id) return { wo, unit };
+  // Managed units, plus units covered while a colleague is out of office (read-only: canManageWo
+  // stays managed-only).
+  if (view === "asset_manager" && canSeeUnit(await amScope(ctx, org), unit._id)) return { wo, unit };
   if (view === "technician" && wo.technicianUserId === org.user._id) return { wo, unit };
   if (view === "accountant" && (wo.status === "completed" || wo.status === "reviewed_closed")) return { wo, unit };
   return null;
@@ -317,6 +390,7 @@ export const create = mutation({
     accessNotes: v.optional(v.string()),
     requiredOnSubmit: requiredOnSubmitValidator,
     dueDate: v.optional(v.number()),
+    window: v.optional(v.string()), // appointment window, e.g. "Today 2-4pm"
   },
   handler: async (ctx, args): Promise<Id<"workOrders">> => {
     const org = await requireOrg(ctx);
@@ -363,6 +437,7 @@ export const create = mutation({
       requiredOnSubmit: args.requiredOnSubmit,
       status: args.technicianUserId ? "assigned" : "created",
       dueDate: args.dueDate,
+      window: optText(args.window, 100),
       createdBy: org.user._id,
       createdAt: now,
       updatedAt: now,
@@ -432,15 +507,12 @@ export const list = query({
         );
       }
     } else if (view === "asset_manager") {
-      const mine = await ctx.db
-        .query("units")
-        .withIndex("by_asset_manager", (q) => q.eq("assetManagerUserId", org.user._id))
-        .collect();
-      for (const unit of mine) {
+      const scope = await amScope(ctx, org);
+      for (const unitId of [...scope.managed, ...scope.covering]) {
         rows.push(
           ...(await ctx.db
             .query("workOrders")
-            .withIndex("by_unit", (q) => q.eq("unitId", unit._id))
+            .withIndex("by_unit", (q) => q.eq("unitId", unitId))
             .order("desc")
             .take(100)),
         );
@@ -590,16 +662,41 @@ export const get = query({
 // --- Management (Pat powers, or the AM who owns a manual WO) --------------------------
 
 export const assign = mutation({
-  args: { workOrderId: v.id("workOrders"), technicianUserId: v.id("users") },
+  args: {
+    workOrderId: v.id("workOrders"),
+    technicianUserId: v.id("users"),
+    window: v.optional(v.string()), // "" clears the appointment window
+  },
   handler: async (ctx, args) => {
     const { org, wo, unit } = await managedWo(ctx, args.workOrderId);
     if (!ACTIVE.includes(wo.status)) throw new Error("This work order can no longer be reassigned.");
     await assertTechnician(ctx, org.orgId, args.technicianUserId);
-    if (wo.technicianUserId === args.technicianUserId) return;
+    const window = args.window === undefined ? undefined : optText(args.window, 100);
+    if (wo.technicianUserId === args.technicianUserId) {
+      // Same technician: only the window can have changed.
+      if (args.window !== undefined && window !== wo.window) {
+        await ctx.db.patch(wo._id, { window, updatedAt: Date.now() });
+        await writeAudit(ctx, {
+          orgId: org.orgId,
+          entity: "work_order",
+          entityId: wo._id,
+          action: "scope_edited",
+          actorUserId: org.user._id,
+          note: "window",
+        });
+        await notifyTech(ctx, wo, unit, wo.technicianUserId, "wo_changed", org.user._id);
+      }
+      return;
+    }
 
     const to: Status = wo.status === "created" ? "assigned" : wo.status;
     if (to !== wo.status) assertWorkOrderTransition(wo.status, to);
-    await ctx.db.patch(wo._id, { technicianUserId: args.technicianUserId, status: to, updatedAt: Date.now() });
+    await ctx.db.patch(wo._id, {
+      technicianUserId: args.technicianUserId,
+      status: to,
+      updatedAt: Date.now(),
+      ...(args.window !== undefined ? { window } : {}),
+    });
     await writeAudit(ctx, {
       orgId: org.orgId,
       entity: "work_order",
@@ -624,6 +721,7 @@ export const editScope = mutation({
     accessNotes: v.optional(v.string()),
     dueDate: v.optional(v.number()),
     clearDueDate: v.optional(v.boolean()),
+    window: v.optional(v.string()), // "" clears the appointment window
     checklist: v.optional(v.array(v.object({ label: v.string(), required: v.boolean() }))),
     requiredOnSubmit: v.optional(requiredOnSubmitValidator),
   },
@@ -656,6 +754,10 @@ export const editScope = mutation({
       if (!(args.dueDate > 0)) throw new Error("Pick a valid due date.");
       patch.dueDate = args.dueDate;
       changed.push("due date");
+    }
+    if (args.window !== undefined) {
+      patch.window = optText(args.window, 100);
+      changed.push("window");
     }
     if (args.requiredOnSubmit) {
       patch.requiredOnSubmit = args.requiredOnSubmit;
@@ -931,6 +1033,9 @@ export const attachFile = mutation({
     args,
   ): Promise<{ ok: true; fileId: Id<"workOrderFiles"> } | { ok: false; error: string }> => {
     const { org, wo } = await workableJob(ctx, args.workOrderId);
+    // Claimed or not freshly uploaded: refuse WITHOUT deleting (it may be someone else's file).
+    const usable = await checkStorageUsable(ctx, org.orgId, args.storageId);
+    if (usable) return { ok: false, error: usable };
     const reject = async (error: string) => {
       await ctx.storage.delete(args.storageId);
       return { ok: false as const, error };

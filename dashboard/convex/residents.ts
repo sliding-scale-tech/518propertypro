@@ -5,6 +5,7 @@ import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { writeAudit } from "./audit";
 import { currentOrg, requireAdminView, viewFor } from "./authz";
 import type { OrgContext } from "./authz";
+import { amScope, canSeeUnit } from "./amScope";
 import { requireE164, toE164 } from "./phone";
 
 /**
@@ -63,7 +64,7 @@ async function readable(
   if (!unit) return null;
   const view = viewFor(org.isAdmin, org.jobRoles);
   if (view === "admin" || view === "accountant") return { resident, unit };
-  if (view === "asset_manager" && unit.assetManagerUserId === org.user._id) return { resident, unit };
+  if (view === "asset_manager" && canSeeUnit(await amScope(ctx, org), unit._id)) return { resident, unit };
   return null;
 }
 
@@ -114,17 +115,14 @@ export const list = query({
         .take(2000);
     } else if (view === "asset_manager") {
       // Scope comes from the units this user manages, never from a client-supplied id.
-      const mine = await ctx.db
-        .query("units")
-        .withIndex("by_asset_manager", (q) => q.eq("assetManagerUserId", org.user._id))
-        .collect();
+      // Managed units plus the ones they cover while a colleague is out (read-only).
+      const scope = await amScope(ctx, org);
       residents = [];
-      for (const unit of mine) {
-        if (unit.orgId !== org.orgId) continue;
+      for (const unitId of [...scope.managed, ...scope.covering]) {
         residents.push(
           ...(await ctx.db
             .query("residents")
-            .withIndex("by_unit", (q) => q.eq("unitId", unit._id))
+            .withIndex("by_unit", (q) => q.eq("unitId", unitId))
             .collect()),
         );
       }

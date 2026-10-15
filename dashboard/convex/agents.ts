@@ -21,6 +21,7 @@ import {
 import { coreBlock } from "./coreQuestions";
 import { withTourBooking } from "./tourPrompt";
 import { currentOrg, requireOrgId } from "./authz";
+import { writeAudit } from "./audit";
 import { composeSarahSections } from "./sarahConfigLib";
 import type { SarahConfig } from "./sarahConfigLib";
 
@@ -814,6 +815,12 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
           "One of: emergency, urgent, routine, informational, using the levels in your " +
           "instructions. Judge the issue itself, never how upset the caller sounds.",
       },
+      severity_score: {
+        type: "number",
+        description:
+          "A 1-10 score for how serious the issue is, consistent with the level you chose " +
+          "(emergency 9-10, urgent 7-8, routine 3-6, informational 1-2). Judge the issue, not the caller.",
+      },
       severity_reason: {
         type: "string",
         description: "A few words on why that level, e.g. 'no heat, unlivable but not dangerous'.",
@@ -870,7 +877,18 @@ export const ensureTools = internalAction({
     if (!siteUrl) throw new Error("CONVEX_SITE_URL is not set on this deployment.");
 
     const { tools: existing } = await el.listTools();
-    const defs = TOOL_DEFS(siteUrl);
+    // Every webhook tool carries the shared secret that convex/http.ts requires on /tools/*.
+    const toolSecret = process.env.ELEVENLABS_TOOL_SECRET;
+    if (!toolSecret) {
+      throw new Error(
+        "ELEVENLABS_TOOL_SECRET is not set on this deployment. Set it, then re-save the agent " +
+          "so the tools are re-published with the x-simplr-tool-secret header.",
+      );
+    }
+    const defs = TOOL_DEFS(siteUrl).map((d) => ({
+      ...d,
+      requestHeaders: { "x-simplr-tool-secret": toolSecret },
+    }));
     const ids: string[] = [];
 
     for (const def of defs) {
@@ -892,6 +910,50 @@ export const ensureTools = internalAction({
 
 // --- Writes ---------------------------------------------------------------
 
+/**
+ * The full ElevenLabs config for one org's agent: published Sarah config, screening questions,
+ * disabled core questions, synced knowledge base, tool ids, tunings. Shared by saveAgent and
+ * createDedicatedAgent so a new setting can't land on only one of them.
+ *
+ * `sourcePrompt` is returned separately on purpose: it is what gets stored, while `config.prompt`
+ * has the screening block rendered in. Storing the composed one would bake the render into the
+ * editable text and duplicate the block on every subsequent save.
+ */
+async function buildAgentConfig(
+  ctx: ActionCtx,
+  orgId: string,
+  overrides: { name?: string; prompt?: string; firstMessage?: string; voiceId?: string },
+): Promise<{ config: el.AgentConfig; sourcePrompt: string }> {
+  const existing = await ctx.runQuery(internal.agents.currentInternal, { orgId });
+  const knowledgeBase: el.KnowledgeBaseEntry[] = await ctx.runQuery(
+    internal.docs.syncedEntries,
+    { orgId },
+  );
+  const toolIds: string[] = await ctx.runAction(internal.agents.ensureTools, {});
+  const questions: ScreeningQuestion[] = await ctx.runQuery(
+    internal.screening.activeForOrg,
+    { orgId },
+  );
+  const disabledCore: string[] = await ctx.runQuery(
+    internal.screening.disabledBuiltinsForOrg,
+    { orgId },
+  );
+  const sourcePrompt = overrides.prompt ?? existing?.prompt ?? LEASING_PROMPT;
+  const sarah: SarahConfig | null = await ctx.runQuery(internal.sarahConfig.publishedForOrg, { orgId });
+
+  const config: el.AgentConfig = {
+    name: overrides.name ?? existing?.name ?? "Sarah",
+    prompt: composePrompt(sourcePrompt, questions, disabledCore, sarah),
+    firstMessage: overrides.firstMessage ?? existing?.firstMessage ?? DEFAULT_FIRST_MESSAGE,
+    voiceId: overrides.voiceId ?? existing?.voiceId ?? DEFAULT_VOICE_ID,
+    knowledgeBase,
+    toolIds,
+    voice: VOICE_TUNING,
+    turn: TURN_TUNING,
+  };
+  return { config, sourcePrompt };
+}
+
 /** Creates the caller's own agent on first run, updates it thereafter. Safe to call repeatedly. */
 export const saveAgent = action({
   args: {
@@ -912,37 +974,12 @@ export const saveAgent = action({
     // Still none means another setup run is mid-flight. Creating one here would give the team a
     // second ElevenLabs agent, so ask them to retry once that run has finished.
     if (!existing) throw new Error("Your assistant is still being set up. Try saving again in a few seconds.");
-    const knowledgeBase: el.KnowledgeBaseEntry[] = await ctx.runQuery(
-      internal.docs.syncedEntries,
-      { orgId },
-    );
-    const toolIds: string[] = await ctx.runAction(internal.agents.ensureTools, {});
-    const questions: ScreeningQuestion[] = await ctx.runQuery(
-      internal.screening.activeForOrg,
-      { orgId },
-    );
-    const disabledCore: string[] = await ctx.runQuery(
-      internal.screening.disabledBuiltinsForOrg,
-      { orgId },
-    );
-
-    // Two different prompts on purpose: `sourcePrompt` is what the manager typed and what gets
-    // stored, `config.prompt` is that with the screening block rendered in. Storing the
-    // composed one would bake the render into the editable text and duplicate the block on
-    // every subsequent save.
-    const sourcePrompt = args.prompt ?? existing?.prompt ?? LEASING_PROMPT;
-    const sarah: SarahConfig | null = await ctx.runQuery(internal.sarahConfig.publishedForOrg, { orgId });
-
-    const config: el.AgentConfig = {
-      name: args.name ?? existing?.name ?? "Sarah",
-      prompt: composePrompt(sourcePrompt, questions, disabledCore, sarah),
-      firstMessage: args.firstMessage ?? existing?.firstMessage ?? DEFAULT_FIRST_MESSAGE,
-      voiceId: args.voiceId ?? existing?.voiceId ?? DEFAULT_VOICE_ID,
-      knowledgeBase,
-      toolIds,
-      voice: VOICE_TUNING,
-      turn: TURN_TUNING,
-    };
+    const { config, sourcePrompt } = await buildAgentConfig(ctx, orgId, {
+      name: args.name,
+      prompt: args.prompt,
+      firstMessage: args.firstMessage,
+      voiceId: args.voiceId,
+    });
 
     const elevenLabsAgentId = existing
       ? (await el.updateAgent(existing.elevenLabsAgentId, config)).agent_id ??
@@ -960,6 +997,209 @@ export const saveAgent = action({
     });
 
     return elevenLabsAgentId;
+  },
+});
+
+/** Agent rows with their team names, so an operator can find the orgId for createDedicatedAgent. */
+export const listForOps = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const rows = await ctx.db.query("agents").collect();
+    return Promise.all(
+      rows.map(async (a) => {
+        const orgDocId = ctx.db.normalizeId("organizations", a.orgId);
+        const org = orgDocId ? await ctx.db.get(orgDocId) : null;
+        return {
+          orgId: a.orgId,
+          orgName: org?.name ?? null,
+          elevenLabsAgentId: a.elevenLabsAgentId,
+          name: a.name,
+          previousElevenLabsAgentId: a.previousElevenLabsAgentId ?? null,
+        };
+      }),
+    );
+  },
+});
+
+/** Points the org's agents row at a freshly created ElevenLabs agent and audits it. */
+export const recordAgentRecreated = internalMutation({
+  args: {
+    orgId: v.string(),
+    elevenLabsAgentId: v.string(),
+    name: v.string(),
+    prompt: v.string(),
+    firstMessage: v.string(),
+    voiceId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("agents")
+      .withIndex("by_org", (q) => q.eq("orgId", args.orgId))
+      .first();
+    if (!existing) throw new Error("This team has no agent row to re-create. Run agents.ensure first.");
+    await ctx.db.patch(existing._id, {
+      elevenLabsAgentId: args.elevenLabsAgentId,
+      previousElevenLabsAgentId: existing.elevenLabsAgentId,
+      name: args.name,
+      prompt: args.prompt,
+      firstMessage: args.firstMessage,
+      voiceId: args.voiceId,
+      updatedAt: Date.now(),
+    });
+    await writeAudit(ctx, {
+      orgId: args.orgId,
+      entity: "config",
+      entityId: "agent",
+      action: "agent_recreated",
+      from: existing.elevenLabsAgentId,
+      to: args.elevenLabsAgentId,
+      note: args.name,
+    });
+  },
+});
+
+/**
+ * Creates a NEW, separate ElevenLabs agent for one team (e.g. a dedicated 518 Property Pro agent
+ * instead of one inherited from the old Voice-Agent project), with the same full config saveAgent
+ * would push (see buildAgentConfig), and re-points the team's agents row at it. Always creates;
+ * never updates. The previous ElevenLabs agent is NOT deleted -- its id is kept in
+ * previousElevenLabsAgentId, and it can be removed by hand in ElevenLabs once nothing uses it.
+ *
+ * Mid-call tools and webhooks find the team through orgByElevenLabsAgentId, so they follow the
+ * new id as soon as the row is updated; calls still reaching the old agent stop resolving to
+ * this team.
+ *
+ *   npx convex run agents:listForOps
+ *   npx convex run agents:createDedicatedAgent '{"orgId":"<id>","name":"518 Property Pro – Sarah"}'
+ *
+ * Then, in ElevenLabs -> Phone numbers, assign the 518 number to the new agent. The post-call
+ * webhook is workspace-level and unchanged.
+ */
+export const createDedicatedAgent = internalAction({
+  args: { orgId: v.string(), name: v.optional(v.string()) },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{ orgId: string; elevenLabsAgentId: string; previousElevenLabsAgentId: string | null }> => {
+    const existing = await ctx.runQuery(internal.agents.currentInternal, { orgId: args.orgId });
+    if (!existing || existing.orgId !== args.orgId) {
+      throw new Error("No agent row for that orgId. Run agents:listForOps to find it.");
+    }
+    const { config, sourcePrompt } = await buildAgentConfig(ctx, args.orgId, {
+      name: args.name ?? "518 Property Pro – Sarah",
+    });
+    const created = await el.createAgent(config);
+    await ctx.runMutation(internal.agents.recordAgentRecreated, {
+      orgId: args.orgId,
+      elevenLabsAgentId: created.agent_id,
+      name: config.name,
+      prompt: sourcePrompt,
+      firstMessage: config.firstMessage,
+      voiceId: config.voiceId,
+    });
+    return {
+      orgId: args.orgId,
+      elevenLabsAgentId: created.agent_id,
+      previousElevenLabsAgentId: existing.elevenLabsAgentId,
+    };
+  },
+});
+
+/** Audit row for a phone number being (re)assigned. Only the last 4 digits are ever stored. */
+export const recordPhoneNumberConnected = internalMutation({
+  args: {
+    orgId: v.string(),
+    previousAgentId: v.string(),
+    agentId: v.string(),
+    last4: v.string(),
+  },
+  handler: async (ctx, args) => {
+    await writeAudit(ctx, {
+      orgId: args.orgId,
+      entity: "config",
+      entityId: "phone_number",
+      action: "phone_number_connected",
+      from: args.previousAgentId,
+      to: args.agentId,
+      note: args.last4,
+    });
+  },
+});
+
+/**
+ * Connects the Twilio number to the org's current ElevenLabs agent: imports it into ElevenLabs
+ * if it is not there yet, then assigns it. Defaults to TWILIO_SMS_FROM_NUMBER. Twilio credentials
+ * are read from server-side env only and never returned or logged; the result carries only the
+ * last 4 digits of the number.
+ *
+ *   npx convex run agents:connectPhoneNumber '{"orgId":"<id>"}'
+ */
+export const connectPhoneNumber = internalAction({
+  args: { orgId: v.string(), phoneNumber: v.optional(v.string()), label: v.optional(v.string()) },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    phoneNumberLast4: string;
+    phoneNumberId: string;
+    previousAgentId: string | null;
+    previousAgentName: string | null;
+    agentId: string;
+  }> => {
+    const raw = args.phoneNumber ?? process.env.TWILIO_SMS_FROM_NUMBER;
+    if (!raw?.trim()) {
+      throw new Error("No phone number given and TWILIO_SMS_FROM_NUMBER is not set.");
+    }
+    const digits = raw.replace(/\D/g, "");
+    if (digits.length < 10 || digits.length > 15) throw new Error("That is not a valid phone number.");
+    // A bare 10-digit number is assumed to be North American.
+    const e164 = `+${digits.length === 10 ? `1${digits}` : digits}`;
+    const last4 = e164.slice(-4);
+
+    const agent = await ctx.runQuery(internal.agents.currentInternal, { orgId: args.orgId });
+    if (!agent || agent.orgId !== args.orgId) {
+      throw new Error("No agent row for that orgId. Run agents:listForOps to find it.");
+    }
+
+    const numbers = await el.listPhoneNumbers();
+    const found = numbers.find((n) => n.phone_number?.replace(/\D/g, "") === e164.slice(1));
+
+    let phoneNumberId: string;
+    let previousAgentId: string | null = null;
+    let previousAgentName: string | null = null;
+    if (found?.phone_number_id) {
+      phoneNumberId = found.phone_number_id;
+      previousAgentId = found.assigned_agent?.agent_id ?? null;
+      previousAgentName = found.assigned_agent?.agent_name ?? null;
+    } else {
+      const sid = process.env.TWILIO_ACCOUNT_SID;
+      const token = process.env.TWILIO_AUTH_TOKEN;
+      if (!sid || !token) throw new Error("Missing TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN.");
+      const created = await el.importTwilioPhoneNumber({
+        phoneNumber: e164,
+        label: args.label ?? "518 Property Pro",
+        sid,
+        token,
+      });
+      phoneNumberId = created.phone_number_id;
+    }
+
+    await el.assignPhoneNumberAgent(phoneNumberId, agent.elevenLabsAgentId);
+
+    await ctx.runMutation(internal.agents.recordPhoneNumberConnected, {
+      orgId: args.orgId,
+      previousAgentId: previousAgentId ?? "none",
+      agentId: agent.elevenLabsAgentId,
+      last4,
+    });
+
+    return {
+      phoneNumberLast4: last4,
+      phoneNumberId,
+      previousAgentId,
+      previousAgentName,
+      agentId: agent.elevenLabsAgentId,
+    };
   },
 });
 

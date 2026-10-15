@@ -1,5 +1,6 @@
 "use client";
 
+import { Modal, Select } from "@/components/ui";
 import { useMutation, useQuery } from "convex/react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -13,7 +14,6 @@ import {
   Plus,
   Trash2,
   Upload,
-  X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
@@ -395,33 +395,13 @@ function UnitModal({
   const [available, setAvailable] = useState(unit.available);
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-[2px]"
-      onClick={onClose}
-    >
-      <motion.div
-        initial={{ opacity: 0, scale: 0.97, y: 8 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.97, y: 8 }}
-        onClick={(event) => event.stopPropagation()}
-        className="w-full max-w-md overflow-hidden rounded-2xl border border-border bg-card shadow-2xl"
-      >
-        <div className="flex items-center justify-between border-b border-border px-6 py-5">
-          <h2 className="text-lg font-bold">{isNew ? "Add unit" : "Edit unit"}</h2>
-          <button onClick={onClose} className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent">
-            <X className="h-5 w-5" />
-          </button>
-        </div>
+    <Modal title={isNew ? "Add unit" : "Edit unit"} onClose={onClose} bare>
         <div className="space-y-5 px-6 py-5">
           <label className="block">
             <span className="mb-2 block text-sm font-medium">Unit type</span>
-            <select
+            <Select
               value={bedrooms}
               onChange={(event) => setBedrooms(event.target.value)}
-              className={inputClass}
             >
               <option value="" disabled>
                 Select unit type
@@ -431,7 +411,7 @@ function UnitModal({
                   {formatUnitType(type)}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
           <div className="grid grid-cols-2 gap-4">
             <label>
@@ -489,8 +469,7 @@ function UnitModal({
             </button>
           </div>
         </div>
-      </motion.div>
-    </motion.div>
+      </Modal>
   );
 }
 

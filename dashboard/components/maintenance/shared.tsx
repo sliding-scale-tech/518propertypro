@@ -1,11 +1,11 @@
 "use client";
 
 import { useQuery } from "convex/react";
-import { X } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Dropdown } from "@/components/ui/dropdown";
+import { Modal as UiModal } from "@/components/ui/modal";
 
 export type Severity = "emergency" | "urgent" | "routine" | "informational";
 export type Status =
@@ -20,20 +20,20 @@ export type Status =
 export const OPEN_STATUSES: Status[] = ["new", "under_review", "more_info_needed", "forwarded_to_pat"];
 
 export const inputClass =
-  "w-full rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring";
+  "w-full rounded-xl border border-input bg-card px-[11px] py-2 text-[13.5px] text-foreground outline-none transition-colors placeholder:text-faint focus:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-60";
 
 export const btnPrimary =
-  "inline-flex items-center justify-center gap-1.5 rounded-xl bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50";
+  "inline-flex items-center justify-center gap-1.5 rounded-xl border border-primary bg-primary px-3.5 py-2 text-[13.5px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-not-allowed disabled:opacity-45";
 export const btnOutline =
-  "inline-flex items-center justify-center gap-1.5 rounded-xl border border-input bg-card px-4 py-2 text-sm font-medium transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50";
+  "inline-flex items-center justify-center gap-1.5 rounded-xl border border-border bg-card px-3.5 py-2 text-[13.5px] font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-not-allowed disabled:opacity-45";
 export const btnDanger =
-  "inline-flex items-center justify-center gap-1.5 rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm font-medium text-destructive transition-colors hover:bg-destructive/20 disabled:cursor-not-allowed disabled:opacity-50";
+  "inline-flex items-center justify-center gap-1.5 rounded-xl border border-border bg-card px-3.5 py-2 text-[13.5px] font-medium text-danger-ink transition-colors hover:bg-danger-soft focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-not-allowed disabled:opacity-45";
 
 export const SEVERITY_META: Record<Severity, { label: string; dot: string; cls: string }> = {
-  emergency: { label: "Emergency", dot: "🔴", cls: "bg-red-500/15 text-red-700 dark:text-red-400" },
-  urgent: { label: "Urgent", dot: "🟠", cls: "bg-orange-500/15 text-orange-700 dark:text-orange-400" },
-  routine: { label: "Routine", dot: "🟡", cls: "bg-yellow-500/20 text-yellow-800 dark:text-yellow-400" },
-  informational: { label: "Info", dot: "⚪", cls: "bg-slate-500/15 text-slate-600 dark:text-slate-300" },
+  emergency: { label: "Emergency", dot: "🔴", cls: "bg-danger-soft text-danger-ink" },
+  urgent: { label: "Urgent", dot: "🟠", cls: "bg-warning-soft text-warning-ink" },
+  routine: { label: "Routine", dot: "🟡", cls: "bg-accent text-accent-foreground" },
+  informational: { label: "Info", dot: "⚪", cls: "bg-muted text-muted-foreground" },
 };
 
 export const SEVERITY_OPTIONS = (Object.keys(SEVERITY_META) as Severity[]).map((s) => ({
@@ -52,11 +52,11 @@ export const STATUS_LABEL: Record<Status, string> = {
 };
 
 const STATUS_CLS: Record<Status, string> = {
-  new: "bg-primary/15 text-primary",
-  under_review: "bg-blue-500/15 text-blue-700 dark:text-blue-400",
-  more_info_needed: "bg-warning/15 text-warning-foreground",
-  forwarded_to_pat: "bg-purple-500/15 text-purple-700 dark:text-purple-400",
-  work_order_created: "bg-success/15 text-success-foreground",
+  new: "bg-accent text-accent-foreground",
+  under_review: "bg-accent text-accent-foreground",
+  more_info_needed: "bg-warning-soft text-warning-ink",
+  forwarded_to_pat: "bg-violet-soft text-violet",
+  work_order_created: "bg-success-soft text-success-ink",
   closed_out_of_scope: "bg-muted text-muted-foreground",
   closed_duplicate: "bg-muted text-muted-foreground",
 };
@@ -64,8 +64,8 @@ const STATUS_CLS: Record<Status, string> = {
 export function SeverityBadge({ severity }: { severity: Severity }) {
   const m = SEVERITY_META[severity];
   return (
-    <span className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-medium ${m.cls}`}>
-      <span aria-hidden>{m.dot}</span>
+    <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-[9px] text-xs font-medium leading-5 ${m.cls}`}>
+      <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
       {m.label}
     </span>
   );
@@ -73,7 +73,7 @@ export function SeverityBadge({ severity }: { severity: Severity }) {
 
 export function StatusPill({ status }: { status: Status }) {
   return (
-    <span className={`inline-flex whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-medium ${STATUS_CLS[status]}`}>
+    <span className={`inline-flex whitespace-nowrap rounded-full px-[9px] text-xs font-medium leading-5 ${STATUS_CLS[status]}`}>
       {STATUS_LABEL[status]}
     </span>
   );
@@ -118,39 +118,17 @@ export function Modal({
   onClose: () => void;
   children: ReactNode;
 }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
   return (
-    <div
-      className="fixed inset-0 z-[60] flex items-end justify-center bg-black/40 p-0 sm:items-center sm:p-4"
-      onClick={onClose}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        onClick={(e) => e.stopPropagation()}
-        className="max-h-[90dvh] w-full overflow-y-auto rounded-t-2xl border border-border bg-card p-5 shadow-xl sm:max-w-lg sm:rounded-2xl"
-      >
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <h2 className="text-base font-semibold">{title}</h2>
-          <button onClick={onClose} aria-label="Close" className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        {children}
-      </div>
-    </div>
+    <UiModal title={title} onClose={onClose}>
+      {children}
+    </UiModal>
   );
 }
 
 export function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {
   return (
     <label className="block space-y-1.5">
-      <span className="text-xs font-medium text-muted-foreground">{label}</span>
+      <span className="text-[12.5px] font-medium text-muted-foreground">{label}</span>
       {children}
       {hint ? <span className="block text-[11px] text-muted-foreground">{hint}</span> : null}
     </label>
@@ -169,6 +147,7 @@ export function NoteDialog({
   confirmLabel,
   presets,
   danger,
+  extra,
   onSubmit,
   onClose,
 }: {
@@ -179,6 +158,8 @@ export function NoteDialog({
   confirmLabel: string;
   presets?: string[];
   danger?: boolean;
+  /** Extra controls (for example a checkbox) rendered above the buttons. */
+  extra?: ReactNode;
   onSubmit: (text: string) => Promise<void>;
   onClose: () => void;
 }) {
@@ -224,6 +205,7 @@ export function NoteDialog({
             autoFocus
           />
         </Field>
+        {extra}
         <div className="flex justify-end gap-2">
           <button type="button" className={btnOutline} onClick={onClose}>
             Cancel

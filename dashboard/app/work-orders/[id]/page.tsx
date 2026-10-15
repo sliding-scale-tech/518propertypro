@@ -2,7 +2,7 @@
 
 import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
-import { ArrowLeft, Check, Circle, Loader2, X } from "lucide-react";
+import { ArrowLeft, Check, Circle, Loader2 } from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState, type ReactNode } from "react";
@@ -12,13 +12,14 @@ import { RequireView } from "@/components/require-view";
 import { useToast } from "@/components/toast";
 import { ChecklistEditor, newDraftItem, toChecklistArgs, type ChecklistDraftItem } from "@/components/work-orders/checklist-editor";
 import { FileGallery, MoneyCell, PriorityBadge, StatusPill, type WoPriority } from "@/components/work-orders/shared";
+import { WindowField } from "@/components/work-orders/window-field";
+import { Btn, Card, CardHead, DatePicker, Pill, Select, Modal as UiModal } from "@/components/ui";
 
 type Detail = NonNullable<FunctionReturnType<typeof api.workOrders.get>>;
 
 const inputClass =
-  "h-10 w-full rounded-lg border border-input bg-card px-3 text-sm outline-none focus:ring-2 focus:ring-ring/20 disabled:opacity-50";
-const areaClass =
-  "w-full rounded-lg border border-input bg-card px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring/20";
+  "w-full rounded-xl border border-input bg-card px-[11px] py-2 text-[13.5px] text-foreground outline-none transition-colors placeholder:text-faint focus:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:opacity-60";
+const areaClass = `${inputClass} leading-[1.45]`;
 
 function errorText(err: unknown): string {
   if (err && typeof err === "object" && "data" in err && typeof err.data === "string") return err.data;
@@ -38,60 +39,34 @@ const dateInput = (ms?: number) => {
 
 function Section({ title, children, aside }: { title: string; children: ReactNode; aside?: ReactNode }) {
   return (
-    <section className="space-y-3 rounded-2xl border border-border bg-card p-5 shadow-sm">
-      <div className="flex items-center justify-between">
-        <h2 className="text-base font-semibold">{title}</h2>
-        {aside}
-      </div>
+    <Card className="space-y-3">
+      <CardHead title={title} right={aside} />
       {children}
-    </section>
+    </Card>
   );
 }
 
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4" onClick={onClose}>
-      <div
-        role="dialog"
-        aria-label={title}
-        onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[90vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-2xl"
-      >
-        <div className="flex items-center justify-between border-b border-border px-6 py-4">
-          <h2 className="text-lg font-bold">{title}</h2>
-          <button onClick={onClose} aria-label="Close" className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent">
-            <X className="h-5 w-5" />
-          </button>
-        </div>
-        <div className="space-y-4 overflow-y-auto px-6 py-5">{children}</div>
-      </div>
-    </div>
+    <UiModal title={title} onClose={onClose} size="lg">
+      <div className="space-y-4">{children}</div>
+    </UiModal>
   );
 }
 
 function PrimaryButton({ children, ...rest }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
-    <button
-      type="button"
-      {...rest}
-      className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
-    >
+    <Btn variant="pri" {...rest}>
       {children}
-    </button>
+    </Btn>
   );
 }
 
 function OutlineButton({ children, danger, ...rest }: React.ButtonHTMLAttributes<HTMLButtonElement> & { danger?: boolean }) {
   return (
-    <button
-      type="button"
-      {...rest}
-      className={`rounded-lg border px-4 py-2 text-sm font-medium hover:bg-accent disabled:opacity-40 ${
-        danger ? "border-rose-200 text-rose-700" : "border-input bg-card"
-      }`}
-    >
+    <Btn variant={danger ? "dng" : "default"} {...rest}>
       {children}
-    </button>
+    </Btn>
   );
 }
 
@@ -166,11 +141,11 @@ function View({
         Work orders
       </Link>
 
-      <header className="space-y-3 rounded-2xl border border-border bg-card p-5 shadow-sm">
+      <Card className="space-y-3">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="space-y-2">
             <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-2xl font-bold tracking-tight">WO-{wo.number}</h1>
+              <h1 className="font-mono text-2xl font-bold tracking-tight">WO-{wo.number}</h1>
               <StatusPill status={wo.status} />
               <PriorityBadge priority={wo.priority as WoPriority} />
             </div>
@@ -202,6 +177,7 @@ function View({
           </Meta>
           <Meta label="Technician">{data.technicianName ?? "Unassigned"}</Meta>
           <Meta label="Due">{wo.dueDate ? fmtDate(wo.dueDate) : "None"}</Meta>
+          <Meta label="Time window">{wo.window ? <Pill tone="acc">{wo.window}</Pill> : "Not set"}</Meta>
           <Meta label="Request">
             {data.request ? (
               <Link href={`/maintenance/${data.request._id}`} className="text-primary hover:underline">
@@ -213,9 +189,9 @@ function View({
           </Meta>
         </dl>
         {wo.status === "cancelled" && wo.cancelReason ? (
-          <p className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">Cancelled: {wo.cancelReason}</p>
+          <p className="rounded-xl bg-danger-soft px-3 py-2 text-sm text-danger-ink">Cancelled: {wo.cancelReason}</p>
         ) : null}
-      </header>
+      </Card>
 
       <Section title="Scope">
         <p className="whitespace-pre-wrap text-sm">{wo.scope}</p>
@@ -239,7 +215,7 @@ function View({
         <ul className="space-y-2">
           {wo.checklist.map((c) => (
             <li key={c.id} className="flex items-start gap-2 text-sm">
-              {c.done ? <Check className="mt-0.5 h-4 w-4 text-emerald-600" /> : <Circle className="mt-0.5 h-4 w-4 text-muted-foreground" />}
+              {c.done ? <Check className="mt-0.5 h-4 w-4 text-success-ink" /> : <Circle className="mt-0.5 h-4 w-4 text-muted-foreground" />}
               <div>
                 <span className={c.done ? "text-muted-foreground line-through" : ""}>{c.label}</span>
                 {c.required ? <span className="ml-1.5 text-[11px] text-muted-foreground">required</span> : null}
@@ -271,7 +247,7 @@ function View({
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">
-              <thead className="text-xs text-muted-foreground">
+              <thead className="text-[11px] uppercase tracking-[0.06em] text-muted-foreground">
                 <tr>
                   <th className="py-2 font-medium">Date</th>
                   <th className="py-2 font-medium">Technician</th>
@@ -281,7 +257,7 @@ function View({
               </thead>
               <tbody>
                 {data.time.map((t) => (
-                  <tr key={t._id} className="border-t border-border/70">
+                  <tr key={t._id} className="border-t border-border">
                     <td className="py-2">{t.date}</td>
                     <td className="py-2">{who(t.technicianUserId)}</td>
                     <td className="py-2 text-right tabular-nums">{t.hours}</td>
@@ -303,7 +279,7 @@ function View({
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">
-              <thead className="text-xs text-muted-foreground">
+              <thead className="text-[11px] uppercase tracking-[0.06em] text-muted-foreground">
                 <tr>
                   <th className="py-2 font-medium">Description</th>
                   <th className="py-2 font-medium">Type</th>
@@ -313,7 +289,7 @@ function View({
               </thead>
               <tbody>
                 {data.expenses.map((e) => (
-                  <tr key={e._id} className="border-t border-border/70">
+                  <tr key={e._id} className="border-t border-border">
                     <td className="py-2">{e.description}</td>
                     <td className="py-2 capitalize">{e.kind}</td>
                     <td className="py-2 text-right tabular-nums">{e.quantity ?? ""}</td>
@@ -332,7 +308,7 @@ function View({
         {data.notes.length === 0 ? <p className="text-sm text-muted-foreground">No notes yet.</p> : null}
         <ul className="space-y-3">
           {data.notes.map((n) => (
-            <li key={n._id} className="rounded-lg bg-muted/30 px-3 py-2 text-sm">
+            <li key={n._id} className="rounded-xl bg-muted px-3 py-2 text-sm">
               <div className="text-xs text-muted-foreground">
                 {who(n.authorUserId)} · {fmtDateTime(n.createdAt)}
               </div>
@@ -391,7 +367,7 @@ function View({
 function Meta({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div>
-      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dt className="text-[12.5px] text-muted-foreground">{label}</dt>
       <dd className="font-medium">{children}</dd>
     </div>
   );
@@ -462,14 +438,14 @@ function ReassignModal({
 
   return (
     <Modal title={data.workOrder.technicianUserId ? "Reassign technician" : "Assign technician"} onClose={onClose}>
-      <select value={tech} onChange={(e) => setTech(e.target.value)} className={inputClass} aria-label="Technician">
+      <Select value={tech} onChange={(e) => setTech(e.target.value)} aria-label="Technician">
         <option value="">Select a technician</option>
         {technicians.map((t) => (
           <option key={t.userId} value={t.userId}>
             {t.name}
           </option>
         ))}
-      </select>
+      </Select>
       <div className="flex justify-end gap-2">
         <OutlineButton onClick={onClose}>Back</OutlineButton>
         <PrimaryButton disabled={busy || !tech || tech === data.workOrder.technicianUserId} onClick={() => void go()}>
@@ -489,6 +465,7 @@ function EditScopeModal({ data, onClose }: { data: Detail; onClose: () => void }
   const [priority, setPriority] = useState<WoPriority>(wo.priority);
   const [accessNotes, setAccessNotes] = useState(wo.accessNotes ?? "");
   const [due, setDue] = useState(dateInput(wo.dueDate));
+  const [windowText, setWindowText] = useState(wo.window ?? "");
   const [items, setItems] = useState<ChecklistDraftItem[]>(() => wo.checklist.map((c) => newDraftItem(c.label, c.required)));
   const [req, setReq] = useState(wo.requiredOnSubmit);
   const [busy, setBusy] = useState(false);
@@ -505,6 +482,8 @@ function EditScopeModal({ data, onClose }: { data: Detail; onClose: () => void }
         accessNotes,
         checklist: toChecklistArgs(items),
         requiredOnSubmit: req,
+        // "" clears the window; only sent when it changed so the audit trail stays clean.
+        ...(windowText.trim() !== (wo.window ?? "") ? { window: windowText.trim() } : {}),
         ...(due !== originalDue
           ? due
             ? { dueDate: new Date(`${due}T12:00:00`).getTime() }
@@ -522,7 +501,7 @@ function EditScopeModal({ data, onClose }: { data: Detail; onClose: () => void }
   return (
     <Modal title="Edit scope" onClose={onClose}>
       {wo.technicianUserId ? (
-        <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+        <p className="rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-ink">
           The technician will be notified of these changes.
         </p>
       ) : null}
@@ -541,16 +520,20 @@ function EditScopeModal({ data, onClose }: { data: Detail; onClose: () => void }
       <div className="grid gap-4 sm:grid-cols-2">
         <label className="block space-y-1.5">
           <span className="text-sm font-medium">Priority</span>
-          <select value={priority} onChange={(e) => setPriority(e.target.value as WoPriority)} className={inputClass}>
+          <Select value={priority} onChange={(e) => setPriority(e.target.value as WoPriority)}>
             <option value="routine">Routine</option>
             <option value="urgent">Urgent</option>
             <option value="emergency">Emergency</option>
-          </select>
+          </Select>
         </label>
         <label className="block space-y-1.5">
           <span className="text-sm font-medium">Due date</span>
-          <input type="date" value={due} onChange={(e) => setDue(e.target.value)} className={inputClass} />
+          <DatePicker value={due} onChange={setDue} className="h-10" />
         </label>
+      </div>
+      <div className="space-y-1.5">
+        <span className="text-sm font-medium">Time window</span>
+        <WindowField value={windowText} onChange={setWindowText} />
       </div>
       <div className="space-y-1.5">
         <span className="text-sm font-medium">Checklist</span>

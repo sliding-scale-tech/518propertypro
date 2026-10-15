@@ -9,10 +9,12 @@
  */
 
 import type * as agents from "../agents.js";
+import type * as amScope from "../amScope.js";
 import type * as appUrl from "../appUrl.js";
 import type * as audit from "../audit.js";
 import type * as auditEntities from "../auditEntities.js";
 import type * as authz from "../authz.js";
+import type * as board from "../board.js";
 import type * as calendarView from "../calendarView.js";
 import type * as clerkWebhook from "../clerkWebhook.js";
 import type * as conversations from "../conversations.js";
@@ -31,6 +33,7 @@ import type * as http from "../http.js";
 import type * as jobRoles from "../jobRoles.js";
 import type * as leadScoring from "../leadScoring.js";
 import type * as maintenance from "../maintenance.js";
+import type * as maintenanceReasons from "../maintenanceReasons.js";
 import type * as notifications from "../notifications.js";
 import type * as notify from "../notify.js";
 import type * as orgMigration from "../orgMigration.js";
@@ -83,10 +86,12 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   agents: typeof agents;
+  amScope: typeof amScope;
   appUrl: typeof appUrl;
   audit: typeof audit;
   auditEntities: typeof auditEntities;
   authz: typeof authz;
+  board: typeof board;
   calendarView: typeof calendarView;
   clerkWebhook: typeof clerkWebhook;
   conversations: typeof conversations;
@@ -105,6 +110,7 @@ declare const fullApi: ApiFromModules<{
   jobRoles: typeof jobRoles;
   leadScoring: typeof leadScoring;
   maintenance: typeof maintenance;
+  maintenanceReasons: typeof maintenanceReasons;
   notifications: typeof notifications;
   notify: typeof notify;
   orgMigration: typeof orgMigration;

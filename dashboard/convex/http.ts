@@ -20,6 +20,44 @@ import { formatLocalDateTime, phoneKey, spokenLabel } from "./tourSchedule";
 
 const http = httpRouter();
 
+/** Constant-time string compare (length leak only). */
+function timingSafeEqual(a: string, b: string): boolean {
+  const ea = new TextEncoder().encode(a);
+  const eb = new TextEncoder().encode(b);
+  let diff = ea.length ^ eb.length;
+  const n = Math.max(ea.length, eb.length);
+  for (let i = 0; i < n; i++) diff |= (ea[i] ?? 0) ^ (eb[i] ?? 0);
+  return diff === 0;
+}
+
+/**
+ * Gate for every /tools/* route: ElevenLabs sends the shared secret in x-simplr-tool-secret
+ * (configured per tool in agents.ensureTools). Fails closed when the env var is unset.
+ */
+function checkToolAuth(request: Request): Response | null {
+  const expected = process.env.ELEVENLABS_TOOL_SECRET;
+  if (!expected) {
+    console.warn("[tools] ELEVENLABS_TOOL_SECRET is not set; rejecting tool request.");
+    return new Response("tool endpoint not configured", { status: 503 });
+  }
+  const provided = request.headers.get("x-simplr-tool-secret");
+  if (!provided || !timingSafeEqual(provided, expected)) {
+    return new Response("unauthorized", { status: 401 });
+  }
+  return null;
+}
+
+/** httpAction wrapper that enforces checkToolAuth before running the tool handler. */
+function toolAction(
+  handler: (ctx: GenericActionCtx<DataModel>, request: Request) => Promise<Response>,
+) {
+  return httpAction(async (ctx, request) => {
+    const denied = checkToolAuth(request);
+    if (denied) return denied;
+    return handler(ctx, request);
+  });
+}
+
 /**
  * Resolves which team a mid-call tool request belongs to, from the ElevenLabs conversation id
  * every tool call carries. Returns undefined whenever it can't yet be resolved — the public
@@ -268,7 +306,7 @@ http.route({
 http.route({
   path: "/tools/check-availability",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
+  handler: toolAction(async (ctx, request) => {
     const body = await request.json();
     const bedrooms: string | undefined = body.bedrooms;
     const conversationId: string | undefined = body.conversation_id;
@@ -307,7 +345,7 @@ http.route({
 http.route({
   path: "/tools/check-qualification",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
+  handler: toolAction(async (ctx, request) => {
     const body = await request.json();
     const {
       conversation_id: conversationId,
@@ -468,7 +506,7 @@ http.route({
 http.route({
   path: "/tools/find-tour-times",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
+  handler: toolAction(async (ctx, request) => {
     const body = await request.json();
     const conversationId: string | undefined = body.conversation_id;
     const date = typeof body.date === "string" && body.date.trim() ? body.date.trim() : undefined;
@@ -578,7 +616,7 @@ http.route({
 http.route({
   path: "/tools/request-tour",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
+  handler: toolAction(async (ctx, request) => {
     const body = await request.json();
     const {
       conversation_id: conversationId,
@@ -733,7 +771,7 @@ http.route({
 http.route({
   path: "/tools/find-my-tour",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
+  handler: toolAction(async (ctx, request) => {
     const body = await request.json();
     const orgId = await resolveBookingOrg(ctx, body.conversation_id, body.agent_id);
     if (!orgId) {
@@ -778,7 +816,7 @@ http.route({
 http.route({
   path: "/tools/cancel-tour",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
+  handler: toolAction(async (ctx, request) => {
     const body = await request.json();
     if (!body.conversation_id || !body.tour_id) {
       return Response.json({ error: "missing conversation_id or tour_id" }, { status: 400 });
@@ -831,7 +869,7 @@ http.route({
 http.route({
   path: "/tools/reschedule-tour",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
+  handler: toolAction(async (ctx, request) => {
     const body = await request.json();
     const { conversation_id: conversationId, tour_id: tourId, slot_start: slotStart } = body;
     if (!conversationId || !tourId || !slotStart) {
@@ -900,7 +938,7 @@ http.route({
 http.route({
   path: "/tools/escalate",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
+  handler: toolAction(async (ctx, request) => {
     const body = await request.json();
     const {
       conversation_id: conversationId,
@@ -1006,7 +1044,7 @@ http.route({
 http.route({
   path: "/tools/log-tenant-issue",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
+  handler: toolAction(async (ctx, request) => {
     const body = await request.json();
     const {
       conversation_id: conversationId,
@@ -1076,7 +1114,7 @@ http.route({
 http.route({
   path: "/tools/lookup-caller",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
+  handler: toolAction(async (ctx, request) => {
     const body = await request.json();
     const orgId = await resolveBookingOrg(ctx, body.conversation_id, body.agent_id);
     const phone = realPhone(typeof body.caller_id === "string" ? body.caller_id : undefined);
@@ -1106,7 +1144,7 @@ http.route({
 http.route({
   path: "/tools/find-unit",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
+  handler: toolAction(async (ctx, request) => {
     const body = await request.json();
     const spokenUnit = optString(body.spoken_unit, 60);
     const orgId = await resolveBookingOrg(ctx, body.conversation_id, body.agent_id);
@@ -1138,7 +1176,7 @@ http.route({
 http.route({
   path: "/tools/log-maintenance-request",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
+  handler: toolAction(async (ctx, request) => {
     const body = await request.json();
     const conversationId: unknown = body.conversation_id;
     if (typeof conversationId !== "string" || !conversationId) {
@@ -1176,6 +1214,10 @@ http.route({
     const callerNumber = realPhone(typeof body.caller_id === "string" ? body.caller_id : undefined);
     const callbackNumber = realPhone(typeof body.callback_phone === "string" ? body.callback_phone : undefined);
     const severityReason = optString(body.severity_reason, 500);
+    const severityScore =
+      body.severity_score === undefined || body.severity_score === null || body.severity_score === ""
+        ? undefined
+        : clampSeverity(body.severity_score);
     const summaryLine = `${severity} maintenance request (${issueType.replace(/_/g, " ")}): ${description}`;
 
     const orgId = await resolveBookingOrg(ctx, conversationId, body.agent_id);
@@ -1217,7 +1259,8 @@ http.route({
           pets: optString(body.pets, 300),
           preferredAccessTimes: optString(body.preferred_access_times, 300),
           severity,
-          severityScore: SEVERITY_LEVEL_SCORE[severity],
+          // The model's own 1-10 score when it gave one (clamped); else the level's representative score.
+          severityScore: severityScore ?? SEVERITY_LEVEL_SCORE[severity],
           severityReason,
         });
       }
@@ -1253,7 +1296,7 @@ http.route({
 http.route({
   path: "/tools/owner-prospect",
   method: "POST",
-  handler: httpAction(async (ctx, request) => {
+  handler: toolAction(async (ctx, request) => {
     const body = await request.json();
     const conversationId: unknown = body.conversation_id;
     if (typeof conversationId !== "string" || !conversationId) {
@@ -1378,6 +1421,48 @@ http.route({
 // --- Inbound SMS / WhatsApp (Twilio "A message comes in" webhooks) --------
 
 /**
+ * Validates X-Twilio-Signature: base64(HMAC-SHA1(TWILIO_AUTH_TOKEN, fullUrl + sorted params as
+ * key+value)). Fails closed: 503 when the token or public site URL is unset, 403 on a bad or
+ * missing signature. Returns null when valid. Must run before any write.
+ */
+async function verifyTwilioSignature(
+  request: Request,
+  form: URLSearchParams,
+): Promise<Response | null> {
+  const token = process.env.TWILIO_AUTH_TOKEN;
+  const siteUrl = process.env.CONVEX_SITE_URL;
+  if (!token || !siteUrl) return new Response("Twilio webhook not configured", { status: 503 });
+  const header = request.headers.get("X-Twilio-Signature");
+  if (!header) return new Response("Forbidden", { status: 403 });
+
+  const incoming = new URL(request.url);
+  const fullUrl = siteUrl.replace(/\/+$/, "") + incoming.pathname + incoming.search;
+  const keys = Array.from(new Set(Array.from(form.keys()))).sort();
+  let data = fullUrl;
+  for (const key of keys) for (const value of form.getAll(key)) data += key + value;
+
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(token),
+    { name: "HMAC", hash: "SHA-1" },
+    false,
+    ["sign"],
+  );
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(data)));
+  let expected: string;
+  try {
+    expected = btoa(String.fromCharCode(...mac));
+  } catch {
+    return new Response("Forbidden", { status: 403 });
+  }
+  if (!timingSafeEqual(expected, header)) {
+    return new Response("Forbidden", { status: 403 });
+  }
+  return null;
+}
+
+/**
  * Twilio POSTs form-encoded fields, not JSON. Returns empty TwiML so Twilio doesn't also send
  * its own auto-reply — every outbound message goes through our own Twilio REST API call
  * instead, so the bot and staff replies are the only things that ever get texted back.
@@ -1388,7 +1473,10 @@ async function handleInboundMessage(
   request: Request,
   channel: "sms" | "whatsapp",
 ): Promise<Response> {
-  const form = new URLSearchParams(await request.text());
+  const rawBody = await request.text();
+  const form = new URLSearchParams(rawBody);
+  const denied = await verifyTwilioSignature(request, form);
+  if (denied) return denied;
   const from = form.get("From")?.replace(/^whatsapp:/, "");
   const body = form.get("Body");
   const sid = form.get("MessageSid") ?? undefined;
@@ -1436,18 +1524,23 @@ http.route({
   handler: httpAction(async (ctx, request) => {
     const secret = process.env.ELEVENLABS_POST_CALL_WEBHOOK_SECRET;
     const signature = request.headers.get("ElevenLabs-Signature");
+    if (!secret) {
+      console.warn("[post-call] ELEVENLABS_POST_CALL_WEBHOOK_SECRET is not set; rejecting.");
+      return new Response("not configured", { status: 503 });
+    }
+    if (!signature) return new Response("missing signature", { status: 401 });
     const rawBody = await request.text();
 
-    // Temporary — see debugWebhookLogs in schema.ts. Captures the real payload shape so the
-    // parser in ingestFromWebhook can be corrected against actual data instead of guesses.
-    await ctx.runMutation(internal.conversations.logDebugWebhook, { body: rawBody });
+    // Verify BEFORE any write. (debugWebhookLogs is no longer written to.)
+    const valid = await verifyHmacSignature(rawBody, signature, secret);
+    if (!valid) return new Response("invalid signature", { status: 401 });
 
-    if (secret && signature) {
-      const valid = await verifyHmacSignature(rawBody, signature, secret);
-      if (!valid) return new Response("invalid signature", { status: 401 });
+    let payload: unknown;
+    try {
+      payload = JSON.parse(rawBody);
+    } catch {
+      return new Response("bad request", { status: 400 });
     }
-
-    const payload = JSON.parse(rawBody);
     await ctx.runMutation(internal.conversations.ingestFromWebhook, { payload });
 
     return new Response("ok", { status: 200 });
@@ -1470,6 +1563,10 @@ async function verifyHmacSignature(
   const providedSig = parts.v0;
   if (!timestamp || !providedSig) return false;
 
+  // Replay protection: reject timestamps more than 5 minutes off.
+  const ts = Number(timestamp);
+  if (!Number.isFinite(ts) || Math.abs(Date.now() / 1000 - ts) > 300) return false;
+
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(secret),
@@ -1486,7 +1583,7 @@ async function verifyHmacSignature(
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 
-  return computedHex === providedSig;
+  return timingSafeEqual(computedHex, providedSig);
 }
 
 export default http;

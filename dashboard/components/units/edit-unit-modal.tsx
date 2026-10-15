@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { Field, Modal, btnOutline, btnPrimary } from "@/components/maintenance/shared";
-import { inputClass, UNIT_TYPES, type UnitRow } from "./types";
+import { Dialog } from "@/components/properties/dialog";
+import { Btn, Grid2, Input, LabeledField, Select } from "@/components/ui";
+import { UNIT_TYPES, type UnitRow } from "./types";
 
 export type UnitPatch = {
   unitNumber: string;
@@ -14,7 +15,7 @@ export type UnitPatch = {
 
 const num = (s: string) => (s.trim() === "" || Number.isNaN(Number(s)) ? undefined : Number(s));
 
-/** The asset manager is not editable here: only the assign control changes it. */
+/** The asset manager is not editable here: only the inventory's select changes it. */
 export function EditUnitModal({
   unit,
   busy,
@@ -34,7 +35,7 @@ export function EditUnitModal({
   const ready = unitNumber.trim() !== "" && bedrooms !== "" && !busy;
 
   return (
-    <Modal title={`Edit unit ${unit.unitNumber}`} onClose={onClose}>
+    <Dialog title={`Edit unit ${unit.unitNumber}`} onClose={onClose}>
       <form
         className="space-y-4"
         onSubmit={(e) => {
@@ -49,39 +50,43 @@ export function EditUnitModal({
           });
         }}
       >
-        <Field label="Unit number">
-          <input value={unitNumber} maxLength={40} onChange={(e) => setUnitNumber(e.target.value)} className={inputClass} />
-        </Field>
-        <Field label="Unit type">
-          <select value={bedrooms} onChange={(e) => setBedrooms(e.target.value)} className={inputClass}>
-            {!(UNIT_TYPES as readonly string[]).includes(bedrooms) ? <option value={bedrooms}>{bedrooms}</option> : null}
-            {UNIT_TYPES.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </select>
-        </Field>
+        <Grid2>
+          <LabeledField label="Unit number">
+            {(id) => <Input id={id} value={unitNumber} maxLength={40} onChange={(e) => setUnitNumber(e.target.value)} />}
+          </LabeledField>
+          <LabeledField label="Unit type">
+            {(id) => (
+              <Select id={id} value={bedrooms} onChange={(e) => setBedrooms(e.target.value)}>
+                {!(UNIT_TYPES as readonly string[]).includes(bedrooms) ? <option value={bedrooms}>{bedrooms}</option> : null}
+                {UNIT_TYPES.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </LabeledField>
+        </Grid2>
         <div className="grid grid-cols-3 gap-3">
-          <Field label="Floor">
-            <input type="number" value={floor} onChange={(e) => setFloor(e.target.value)} className={inputClass} />
-          </Field>
-          <Field label="Baths">
-            <input type="number" min={0} step={0.5} value={bathrooms} onChange={(e) => setBathrooms(e.target.value)} className={inputClass} />
-          </Field>
-          <Field label="Rent">
-            <input type="number" min={0} value={rent} onChange={(e) => setRent(e.target.value)} className={inputClass} />
-          </Field>
+          <LabeledField label="Floor">
+            {(id) => <Input id={id} type="number" value={floor} onChange={(e) => setFloor(e.target.value)} />}
+          </LabeledField>
+          <LabeledField label="Baths">
+            {(id) => (
+              <Input id={id} type="number" min={0} step={0.5} value={bathrooms} onChange={(e) => setBathrooms(e.target.value)} />
+            )}
+          </LabeledField>
+          <LabeledField label="Rent">
+            {(id) => <Input id={id} type="number" min={0} value={rent} onChange={(e) => setRent(e.target.value)} />}
+          </LabeledField>
         </div>
         <div className="flex justify-end gap-2">
-          <button type="button" className={btnOutline} onClick={onClose}>
-            Cancel
-          </button>
-          <button type="submit" className={btnPrimary} disabled={!ready}>
+          <Btn onClick={onClose}>Cancel</Btn>
+          <Btn type="submit" variant="pri" disabled={!ready}>
             {busy ? "Saving…" : "Save"}
-          </button>
+          </Btn>
         </div>
       </form>
-    </Modal>
+    </Dialog>
   );
 }

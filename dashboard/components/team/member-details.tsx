@@ -1,34 +1,36 @@
 "use client";
 
-import { useMutation } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { AlertTriangle, Moon } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 import { api } from "@/convex/_generated/api";
+import type { Id } from "@/convex/_generated/dataModel";
 import type { AppRole } from "@/convex/jobRoles";
 import { useToast } from "@/components/toast";
+import { Btn, DatePicker, Input, Pill, Seg, Select, type Tone } from "@/components/ui";
 
 type Channel = "sms" | "email" | "push";
 
-export const APP_ROLE_OPTIONS: ReadonlyArray<{ value: AppRole; label: string; badge: string }> = [
-  { value: "admin", label: "Admin", badge: "bg-blue-50 text-blue-700" },
-  { value: "asset_manager", label: "Asset manager", badge: "bg-violet-50 text-violet-700" },
-  { value: "technician", label: "Technician", badge: "bg-amber-50 text-amber-700" },
+export const APP_ROLE_OPTIONS: ReadonlyArray<{ value: AppRole; label: string; tone: Tone; blurb: string }> = [
+  { value: "admin", label: "Admin", tone: "warn", blurb: "Full access" },
+  { value: "asset_manager", label: "Asset manager", tone: "acc", blurb: "Reviews requests for their units" },
+  { value: "technician", label: "Technician", tone: "ok", blurb: "Works assigned jobs on their phone" },
 ];
 
-/** The clean role badge; null (no role assigned yet) shows as a subtle warning. */
+/** Role pill: Admin = warn, Asset manager = acc, Technician = ok; null (no role yet) shows as a warning. */
 export function AppRoleBadge({ appRole }: { appRole: AppRole | null }) {
   const opt = APP_ROLE_OPTIONS.find((o) => o.value === appRole);
   if (!opt) {
     return (
-      <span className="flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700">
+      <Pill tone="warn">
         <AlertTriangle className="h-3 w-3" />
         No role yet
-      </span>
+      </Pill>
     );
   }
-  return <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${opt.badge}`}>{opt.label}</span>;
+  return <Pill tone={opt.tone}>{opt.label}</Pill>;
 }
 
 const CHANNELS: ReadonlyArray<{ value: Channel; label: string }> = [
@@ -42,10 +44,6 @@ export const E164 = /^\+[1-9]\d{7,14}$/;
 
 type Member = NonNullable<FunctionReturnType<typeof api.team.overview>>["members"][number];
 
-const smallInput =
-  "h-9 rounded-lg border border-input bg-card px-3 text-sm outline-none focus:ring-2 focus:ring-ring/20 disabled:opacity-60";
-const smallBtn =
-  "h-9 shrink-0 rounded-lg border border-input px-3 text-xs font-medium hover:bg-accent disabled:opacity-40";
 
 /** Single-select segmented control: one role per person. */
 function AppRoleSelect({
@@ -60,23 +58,14 @@ function AppRoleSelect({
   label: string;
 }) {
   return (
-    <div role="radiogroup" aria-label={label} className="inline-flex rounded-lg border border-input bg-card p-0.5">
-      {APP_ROLE_OPTIONS.map((opt) => (
-        <button
-          key={opt.value}
-          type="button"
-          role="radio"
-          aria-checked={value === opt.value}
-          disabled={disabled}
-          onClick={() => onChange(opt.value)}
-          className={`h-8 rounded-md px-3 text-xs font-medium disabled:opacity-60 ${
-            value === opt.value ? "bg-primary text-primary-foreground" : "hover:bg-accent"
-          }`}
-        >
-          {opt.label}
-        </button>
-      ))}
-    </div>
+    <fieldset disabled={disabled} className="border-0 p-0">
+      <Seg
+        label={label}
+        value={(value ?? "") as AppRole}
+        options={APP_ROLE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+        onChange={onChange}
+      />
+    </fieldset>
   );
 }
 
@@ -109,15 +98,25 @@ export function MemberDetails({
   const [editingRoles, setEditingRoles] = useState(false);
   const [roleDraft, setRoleDraft] = useState<AppRole | null>(null);
   const [phoneDraft, setPhoneDraft] = useState<string | null>(null);
+  const [skillDraft, setSkillDraft] = useState<string | null>(null);
   const [dateDraft, setDateDraft] = useState("");
+  const [coverDraft, setCoverDraft] = useState<string | null>(null);
 
   const canEditContact = isAdmin || member.isSelf;
   const phoneValue = phoneDraft ?? member.phone ?? "";
+  const skillValue = skillDraft ?? member.skill ?? "";
   const phoneBad = phoneValue.trim() !== "" && !E164.test(phoneValue.trim());
   // Captured at mount (lazy initializer) to keep render pure; good enough for a badge.
   const [now] = useState(() => Date.now());
   const outOfOffice = member.unavailableUntil !== null && member.unavailableUntil > now;
   const isAm = member.appRole === "asset_manager";
+  // Other asset managers who could cover. Only fetched for an AM member.
+  const team = useQuery(api.team.overview, isAm && canSetUnavailable ? {} : "skip");
+  const coverOptions = (team?.members ?? []).filter(
+    (m) => m.appRole === "asset_manager" && m.userId !== member.userId,
+  );
+  const coverValue = coverDraft ?? member.coveringUserId ?? "";
+  const currentCover = coverOptions.find((m) => m.userId === member.coveringUserId);
 
   const run = async (fn: () => Promise<unknown>, ok: string): Promise<boolean> => {
     setBusy(true);
@@ -138,15 +137,15 @@ export function MemberDetails({
       <div className="flex flex-wrap items-center gap-2">
         <AppRoleBadge appRole={member.appRole} />
         {outOfOffice ? (
-          <span className="flex items-center gap-1 rounded-full bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground">
+          <Pill>
             <Moon className="h-3 w-3" />
             Out of office until {new Date(member.unavailableUntil!).toLocaleDateString()}
-          </span>
+          </Pill>
         ) : null}
         {isAdmin && !editingRoles ? (
           <button
             type="button"
-            className="text-xs font-medium text-primary hover:underline"
+            className="text-[12.5px] font-medium text-primary hover:underline"
             onClick={() => {
               setRoleDraft(member.appRole);
               setEditingRoles(true);
@@ -155,8 +154,8 @@ export function MemberDetails({
             Change role
           </button>
         ) : null}
-        {isAm ? (
-          <Link href="/units" className="text-xs text-muted-foreground hover:underline">
+        {isAm && (isAdmin || member.isSelf) ? (
+          <Link href="/properties" className="text-xs text-muted-foreground hover:underline">
             Owns {member.unitsOwned} unit{member.unitsOwned === 1 ? "" : "s"}
           </Link>
         ) : null}
@@ -172,10 +171,10 @@ export function MemberDetails({
             label={`Role for ${member.name}`}
           />
           <div className="flex gap-2">
-            <button
-              type="button"
+            <Btn
+              sm
+              variant="pri"
               disabled={busy || roleDraft === null || roleDraft === member.appRole}
-              className={`${smallBtn} bg-primary text-primary-foreground hover:bg-primary/90`}
               onClick={() =>
                 roleDraft !== null &&
                 void run(
@@ -185,10 +184,10 @@ export function MemberDetails({
               }
             >
               Save
-            </button>
-            <button type="button" disabled={busy} className={smallBtn} onClick={() => setEditingRoles(false)}>
+            </Btn>
+            <Btn sm disabled={busy} onClick={() => setEditingRoles(false)}>
               Cancel
-            </button>
+            </Btn>
           </div>
         </div>
       ) : null}
@@ -200,19 +199,18 @@ export function MemberDetails({
           <span className="w-20 text-xs font-medium text-muted-foreground">Phone</span>
           {canEditContact ? (
             <>
-              <input
+              <Input
                 value={phoneValue}
                 onChange={(e) => setPhoneDraft(e.target.value)}
                 placeholder="+15185550123"
                 inputMode="tel"
                 aria-label={`Phone for ${member.name}`}
                 aria-invalid={phoneBad}
-                className={`${smallInput} w-48`}
+                className="h-9 w-48 py-1"
               />
-              <button
-                type="button"
+              <Btn
+                sm
                 disabled={busy || phoneBad || phoneDraft === null || phoneDraft.trim() === (member.phone ?? "")}
-                className={smallBtn}
                 onClick={() =>
                   void run(
                     () => setContact({ userId: member.userId, phone: phoneValue.trim() }),
@@ -221,14 +219,40 @@ export function MemberDetails({
                 }
               >
                 Save
-              </button>
+              </Btn>
               {phoneBad ? (
-                <span className="text-xs text-amber-600">Use international format, like +15185550123.</span>
+                <span className="text-xs text-warning-ink">Use international format, like +15185550123.</span>
               ) : null}
             </>
           ) : (
             <span>{member.phone}</span>
           )}
+        </div>
+      ) : null}
+
+      {canEditContact ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="w-20 text-xs font-medium text-muted-foreground">Skill</span>
+          <Input
+            value={skillValue}
+            maxLength={80}
+            onChange={(e) => setSkillDraft(e.target.value)}
+            placeholder="e.g. Plumbing, Appliances"
+            aria-label={`Skill for ${member.name}`}
+            className="h-9 w-48 py-1"
+          />
+          <Btn
+            sm
+            disabled={busy || skillDraft === null || skillDraft.trim() === (member.skill ?? "")}
+            onClick={() =>
+              void run(
+                () => setContact({ userId: member.userId, skill: skillValue.trim() }),
+                skillValue.trim() ? "Skill saved" : "Skill cleared",
+              ).then((ok) => ok && setSkillDraft(null))
+            }
+          >
+            Save
+          </Btn>
         </div>
       ) : null}
 
@@ -258,38 +282,69 @@ export function MemberDetails({
       {canSetUnavailable ? (
         <div className="flex flex-wrap items-center gap-2">
           <span className="w-20 text-xs font-medium text-muted-foreground">Out of office</span>
-          <input
-            type="date"
-            value={dateDraft}
-            min={toDateInput(now + 24 * 60 * 60 * 1000)}
-            onChange={(e) => setDateDraft(e.target.value)}
-            aria-label={`Out of office until, ${member.name}`}
-            className={smallInput}
-          />
-          <button
-            type="button"
+          <div className="w-44">
+            <DatePicker
+              value={dateDraft}
+              min={toDateInput(now + 24 * 60 * 60 * 1000)}
+              onChange={setDateDraft}
+              aria-label={`Out of office until, ${member.name}`}
+              className="h-9 py-1"
+            />
+          </div>
+          <Btn
+            sm
             disabled={busy || !dateDraft}
-            className={smallBtn}
             onClick={() => {
               const until = endOfDay(dateDraft);
               if (until === null) return;
-              void run(() => setUnavailable({ userId: member.userId, until }), "Out of office set").then(
-                (ok) => ok && setDateDraft(""),
-              );
+              void run(
+                () =>
+                  setUnavailable({
+                    userId: member.userId,
+                    until,
+                    coveringUserId: isAm && coverValue ? (coverValue as Id<"users">) : undefined,
+                  }),
+                "Out of office set",
+              ).then((ok) => {
+                if (ok) {
+                  setDateDraft("");
+                  setCoverDraft(null);
+                }
+              });
             }}
           >
             Set
-          </button>
+          </Btn>
           {member.unavailableUntil !== null ? (
-            <button
-              type="button"
-              disabled={busy}
-              className={smallBtn}
-              onClick={() => void run(() => setUnavailable({ userId: member.userId }), "Back in office")}
-            >
+            <Btn sm disabled={busy} onClick={() => void run(() => setUnavailable({ userId: member.userId }), "Back in office")}>
               Clear
-            </button>
+            </Btn>
           ) : null}
+        </div>
+      ) : null}
+
+      {canSetUnavailable && isAm ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="w-20 text-xs font-medium text-muted-foreground">Covered by</span>
+          <Select
+            value={coverValue}
+            onChange={(e) => setCoverDraft(e.target.value)}
+            aria-label={`Who covers while ${member.name} is out`}
+            className="h-9 w-auto py-1"
+            disabled={busy}
+          >
+            <option value="">Who covers while you&rsquo;re out</option>
+            {coverOptions.map((m) => (
+              <option key={m.userId} value={m.userId}>
+                {m.name}
+              </option>
+            ))}
+          </Select>
+          <span className="text-xs text-muted-foreground">
+            {currentCover && outOfOffice
+              ? `${currentCover.name} has read-only cover now.`
+              : "Applied when you set an out-of-office date."}
+          </span>
         </div>
       ) : null}
     </div>

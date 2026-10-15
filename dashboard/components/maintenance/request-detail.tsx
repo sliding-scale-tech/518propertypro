@@ -22,6 +22,9 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useToast } from "@/components/toast";
 import { Dropdown } from "@/components/ui/dropdown";
+import { Card, CardHead, Pill, SevChip, Timeline } from "@/components/ui";
+import { auditText } from "@/components/board/shared";
+import { OUT_OF_SCOPE_REASONS } from "@/convex/maintenanceReasons";
 import { ConversationTranscript } from "@/components/transcript";
 import {
   Field,
@@ -43,13 +46,6 @@ import {
   type Status,
 } from "./shared";
 
-export const OUT_OF_SCOPE_REASONS = [
-  "Tenant responsibility (bulbs/blinds/trash)",
-  "Not a maintenance issue",
-  "Resolved by tenant",
-  "Other",
-];
-
 const OPEN: Status[] = ["new", "under_review", "more_info_needed", "forwarded_to_pat"];
 const MAX_IMAGE = 10 * 1024 * 1024;
 const MAX_VIDEO = 50 * 1024 * 1024;
@@ -63,17 +59,15 @@ type Dialog =
   | "closeNoWo"
   | "fixUnit"
   | "severity"
-  | "validate";
+  | "withdraw"
+  | "note";
 
 function Section({ title, children, right }: { title: string; children: ReactNode; right?: ReactNode }) {
   return (
-    <section className="rounded-2xl border border-border bg-card p-4 shadow-sm sm:p-5">
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold">{title}</h2>
-        {right}
-      </div>
+    <Card>
+      <CardHead title={title} right={right} />
       {children}
-    </section>
+    </Card>
   );
 }
 
@@ -81,7 +75,7 @@ function KV({ label, value }: { label: string; value?: ReactNode }) {
   if (value === undefined || value === null || value === "") return null;
   return (
     <div>
-      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dt className="text-[12.5px] text-muted-foreground">{label}</dt>
       <dd className="text-sm">{value}</dd>
     </div>
   );
@@ -95,7 +89,7 @@ function KV({ label, value }: { label: string; value?: ReactNode }) {
 export function RequestDetail({
   requestId,
   embedded = false,
-  backHref = "/maintenance",
+  backHref = "/work-orders",
 }: {
   requestId: Id<"maintenanceRequests">;
   embedded?: boolean;
@@ -104,7 +98,7 @@ export function RequestDetail({
   const toast = useToast();
   const data = useQuery(api.maintenance.get, { requestId });
   const markViewed = useMutation(api.maintenance.markViewed);
-  const validate = useMutation(api.maintenance.validate);
+  const approveAndForward = useMutation(api.maintenance.approveAndForward);
   const requestInfo = useMutation(api.maintenance.requestInfo);
   const closeOutOfScope = useMutation(api.maintenance.closeOutOfScope);
   const forwardToPat = useMutation(api.maintenance.forwardToPat);
@@ -116,9 +110,14 @@ export function RequestDetail({
   const closeNoWorkOrder = useMutation(api.maintenance.closeNoWorkOrder);
   const genUrl = useMutation(api.maintenance.generateMediaUploadUrl);
   const attach = useMutation(api.maintenance.attachMedia);
+  const withdrawFromPat = useMutation(api.maintenance.withdrawFromPat);
+  const addNote = useMutation(api.maintenance.addNote);
 
   const [dialog, setDialog] = useState<Dialog>(null);
   const [uploading, setUploading] = useState(false);
+  // Optional tenant texts: only offered when the matching wording is approved in Sarah config.
+  const [notifyTenant, setNotifyTenant] = useState(false);
+  const [sendPhotoLink, setSendPhotoLink] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const viewable = data !== undefined && data !== null;
@@ -135,14 +134,16 @@ export function RequestDetail({
   }
   if (data === null) {
     return (
-      <div className="rounded-2xl border border-border bg-card p-6 text-sm text-muted-foreground">
-        Request not found.{" "}
-        {!embedded && (
-          <Link href={backHref} className="text-primary underline">
-            Back to the inbox
-          </Link>
-        )}
-      </div>
+      <Card>
+        <p className="text-sm text-muted-foreground">
+          Request not found.{" "}
+          {!embedded && (
+            <Link href={backHref} className="text-primary underline">
+              Back to the inbox
+            </Link>
+          )}
+        </p>
+      </Card>
     );
   }
 
@@ -150,7 +151,7 @@ export function RequestDetail({
   const status = r.status as Status;
   const severity = r.severity as Severity;
   const isOpen = OPEN.includes(status);
-  const { canAct, canManage } = data;
+  const { canAct, canManage, canWithdraw, canAddNote, isCovering } = data;
 
   /** Runs a mutation, toasts the outcome; rethrows so dialogs stay open on failure. */
   const run = async (okMessage: string, fn: () => Promise<unknown>) => {
@@ -163,6 +164,11 @@ export function RequestDetail({
     }
   };
   const runQuiet = (okMessage: string, fn: () => Promise<unknown>) => void run(okMessage, fn).catch(() => {});
+  /** Follow-up toast after a close that may have texted the tenant. */
+  const reportNotice = (res: { notified: boolean; reason?: string }) => {
+    if (!notifyTenant || !tenantMessages.outOfScope) return;
+    toast(res.notified ? "Tenant notified." : `Tenant not notified${res.reason ? `: ${res.reason}` : "."}`, res.notified ? "success" : "error");
+  };
 
   async function upload(file: File) {
     const isImage = file.type.startsWith("image/") && file.type !== "image/svg+xml";
@@ -188,16 +194,19 @@ export function RequestDetail({
     }
   }
 
-  const canValidate = canAct && !r.validatedAt && ["new", "under_review", "more_info_needed"].includes(status);
+  const tenantMessages = data.tenantMessages;
+  // Validate + forward in one step; an already-validated request keeps the plain Forward button.
+  const alreadyValidated = !!r.validatedAt && status === "under_review";
+  const canApprove = canAct && !alreadyValidated && ["new", "under_review", "more_info_needed"].includes(status);
   const canRequestInfo = canAct && ["new", "under_review"].includes(status);
   const canCloseScope = canAct && ["new", "under_review", "more_info_needed"].includes(status);
-  const canForward = canAct && status === "under_review";
+  const canForward = canAct && alreadyValidated;
   const canFix = canAct && isOpen;
   const patCreate = canManage && isOpen;
   const patSendBack = canManage && status === "forwarded_to_pat";
   const patCloseNoWo = canManage && status === "forwarded_to_pat";
   const hasActions =
-    canValidate || canRequestInfo || canCloseScope || canForward || canFix || patCreate || patSendBack || patCloseNoWo;
+    canWithdraw || canAddNote || canApprove || canRequestInfo || canCloseScope || canForward || canFix || patCreate || patSendBack || patCloseNoWo;
 
   const where = [property?.name, unit ? `Unit ${unit.unitNumber}` : r.spokenUnit ? `Unit ${r.spokenUnit}?` : undefined]
     .filter(Boolean)
@@ -212,11 +221,15 @@ export function RequestDetail({
       )}
 
       {/* Header */}
-      <div className="rounded-2xl border border-border bg-card p-4 shadow-sm sm:p-5">
+      <Card>
         <div className="space-y-2">
           <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-lg font-semibold">{mrNumber(r.number)}</h1>
-            <SeverityBadge severity={severity} />
+            <h1 className="font-mono text-lg font-semibold">{mrNumber(r.number)}</h1>
+            {typeof r.severityScore === "number" ? (
+              <SevChip level={severity} score={r.severityScore} />
+            ) : (
+              <SeverityBadge severity={severity} />
+            )}
             <StatusPill status={status} />
             {canAct && isOpen && (
               <button
@@ -239,9 +252,9 @@ export function RequestDetail({
             <p className="text-xs text-muted-foreground">Severity: {r.severityReason}</p>
           ) : null}
           {r.inExceptionQueue && (
-            <p className="flex items-center gap-1.5 text-xs text-warning-foreground">
+            <Pill tone="warn">
               <AlertTriangle className="h-3.5 w-3.5" /> In exception queue: {r.routeReason ?? "needs review"}
-            </p>
+            </Pill>
           )}
           {workOrder && (
             <Link href={`/work-orders/${workOrder._id}`} className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline">
@@ -249,11 +262,11 @@ export function RequestDetail({
             </Link>
           )}
         </div>
-      </div>
+      </Card>
 
       {/* Duplicate banner */}
       {data.possibleDuplicateOf && (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-warning/40 bg-warning/10 p-4 text-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-[20px] border border-border bg-warning-soft p-4 text-sm text-warning-ink">
           <span className="flex items-center gap-2">
             <AlertTriangle className="h-4 w-4 shrink-0" />
             Possible duplicate of{" "}
@@ -282,24 +295,48 @@ export function RequestDetail({
         </div>
       )}
 
+      {isCovering && (
+        <Pill tone="neutral">
+          You&apos;re covering this unit while {data.assignedAssetManagerName ?? "the asset manager"} is out. Read only.
+        </Pill>
+      )}
+
       {/* Action bar */}
       {hasActions && (
-        <div className="flex flex-wrap gap-2 rounded-2xl border border-border bg-card p-3 shadow-sm">
-          {canValidate && (
-            <button className={btnPrimary} onClick={() => setDialog("validate")}>
-              <CheckCircle2 className="h-4 w-4" /> Validate
+        <div className="flex flex-wrap gap-2 rounded-[20px] border border-border bg-card p-3">
+          {canWithdraw && !canManage && (
+            <button className={btnOutline} onClick={() => setDialog("withdraw")}>
+              <Undo2 className="h-4 w-4" /> Withdraw to my review
+            </button>
+          )}
+          {canAddNote && (
+            <button className={btnOutline} onClick={() => setDialog("note")}>
+              <Pencil className="h-4 w-4" /> {canManage ? "Add a note for the asset manager" : "Add a note for Pat"}
+            </button>
+          )}
+          {canApprove && (
+            <button
+              className={btnPrimary}
+              onClick={() => runQuiet("Approved and sent to Pat.", () => approveAndForward({ requestId }))}
+            >
+              <CheckCircle2 className="h-4 w-4" /> Approve &amp; send to Pat
             </button>
           )}
           {canRequestInfo && (
-            <button className={btnOutline} onClick={() => setDialog("info")}>
+            <button
+              className={btnOutline}
+              onClick={() => {
+                setSendPhotoLink(false);
+                setDialog("info");
+              }}
+            >
               <MessageSquareMore className="h-4 w-4" /> Request more info
             </button>
           )}
           {canForward && (
             <button
               className={btnOutline}
-              disabled={!r.validatedAt}
-              title={r.validatedAt ? "Send to the maintenance lead" : "Validate the request before forwarding it"}
+              title="Send to the maintenance lead"
               onClick={() => setDialog("forward")}
             >
               <ArrowRight className="h-4 w-4" /> Forward to Pat
@@ -321,12 +358,24 @@ export function RequestDetail({
             </button>
           )}
           {patCloseNoWo && (
-            <button className={btnDanger} onClick={() => setDialog("closeNoWo")}>
+            <button
+              className={btnDanger}
+              onClick={() => {
+                setNotifyTenant(false);
+                setDialog("closeNoWo");
+              }}
+            >
               <XCircle className="h-4 w-4" /> Close: no work order
             </button>
           )}
           {canCloseScope && (
-            <button className={btnDanger} onClick={() => setDialog("close")}>
+            <button
+              className={btnDanger}
+              onClick={() => {
+                setNotifyTenant(false);
+                setDialog("close");
+              }}
+            >
               <XCircle className="h-4 w-4" /> Close: not our responsibility
             </button>
           )}
@@ -362,7 +411,7 @@ export function RequestDetail({
                 <tbody>
                   {r.answers.map((a) => (
                     <tr key={a.key} className="border-b border-border last:border-0">
-                      <td className="w-1/2 bg-muted/30 px-3 py-2 text-muted-foreground">{a.question}</td>
+                      <td className="w-1/2 bg-muted px-3 py-2 text-muted-foreground">{a.question}</td>
                       <td className="px-3 py-2">{a.value}</td>
                     </tr>
                   ))}
@@ -434,7 +483,7 @@ export function RequestDetail({
           }
         >
           {conversation.summary ? (
-            <div className="mb-4 rounded-xl bg-muted/40 p-3 text-sm">
+            <div className="mb-4 rounded-xl bg-muted p-3 text-sm">
               <div className="mb-1 text-xs font-medium text-muted-foreground">Sarah&apos;s summary</div>
               {conversation.summary}
             </div>
@@ -450,38 +499,26 @@ export function RequestDetail({
 
       {/* Timeline */}
       <Section title="Timeline">
-        <ol className="space-y-3">
-          {audit.map((a) => (
-            <li key={a._id} className="border-l-2 border-border pl-3 text-sm">
-              <div className="flex flex-wrap items-baseline gap-x-2">
+        <Timeline
+          entries={audit.map((a) => ({
+            id: a._id,
+            text: ["note_added", "withdrawn_from_pat", "reassigned_with_unit"].includes(a.action) ? (
+              auditText(a)
+            ) : (
+              <>
                 <span className="font-medium capitalize">{a.action.replace(/_/g, " ")}</span>
                 {a.from || a.to ? (
-                  <span className="text-xs text-muted-foreground">
-                    {[a.from, a.to].filter(Boolean).join(" → ")}
-                  </span>
+                  <span className="ml-2 text-xs text-muted-foreground">{[a.from, a.to].filter(Boolean).join(" → ")}</span>
                 ) : null}
-              </div>
-              {a.note ? <div className="text-muted-foreground">{a.note}</div> : null}
-              <div className="text-xs text-muted-foreground">
-                {a.actorLabel} · {formatWhen(a.at)}
-              </div>
-            </li>
-          ))}
-        </ol>
+                {a.note ? <div className="text-muted-foreground">{a.note}</div> : null}
+              </>
+            ),
+            time: `${a.actorLabel} · ${formatWhen(a.at)}`,
+          }))}
+        />
       </Section>
 
       {/* Dialogs */}
-      {dialog === "validate" && (
-        <NoteDialog
-          title="Validate request"
-          description="Confirms the details look right. You can forward it to Pat afterwards."
-          label="Note"
-          required={false}
-          confirmLabel="Validate"
-          onClose={() => setDialog(null)}
-          onSubmit={(note) => run("Request validated.", () => validate({ requestId, note: note || undefined }))}
-        />
-      )}
       {dialog === "info" && (
         <NoteDialog
           title="Request more info"
@@ -490,7 +527,40 @@ export function RequestDetail({
           required
           confirmLabel="Request info"
           onClose={() => setDialog(null)}
-          onSubmit={(note) => run("Marked as waiting on tenant.", () => requestInfo({ requestId, note }))}
+          extra={
+            <div>
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  disabled={!tenantMessages.photoRequest}
+                  checked={sendPhotoLink && tenantMessages.photoRequest}
+                  onChange={(e) => setSendPhotoLink(e.target.checked)}
+                />
+                <span>Text the tenant a photo link</span>
+              </label>
+              {!tenantMessages.photoRequest ? (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Needs approved photo-request wording in Sarah config (Tenant messages).
+                </p>
+              ) : null}
+            </div>
+          }
+          onSubmit={(note) =>
+            run("Marked as waiting on tenant.", async () => {
+              const res = await requestInfo({
+                requestId,
+                note,
+                sendPhotoLink: sendPhotoLink && tenantMessages.photoRequest ? true : undefined,
+              });
+              if (sendPhotoLink && tenantMessages.photoRequest) {
+                toast(
+                  res.texted ? "Photo link texted to the tenant." : `Photo link not sent${res.reason ? `: ${res.reason}` : "."}`,
+                  res.texted ? "success" : "error",
+                );
+              }
+            })
+          }
         />
       )}
       {dialog === "close" && (
@@ -498,11 +568,21 @@ export function RequestDetail({
           title="Close: not our responsibility"
           label="Details"
           required
-          presets={OUT_OF_SCOPE_REASONS}
+          presets={[...OUT_OF_SCOPE_REASONS]}
           confirmLabel="Close request"
           danger
           onClose={() => setDialog(null)}
-          onSubmit={(reason) => run("Request closed.", () => closeOutOfScope({ requestId, reason }))}
+          extra={<NotifyTenantCheckbox enabled={tenantMessages.outOfScope} checked={notifyTenant} onChange={setNotifyTenant} />}
+          onSubmit={(reason) =>
+            run("Request closed.", async () => {
+              const res = await closeOutOfScope({
+                requestId,
+                reason,
+                notifyTenant: notifyTenant && tenantMessages.outOfScope ? true : undefined,
+              });
+              reportNotice(res);
+            })
+          }
         />
       )}
       {dialog === "forward" && (
@@ -513,6 +593,28 @@ export function RequestDetail({
           confirmLabel="Forward"
           onClose={() => setDialog(null)}
           onSubmit={(note) => run("Forwarded to Pat.", () => forwardToPat({ requestId, note: note || undefined }))}
+        />
+      )}
+      {dialog === "withdraw" && (
+        <NoteDialog
+          title="Withdraw to my review"
+          label="Note (optional)"
+          required={false}
+          confirmLabel="Withdraw"
+          onClose={() => setDialog(null)}
+          onSubmit={(note) =>
+            run("Withdrawn. It is back in your review.", () => withdrawFromPat({ requestId, note: note || undefined }))
+          }
+        />
+      )}
+      {dialog === "note" && (
+        <NoteDialog
+          title={canManage ? "Add a note for the asset manager" : "Add a note for Pat"}
+          label="Note"
+          required
+          confirmLabel="Save note"
+          onClose={() => setDialog(null)}
+          onSubmit={(note) => run("Note saved.", () => addNote({ requestId, note }))}
         />
       )}
       {dialog === "sendBack" && (
@@ -533,7 +635,17 @@ export function RequestDetail({
           confirmLabel="Close request"
           danger
           onClose={() => setDialog(null)}
-          onSubmit={(reason) => run("Request closed.", () => closeNoWorkOrder({ requestId, reason }))}
+          extra={<NotifyTenantCheckbox enabled={tenantMessages.outOfScope} checked={notifyTenant} onChange={setNotifyTenant} />}
+          onSubmit={(reason) =>
+            run("Request closed.", async () => {
+              const res = await closeNoWorkOrder({
+                requestId,
+                reason,
+                notifyTenant: notifyTenant && tenantMessages.outOfScope ? true : undefined,
+              });
+              reportNotice(res);
+            })
+          }
         />
       )}
       {dialog === "fixUnit" && (
@@ -554,6 +666,25 @@ export function RequestDetail({
         />
       )}
     </div>
+  );
+}
+
+function NotifyTenantCheckbox({
+  enabled,
+  checked,
+  onChange,
+}: {
+  enabled: boolean;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  // Only offered once the out-of-scope wording is approved in Sarah config.
+  if (!enabled) return null;
+  return (
+    <label className="flex items-start gap-2 text-sm">
+      <input type="checkbox" className="mt-1" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <span>Notify tenant</span>
+    </label>
   );
 }
 

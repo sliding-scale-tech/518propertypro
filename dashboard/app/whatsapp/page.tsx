@@ -27,6 +27,7 @@ import QRCode from "react-qr-code";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useToast } from "@/components/toast";
+import { Btn, Modal } from "@/components/ui";
 import { severityBand, type SeverityBand } from "@/convex/severity";
 import { RequireView } from "@/components/require-view";
 
@@ -273,65 +274,41 @@ function QrDialog({
   onRefresh: () => void;
 }) {
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
-      onClick={onClose}
+    <Modal
+      title="Link WhatsApp"
+      onClose={onClose}
+      size="sm"
+      footer={<Btn onClick={onRefresh}>Refresh now</Btn>}
     >
-      <motion.div
-        initial={{ opacity: 0, scale: 0.96, y: 8 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.96, y: 8 }}
-        transition={{ type: "spring", damping: 25, stiffness: 350 }}
-        onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-sm space-y-4 rounded-2xl border border-border bg-card p-5 shadow-xl"
-      >
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">Link WhatsApp</h2>
-          <button
-            onClick={onClose}
-            className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent"
-          >
-            <X className="h-4 w-4" />
-          </button>
+      <div className="space-y-4">
+    <ol className="space-y-1 text-sm text-muted-foreground">
+      <li>1. Open WhatsApp on the bot&apos;s phone</li>
+      <li>2. Settings → Linked devices → Link a device</li>
+      <li>3. Scan this code</li>
+    </ol>
+
+    <div className="flex min-h-[240px] items-center justify-center rounded-xl border border-border bg-white p-4">
+      {qr ? (
+        <QRCode value={qr} size={200} />
+      ) : status === "WORKING" ? (
+        <div className="flex flex-col items-center gap-2 text-success">
+          <CheckCircle2 className="h-8 w-8" />
+          <span className="text-sm font-medium">Connected</span>
         </div>
-
-        <ol className="space-y-1 text-sm text-muted-foreground">
-          <li>1. Open WhatsApp on the bot&apos;s phone</li>
-          <li>2. Settings → Linked devices → Link a device</li>
-          <li>3. Scan this code</li>
-        </ol>
-
-        <div className="flex min-h-[240px] items-center justify-center rounded-xl border border-border bg-white p-4">
-          {qr ? (
-            <QRCode value={qr} size={200} />
-          ) : status === "WORKING" ? (
-            <div className="flex flex-col items-center gap-2 text-success">
-              <CheckCircle2 className="h-8 w-8" />
-              <span className="text-sm font-medium">Connected</span>
-            </div>
-          ) : (
-            <div className="flex flex-col items-center gap-2 text-muted-foreground">
-              <Loader2 className="h-6 w-6 animate-spin" />
-              <span className="text-sm">Waiting for WhatsApp…</span>
-            </div>
-          )}
+      ) : (
+        <div className="flex flex-col items-center gap-2 text-muted-foreground">
+          <Loader2 className="h-6 w-6 animate-spin" />
+          <span className="text-sm">Waiting for WhatsApp…</span>
         </div>
+      )}
+    </div>
 
-        <p className="text-xs text-muted-foreground">
-          The code refreshes every few seconds. If scanning fails, wait for a new one.
-        </p>
+    <p className="text-xs text-muted-foreground">
+      The code refreshes every few seconds. If scanning fails, wait for a new one.
+    </p>
 
-        <button
-          onClick={onRefresh}
-          className="w-full rounded-lg border border-input px-4 py-2 text-sm hover:bg-accent"
-        >
-          Refresh now
-        </button>
-      </motion.div>
-    </motion.div>
+      </div>
+    </Modal>
   );
 }
 

@@ -1,8 +1,9 @@
 "use client";
 
+import { Modal, Select } from "@/components/ui";
 import { useMutation, useQuery } from "convex/react";
 import { AnimatePresence, motion } from "framer-motion";
-import { HelpCircle, Lock, Plus, Trash2, X } from "lucide-react";
+import { HelpCircle, Lock, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
@@ -288,26 +289,7 @@ function QuestionModal({
   };
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-[2px]"
-      onClick={onClose}
-    >
-      <motion.div
-        initial={{ opacity: 0, scale: 0.97, y: 8 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.97, y: 8 }}
-        onClick={(event) => event.stopPropagation()}
-        className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-border bg-card shadow-2xl"
-      >
-        <div className="flex items-center justify-between border-b border-border px-6 py-5">
-          <h2 className="text-lg font-bold">{question ? "Edit question" : "Add question"}</h2>
-          <button onClick={onClose} className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent">
-            <X className="h-5 w-5" />
-          </button>
-        </div>
+    <Modal title={question ? "Edit question" : "Add question"} onClose={onClose} bare>
 
         <div className="space-y-5 px-6 py-5">
           <label className="block">
@@ -326,21 +308,20 @@ function QuestionModal({
 
           <label className="block">
             <span className="mb-2 block text-sm font-medium">Expected answer</span>
-            <select
+            <Select
               value={answerKind}
               onChange={(event) => {
                 const next = event.target.value as AnswerKind;
                 setAnswerKind(next);
                 if (next === "text") setIsRequirement(false);
               }}
-              className={inputClass}
             >
               {(Object.keys(KIND_LABEL) as AnswerKind[]).map((kind) => (
                 <option key={kind} value={kind}>
                   {KIND_LABEL[kind]}
                 </option>
               ))}
-            </select>
+            </Select>
             <span className="mt-2 block text-xs text-muted-foreground">{KIND_HINT[answerKind]}</span>
           </label>
 
@@ -383,14 +364,13 @@ function QuestionModal({
                 {answerKind === "yes_no" ? (
                   <label className="block">
                     <span className="mb-2 block text-sm font-medium">Passing answer</span>
-                    <select
+                    <Select
                       value={mustBe ? "yes" : "no"}
                       onChange={(event) => setMustBe(event.target.value === "yes")}
-                      className={inputClass}
                     >
                       <option value="yes">Must answer Yes</option>
                       <option value="no">Must answer No</option>
-                    </select>
+                    </Select>
                   </label>
                 ) : null}
 
@@ -398,14 +378,13 @@ function QuestionModal({
                   <div className="grid grid-cols-2 gap-3">
                     <label>
                       <span className="mb-2 block text-sm font-medium">Requirement</span>
-                      <select
+                      <Select
                         value={op}
                         onChange={(event) => setOp(event.target.value as "gte" | "lte")}
-                        className={inputClass}
                       >
                         <option value="gte">At least</option>
                         <option value="lte">No more than</option>
-                      </select>
+                      </Select>
                     </label>
                     <label>
                       <span className="mb-2 block text-sm font-medium">Value</span>
@@ -492,7 +471,6 @@ function QuestionModal({
             </button>
           </div>
         </div>
-      </motion.div>
-    </motion.div>
+      </Modal>
   );
 }

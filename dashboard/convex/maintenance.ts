@@ -5,9 +5,16 @@ import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { writeAudit } from "./audit";
 import { canManageMaintenance, currentOrg, requireAdminView, requireOrg, viewFor } from "./authz";
 import type { OrgContext } from "./authz";
+import { amScope, canSeeUnit, EMPTY_AM_SCOPE } from "./amScope";
+import type { AmScope } from "./amScope";
 import { nextNumber } from "./counters";
 import { scheduleNotify, staffRecipientIds } from "./notify";
+import { toE164 } from "./phone";
+import { createPublicLink, peekPublicLink } from "./publicLinks";
+import { sha256 } from "./team";
 import { findResidentsByPhone } from "./residents";
+import { clampSeverity } from "./severity";
+import { tenantMessage } from "./sarahConfigRead";
 import { normalizeUnitKey } from "./units";
 
 /**
@@ -16,8 +23,8 @@ import { normalizeUnitKey } from "./units";
  *
  * Scope rules, all enforced here and never from client-supplied ids:
  *   - admin view (team admin, executive, maintenance lead, simplr_admin) reads everything;
- *   - an asset manager reads and acts only on requests ASSIGNED to them (routing assigns by the
- *     unit's AM, so this is "their units");
+ *   - an asset manager reads requests on the units they manage or cover (amScope.ts) plus any
+ *     assigned to them, and ACTS only on their managed units (covering is read-only);
  *   - Pat powers (canManageMaintenance) act on everything; an executive alone is read-only.
  * A request outside the caller's scope reads as null / "not found", never "forbidden", so a
  * probing client can't tell it exists.
@@ -89,18 +96,28 @@ function isAssetManager(org: OrgContext): boolean {
   return org.jobRoles.includes("asset_manager");
 }
 
-/** Read scope: admin view sees the team's requests, an AM those assigned to them. */
-function canRead(org: OrgContext, req: Doc<"maintenanceRequests">): boolean {
-  if (req.orgId !== org.orgId) return false;
-  if (viewFor(org.isAdmin, org.jobRoles) === "admin") return true;
-  return isAssetManager(org) && req.assignedAssetManagerUserId === org.user._id;
+/** The viewer's unit scope: loaded only for an asset manager, empty for everyone else. */
+async function scopeOf(ctx: QueryCtx, org: OrgContext): Promise<AmScope> {
+  return viewFor(org.isAdmin, org.jobRoles) === "asset_manager" ? await amScope(ctx, org) : EMPTY_AM_SCOPE;
 }
 
-/** Act scope: Pat powers on everything, an AM on requests assigned to them. */
-function canAct(org: OrgContext, req: Doc<"maintenanceRequests">): boolean {
+/**
+ * Read scope: admin view sees the team's requests, an AM those on units they manage or cover,
+ * plus any assigned to them (a person-level fallback Pat approved).
+ */
+function canRead(org: OrgContext, req: Doc<"maintenanceRequests">, scope: AmScope): boolean {
+  if (req.orgId !== org.orgId) return false;
+  if (viewFor(org.isAdmin, org.jobRoles) === "admin") return true;
+  if (!isAssetManager(org)) return false;
+  return req.assignedAssetManagerUserId === org.user._id || canSeeUnit(scope, req.unitId);
+}
+
+/** Act scope: Pat powers on everything, an AM on managed units only. Covering is read-only. */
+function canAct(org: OrgContext, req: Doc<"maintenanceRequests">, scope: AmScope): boolean {
   if (req.orgId !== org.orgId) return false;
   if (canManageMaintenance(org)) return true;
-  return isAssetManager(org) && req.assignedAssetManagerUserId === org.user._id;
+  if (!isAssetManager(org)) return false;
+  return req.assignedAssetManagerUserId === org.user._id || (req.unitId !== undefined && scope.managed.has(req.unitId));
 }
 
 async function actableRequest(
@@ -109,15 +126,16 @@ async function actableRequest(
 ): Promise<{ org: OrgContext; req: Doc<"maintenanceRequests"> }> {
   const org = await requireOrg(ctx);
   const req = await ctx.db.get(requestId);
-  if (!req || !canRead(org, req)) throw new Error("Request not found.");
-  if (!canAct(org, req)) throw new Error("You don't have access to that.");
+  const scope = await scopeOf(ctx, org);
+  if (!req || !canRead(org, req, scope)) throw new Error("Request not found.");
+  if (!canAct(org, req, scope)) throw new Error("You don't have access to that.");
   return { org, req };
 }
 
 async function patOnlyRequest(ctx: MutationCtx, requestId: Id<"maintenanceRequests">) {
   const org = await requireOrg(ctx);
   const req = await ctx.db.get(requestId);
-  if (!req || !canRead(org, req)) throw new Error("Request not found.");
+  if (!req || !canRead(org, req, await scopeOf(ctx, org))) throw new Error("Request not found.");
   if (!canManageMaintenance(org)) throw new Error("You don't have access to that.");
   return { org, req };
 }
@@ -142,6 +160,35 @@ function firstNameOf(full: string | undefined): string | undefined {
 /** Everyone who is the "Pat" tier or a team admin, minus the person who just acted. */
 async function staffExcept(ctx: QueryCtx, orgId: string, exclude?: Id<"users">) {
   return (await staffRecipientIds(ctx, orgId)).filter((id) => id !== exclude);
+}
+
+/**
+ * The asset manager(s) to tell about a request: the unit's AM (falling back to the assignee),
+ * plus their covering AM when the owner is currently out of office. `exclude` is the actor.
+ */
+async function amRecipients(ctx: QueryCtx, req: Doc<"maintenanceRequests">, exclude?: Id<"users">) {
+  const ids = new Set<Id<"users">>();
+  const unit = req.unitId ? await ctx.db.get(req.unitId) : null;
+  const owner = unit?.assetManagerUserId ?? req.assignedAssetManagerUserId;
+  if (req.assignedAssetManagerUserId) ids.add(req.assignedAssetManagerUserId);
+  if (owner) {
+    ids.add(owner);
+    const m = await ctx.db
+      .query("memberships")
+      .withIndex("by_user", (q) => q.eq("userId", owner))
+      .first();
+    if (
+      m &&
+      m.orgId === req.orgId &&
+      m.coveringUserId &&
+      m.unavailableUntil !== undefined &&
+      m.unavailableUntil > Date.now()
+    ) {
+      ids.add(m.coveringUserId);
+    }
+  }
+  if (exclude) ids.delete(exclude);
+  return [...ids];
 }
 
 // --- Routing (single source of truth) ----------------------------------------
@@ -492,12 +539,19 @@ export const createManual = mutation({
     firstNoticed: v.optional(v.string()),
     pets: v.optional(v.string()),
     preferredAccessTimes: v.optional(v.string()),
+    // Skip the asset-manager review: validate and forward to the maintenance lead in the same
+    // call. Honoured only for Pat powers or the unit's own asset manager; ignored otherwise.
+    autoForward: v.optional(v.boolean()),
+    // Optional 1-10 score alongside the named level; clamped server-side.
+    severityScore: v.optional(v.number()),
   },
-  handler: async (ctx, args): Promise<Id<"maintenanceRequests">> => {
+  handler: async (ctx, args): Promise<{ requestId: Id<"maintenanceRequests">; number: number }> => {
     const org = await requireOrg(ctx);
     const unit = await ctx.db.get(args.unitId);
     if (!unit || unit.orgId !== org.orgId) throw new Error("Unit not found.");
 
+    // An AM may create only for units they MANAGE. Covering a colleague's units is read-only, so
+    // this deliberately checks the unit's own AM and never amScope.covering.
     const adminView = viewFor(org.isAdmin, org.jobRoles) === "admin";
     const ownAm = isAssetManager(org) && unit.assetManagerUserId === org.user._id;
     if (!adminView && !ownAm) throw new Error("You don't have access to that.");
@@ -512,9 +566,10 @@ export const createManual = mutation({
     }
 
     const now = Date.now();
+    const number = await nextNumber(ctx, org.orgId, "maintenanceRequest");
     const id = await ctx.db.insert("maintenanceRequests", {
       orgId: org.orgId,
-      number: await nextNumber(ctx, org.orgId, "maintenanceRequest"),
+      number,
       source: "manual",
       callerName: optText(args.callerName, 120),
       callbackNumber: optText(args.callbackNumber, 40),
@@ -529,6 +584,7 @@ export const createManual = mutation({
       pets: optText(args.pets, 300),
       preferredAccessTimes: optText(args.preferredAccessTimes, 300),
       severity: args.severity,
+      severityScore: args.severityScore === undefined ? undefined : clampSeverity(args.severityScore),
       mediaRequested: false,
       inExceptionQueue: false,
       status: "new",
@@ -545,7 +601,11 @@ export const createManual = mutation({
       note: "Entered manually",
     });
     await routeRequest(ctx, id, { actorUserId: org.user._id, unitId: unit._id, notify: true });
-    return id;
+    if (args.autoForward && (canManageMaintenance(org) || ownAm)) {
+      const fresh = await ctx.db.get(id);
+      if (fresh) await validateAndForward(ctx, org, fresh, undefined);
+    }
+    return { requestId: id, number };
   },
 });
 
@@ -568,11 +628,12 @@ const tabValidator = v.union(
 );
 
 /** Requests with a status inside the caller's scope, newest first. Empty for other roles. */
-async function scopedByStatus(
+export async function scopedByStatus(
   ctx: QueryCtx,
   org: OrgContext,
   status: Status,
   limit: number,
+  scope?: AmScope,
 ): Promise<Doc<"maintenanceRequests">[]> {
   const view = viewFor(org.isAdmin, org.jobRoles);
   if (view === "admin") {
@@ -583,14 +644,25 @@ async function scopedByStatus(
       .take(limit);
   }
   if (view === "asset_manager") {
-    const rows = await ctx.db
-      .query("maintenanceRequests")
-      .withIndex("by_assigned_am_and_status", (q) =>
-        q.eq("assignedAssetManagerUserId", org.user._id).eq("status", status),
-      )
-      .order("desc")
-      .take(limit);
-    return rows.filter((r) => r.orgId === org.orgId);
+    // Requests are assigned to their unit's AM, so the viewer's own queue plus the queues of
+    // the out-of-office colleagues they cover, narrowed to the units amScope allows.
+    const sc = scope ?? (await amScope(ctx, org));
+    const rows: Doc<"maintenanceRequests">[] = [];
+    for (const owner of [org.user._id, ...sc.coveringFor]) {
+      rows.push(
+        ...(await ctx.db
+          .query("maintenanceRequests")
+          .withIndex("by_assigned_am_and_status", (q) =>
+            q.eq("assignedAssetManagerUserId", owner).eq("status", status),
+          )
+          .order("desc")
+          .take(limit)),
+      );
+    }
+    return rows
+      .filter((r) => r.orgId === org.orgId && (r.assignedAssetManagerUserId === org.user._id || canSeeUnit(sc, r.unitId)))
+      .sort((a, b) => b._creationTime - a._creationTime)
+      .slice(0, limit);
   }
   return [];
 }
@@ -658,9 +730,10 @@ export const list = query({
     const view = viewFor(org.isAdmin, org.jobRoles);
     if (view !== "admin" && view !== "asset_manager") return [];
 
+    const scope = await scopeOf(ctx, org);
     let rows: Doc<"maintenanceRequests">[] = [];
     for (const status of TAB_STATUSES[args.tab]) {
-      rows.push(...(await scopedByStatus(ctx, org, status, LIST_CAP)));
+      rows.push(...(await scopedByStatus(ctx, org, status, LIST_CAP, scope)));
     }
     rows = rows.filter((r) => {
       if (args.severity && r.severity !== args.severity) return false;
@@ -700,7 +773,8 @@ export const get = query({
     const org = await currentOrg(ctx);
     if (!org) return null;
     const req = await ctx.db.get(args.requestId);
-    if (!req || !canRead(org, req)) return null;
+    const scope = await scopeOf(ctx, org);
+    if (!req || !canRead(org, req, scope)) return null;
 
     const [unit, property, resident, conversation, duplicateOf, auditRows, mediaRows, workOrder] =
       await Promise.all([
@@ -745,7 +819,7 @@ export const get = query({
           }
         : null,
       possibleDuplicateOf:
-        duplicateOf && duplicateOf.orgId === org.orgId && canRead(org, duplicateOf)
+        duplicateOf && duplicateOf.orgId === org.orgId && canRead(org, duplicateOf, scope)
           ? {
               _id: duplicateOf._id,
               number: duplicateOf.number,
@@ -767,8 +841,19 @@ export const get = query({
         : null,
       audit: auditRows.filter((a) => a.orgId === org.orgId),
       // What the UI may offer this viewer. The server re-checks every action regardless.
-      canAct: canAct(org, req),
+      canAct: canAct(org, req, scope),
       canManage: canManageMaintenance(org),
+      // The AM (or Pat) pulling a forwarded request back for more work.
+      canWithdraw: req.status === "forwarded_to_pat" && canAct(org, req, scope),
+      // Leaving a timeline note: whoever can act, or Pat, while the request is open.
+      canAddNote: OPEN.includes(req.status) && (canAct(org, req, scope) || canManageMaintenance(org)),
+      // Read-only because the unit's AM is out of office and named this viewer to cover.
+      isCovering: !canAct(org, req, scope) && isAssetManager(org) && canSeeUnit(scope, req.unitId),
+      // Whether each tenant text is approved in the published Sarah config (buttons disable on false).
+      tenantMessages: {
+        photoRequest: (await tenantMessage(ctx, org.orgId, "photoRequest")) !== null,
+        outOfScope: (await tenantMessage(ctx, org.orgId, "outOfScope")) !== null,
+      },
     };
   },
 });
@@ -844,16 +929,17 @@ export const counts = query({
     if (view !== "admin" && view !== "asset_manager") return zero;
 
     const cap = 500;
+    const scope = await scopeOf(ctx, org);
     const newRows = [
-      ...(await scopedByStatus(ctx, org, "new", cap)),
-      ...(await scopedByStatus(ctx, org, "under_review", cap)),
+      ...(await scopedByStatus(ctx, org, "new", cap, scope)),
+      ...(await scopedByStatus(ctx, org, "under_review", cap, scope)),
     ];
-    const waiting = await scopedByStatus(ctx, org, "more_info_needed", cap);
-    const forwarded = await scopedByStatus(ctx, org, "forwarded_to_pat", cap);
+    const waiting = await scopedByStatus(ctx, org, "more_info_needed", cap, scope);
+    const forwarded = await scopedByStatus(ctx, org, "forwarded_to_pat", cap, scope);
     const weekAgo = Date.now() - 7 * DAY_MS;
     let closed7d = 0;
     for (const s of CLOSED) {
-      closed7d += (await scopedByStatus(ctx, org, s, cap)).filter((r) => r.updatedAt >= weekAgo).length;
+      closed7d += (await scopedByStatus(ctx, org, s, cap, scope)).filter((r) => r.updatedAt >= weekAgo).length;
     }
     const open = [...newRows, ...waiting, ...forwarded];
     return {
@@ -893,6 +979,92 @@ async function move(
   });
 }
 
+/**
+ * Validate then forward in one transaction: two status moves, two audit rows, and the same
+ * "forwarded" notification forwardToPat sends. The caller has already checked access.
+ */
+async function validateAndForward(
+  ctx: MutationCtx,
+  org: OrgContext,
+  req: Doc<"maintenanceRequests">,
+  note: string | undefined,
+): Promise<void> {
+  await move(ctx, org, req, "under_review", "validated", note, {
+    validatedAt: Date.now(),
+    validatedBy: org.user._id,
+  });
+  const validated = await ctx.db.get(req._id);
+  if (!validated) return;
+  await move(ctx, org, validated, "forwarded_to_pat", "forwarded", note, { nextAction: note });
+
+  const unit = req.unitId ? await ctx.db.get(req.unitId) : null;
+  await scheduleNotify(ctx, {
+    orgId: req.orgId,
+    userIds: await staffExcept(ctx, req.orgId, org.user._id),
+    template: "request_forwarded",
+    data: {
+      number: req.number,
+      unit: unit?.unitNumber,
+      firstName: firstNameOf(req.callerName),
+      severity: req.severity,
+      path: `/maintenance/${req._id}`,
+    },
+  });
+}
+
+/** The number to text the tenant on: the one they asked to be reached on, else caller ID. */
+function tenantPhone(req: Doc<"maintenanceRequests">): string | null {
+  for (const raw of [req.callbackNumber, req.callerNumber]) {
+    const e164 = raw ? toE164(raw) : null;
+    if (e164) return e164;
+  }
+  return null;
+}
+
+/**
+ * Texts the tenant the approved out-of-scope wording. Never sends unless that wording is
+ * approved in the published Sarah config; the reason says why not, for the UI to relay.
+ */
+async function notifyTenantOutOfScope(
+  ctx: MutationCtx,
+  req: Doc<"maintenanceRequests">,
+): Promise<{ notified: boolean; reason?: string }> {
+  const wording = await tenantMessage(ctx, req.orgId, "outOfScope");
+  if (!wording) return { notified: false, reason: "Reason recorded. Tenant not notified (wording not approved)." };
+  const phone = tenantPhone(req);
+  if (!phone) return { notified: false, reason: "Reason recorded. Tenant not notified (no phone number on the request)." };
+  await scheduleNotify(ctx, {
+    orgId: req.orgId,
+    phones: [phone],
+    template: "tenant_message",
+    data: { text: wording },
+  });
+  await writeAudit(ctx, {
+    orgId: req.orgId,
+    entity: "request",
+    entityId: req._id,
+    action: "tenant_notified",
+    note: "Out-of-scope notice texted",
+  });
+  return { notified: true };
+}
+
+/**
+ * One click for "Approve & send to Pat" (PRD 6.3): the asset manager validates AND forwards.
+ * Same access as validate + forwardToPat (the unit's AM, or Pat powers), and only while the
+ * request is still with the asset manager.
+ */
+export const approveAndForward = mutation({
+  args: { requestId: v.id("maintenanceRequests"), note: v.optional(v.string()) },
+  handler: async (ctx, args) => {
+    const { org, req } = await actableRequest(ctx, args.requestId);
+    if (req.status !== "new" && req.status !== "under_review" && req.status !== "more_info_needed") {
+      throw new Error("This request isn't waiting on the asset manager.");
+    }
+    await validateAndForward(ctx, org, req, optText(args.note, 1000));
+  },
+});
+
 /** Marks the request validated (stays under review); only a validated request can be forwarded. */
 export const validate = mutation({
   args: { requestId: v.id("maintenanceRequests"), note: v.optional(v.string()) },
@@ -906,22 +1078,61 @@ export const validate = mutation({
 });
 
 export const requestInfo = mutation({
-  args: { requestId: v.id("maintenanceRequests"), note: v.string() },
-  handler: async (ctx, args) => {
+  args: {
+    requestId: v.id("maintenanceRequests"),
+    note: v.string(),
+    // Also text the tenant a link to upload photos/video (public /m/[token] page).
+    sendPhotoLink: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args): Promise<{ texted: boolean; reason?: string }> => {
     const { org, req } = await actableRequest(ctx, args.requestId);
     const note = requireText(args.note, "What you need from the tenant", 1000);
     await move(ctx, org, req, "more_info_needed", "info_requested", note, { nextAction: note });
+    if (!args.sendPhotoLink) return { texted: false };
+
+    // The text goes out only on Pat-approved wording and only to a number on the request.
+    const wording = await tenantMessage(ctx, req.orgId, "photoRequest");
+    if (!wording) return { texted: false, reason: "Photo request wording is not approved yet." };
+    const phone = tenantPhone(req);
+    if (!phone) return { texted: false, reason: "There is no phone number on this request." };
+
+    const { token } = await createPublicLink(ctx, {
+      orgId: req.orgId,
+      purpose: "maintenance_media",
+      targetId: req._id,
+    });
+    await ctx.db.patch(req._id, { mediaRequested: true });
+    await scheduleNotify(ctx, {
+      orgId: req.orgId,
+      phones: [phone],
+      template: "tenant_message",
+      data: { text: wording, path: `/m/${token}` },
+    });
+    await writeAudit(ctx, {
+      orgId: req.orgId,
+      entity: "request",
+      entityId: req._id,
+      action: "photo_link_sent",
+      actorUserId: org.user._id,
+    });
+    return { texted: true };
   },
 });
 
 export const closeOutOfScope = mutation({
-  args: { requestId: v.id("maintenanceRequests"), reason: v.string() },
-  handler: async (ctx, args) => {
+  args: {
+    requestId: v.id("maintenanceRequests"),
+    reason: v.string(),
+    // Text the tenant the approved out-of-scope wording. Skipped (and reported) if it is unapproved.
+    notifyTenant: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args): Promise<{ notified: boolean; reason?: string }> => {
     const { org, req } = await actableRequest(ctx, args.requestId);
     // Once forwarded, closing without a work order is Pat's call (closeNoWorkOrder).
     if (req.status === "forwarded_to_pat") throw new Error("This request is with the maintenance lead.");
     const reason = requireText(args.reason, "A reason", 500);
     await move(ctx, org, req, "closed_out_of_scope", "closed_out_of_scope", reason, { closeReason: reason });
+    return args.notifyTenant ? await notifyTenantOutOfScope(ctx, req) : { notified: false };
   },
 });
 
@@ -956,7 +1167,7 @@ export const markDuplicate = mutation({
     if (args.originalId === req._id) throw new Error("A request can't duplicate itself.");
     const original = await ctx.db.get(args.originalId);
     // Unreadable and nonexistent originals look the same.
-    if (!original || !canRead(org, original)) throw new Error("Original request not found.");
+    if (!original || !canRead(org, original, await scopeOf(ctx, org))) throw new Error("Original request not found.");
     await move(ctx, org, req, "closed_duplicate", "marked_duplicate", `Duplicate of MR-${original.number}`, {
       closeReason: `Duplicate of MR-${original.number}`,
       possibleDuplicateOf: original._id,
@@ -986,6 +1197,13 @@ export const fixUnit = mutation({
   handler: async (ctx, args) => {
     const { org, req } = await actableRequest(ctx, args.requestId);
     if (!OPEN.includes(req.status)) throw new Error("This request is closed.");
+    // Non-Pat callers (asset managers) may only re-point to a unit they MANAGE.
+    if (!canManageMaintenance(org)) {
+      const target = await ctx.db.get(args.unitId);
+      if (!target || target.orgId !== org.orgId || target.assetManagerUserId !== org.user._id) {
+        throw new Error("You don't have access to that.");
+      }
+    }
     await routeRequest(ctx, req._id, { actorUserId: org.user._id, unitId: args.unitId, notify: true });
   },
 });
@@ -1047,16 +1265,118 @@ export const sendBackToAM = mutation({
     const { org, req } = await patOnlyRequest(ctx, args.requestId);
     const note = requireText(args.note, "A note for the asset manager", 1000);
     await move(ctx, org, req, "under_review", "sent_back_to_am", note, { nextAction: note });
+
+    // Tell the unit's AM, and the covering AM if the owner is out. The note itself stays behind
+    // the login (it is on the request timeline); the text only says it came back.
+    const unit = req.unitId ? await ctx.db.get(req.unitId) : null;
+    await scheduleNotify(ctx, {
+      orgId: req.orgId,
+      userIds: await amRecipients(ctx, req, org.user._id),
+      template: "request_sent_back",
+      data: {
+        number: req.number,
+        unit: unit?.unitNumber,
+        severity: req.severity,
+        path: `/maintenance/${req._id}`,
+      },
+    });
+  },
+});
+
+/**
+ * The AM (or Pat) pulls a forwarded request back to under_review, e.g. a detail was missing.
+ * Only someone who can act on the request; covering AMs cannot. The maintenance lead(s) are told.
+ */
+export const withdrawFromPat = mutation({
+  args: { requestId: v.id("maintenanceRequests"), note: v.optional(v.string()) },
+  handler: async (ctx, args) => {
+    const { org, req } = await actableRequest(ctx, args.requestId);
+    if (req.status !== "forwarded_to_pat") throw new Error("This request isn't with the maintenance lead.");
+    const note = optText(args.note, 1000);
+    await move(ctx, org, req, "under_review", "withdrawn_from_pat", note, { nextAction: note });
+
+    const unit = req.unitId ? await ctx.db.get(req.unitId) : null;
+    await scheduleNotify(ctx, {
+      orgId: req.orgId,
+      userIds: await staffExcept(ctx, req.orgId, org.user._id),
+      template: "request_withdrawn",
+      data: {
+        number: req.number,
+        unit: unit?.unitNumber,
+        firstName: firstNameOf(req.callerName),
+        severity: req.severity,
+        path: `/maintenance/${req._id}`,
+      },
+    });
+  },
+});
+
+const MAX_NOTE = 2000;
+
+/**
+ * A free-text note on the request timeline (the audit rows the drawer already renders, action
+ * "note_added"). Allowed for whoever can act (the unit's AM) and for Pat. A forwarded request
+ * pings the other side: an AM's note tells Pat, Pat's note tells the AM (and covering AM).
+ */
+export const addNote = mutation({
+  args: { requestId: v.id("maintenanceRequests"), note: v.string() },
+  handler: async (ctx, args) => {
+    const org = await requireOrg(ctx);
+    const req = await ctx.db.get(args.requestId);
+    const scope = await scopeOf(ctx, org);
+    if (!req || !canRead(org, req, scope)) throw new Error("Request not found.");
+    const isPat = canManageMaintenance(org);
+    if (!isPat && !canAct(org, req, scope)) throw new Error("You don't have access to that.");
+    if (!OPEN.includes(req.status)) throw new Error("This request is closed.");
+    const note = requireText(args.note, "A note", MAX_NOTE);
+
+    await writeAudit(ctx, {
+      orgId: req.orgId,
+      entity: "request",
+      entityId: req._id,
+      action: "note_added",
+      actorUserId: org.user._id,
+      note,
+    });
+    await ctx.db.patch(req._id, { updatedAt: Date.now() });
+
+    const unit = req.unitId ? await ctx.db.get(req.unitId) : null;
+    const data = {
+      number: req.number,
+      unit: unit?.unitNumber,
+      severity: req.severity,
+      path: `/maintenance/${req._id}`,
+    };
+    if (isPat) {
+      await scheduleNotify(ctx, {
+        orgId: req.orgId,
+        userIds: await amRecipients(ctx, req, org.user._id),
+        template: "request_note",
+        data,
+      });
+    } else if (req.status === "forwarded_to_pat") {
+      await scheduleNotify(ctx, {
+        orgId: req.orgId,
+        userIds: await staffExcept(ctx, req.orgId, org.user._id),
+        template: "request_note",
+        data,
+      });
+    }
   },
 });
 
 /** Pat closes a request that needs no work order. */
 export const closeNoWorkOrder = mutation({
-  args: { requestId: v.id("maintenanceRequests"), reason: v.string() },
-  handler: async (ctx, args) => {
+  args: {
+    requestId: v.id("maintenanceRequests"),
+    reason: v.string(),
+    notifyTenant: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args): Promise<{ notified: boolean; reason?: string }> => {
     const { org, req } = await patOnlyRequest(ctx, args.requestId);
     const reason = requireText(args.reason, "A reason", 500);
     await move(ctx, org, req, "closed_out_of_scope", "closed_no_work_order", reason, { closeReason: reason });
+    return args.notifyTenant ? await notifyTenantOutOfScope(ctx, req) : { notified: false };
   },
 });
 
@@ -1128,7 +1448,7 @@ export const markViewed = mutation({
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
     const req = await ctx.db.get(args.requestId);
-    if (!req || !canRead(org, req)) return;
+    if (!req || !canRead(org, req, await scopeOf(ctx, org))) return;
     if (req.assignedAssetManagerUserId === org.user._id && req.firstViewedAt === undefined) {
       await ctx.db.patch(req._id, { firstViewedAt: Date.now() });
     }
@@ -1148,6 +1468,33 @@ export async function markWorkOrderCreated(
 }
 
 // --- Staff media ------------------------------------------------------------------
+
+const FRESH_UPLOAD_MS = 60 * 60 * 1000;
+
+/**
+ * Guard for every "attach an uploaded file" path. Returns an error string when the storage id is
+ * already claimed by any table (media, work-order files, task attachments) or was not uploaded in
+ * the last hour, else null. Callers must NOT delete the file when this returns an error: it may
+ * belong to someone else. (Convex has no per-uploader record, so freshness + unclaimed is the
+ * strongest check available without a schema change.)
+ */
+export async function checkStorageUsable(
+  ctx: QueryCtx,
+  orgId: string,
+  storageId: Id<"_storage">,
+): Promise<string | null> {
+  const claimed =
+    (await ctx.db.query("maintenanceMedia").withIndex("by_storage", (q) => q.eq("storageId", storageId)).first()) ||
+    (await ctx.db.query("workOrderFiles").withIndex("by_storage", (q) => q.eq("storageId", storageId)).first()) ||
+    (await ctx.db.query("taskAttachments").withIndex("by_org", (q) => q.eq("orgId", orgId)).collect()).find(
+      (a) => a.storageId === storageId,
+    );
+  if (claimed) return "That file is already attached.";
+  const sys = await ctx.db.system.get(storageId);
+  if (!sys) return "That upload wasn't found.";
+  if (Date.now() - sys._creationTime > FRESH_UPLOAD_MS) return "That upload has expired. Upload it again.";
+  return null;
+}
 
 /** Short-lived URL a staff member POSTs a photo/video to. Same permission as acting on the request. */
 export const generateMediaUploadUrl = mutation({
@@ -1171,6 +1518,9 @@ export const attachMedia = mutation({
     args,
   ): Promise<{ ok: true; mediaId: Id<"maintenanceMedia"> } | { ok: false; error: string }> => {
     const { org, req } = await actableRequest(ctx, args.requestId);
+    // Claimed or not freshly uploaded: refuse WITHOUT deleting (it may be someone else's file).
+    const usable = await checkStorageUsable(ctx, req.orgId, args.storageId);
+    if (usable) return { ok: false, error: usable };
     const reject = async (error: string) => {
       await ctx.storage.delete(args.storageId);
       return { ok: false as const, error };
@@ -1218,6 +1568,138 @@ export const attachMedia = mutation({
   },
 });
 
+// --- Tenant photo upload (public, token-gated) --------------------------------------
+//
+// The no-login page a tenant reaches from the text message. No auth: the link token IS the
+// credential, scoped to one request. Nothing about the request beyond the unit label is
+// returned, and every failure reads the same ("expired") so a guessed token learns nothing.
+
+/** Is this link still good, and which unit is it for? Read-only; spends nothing. */
+export const publicLinkInfo = query({
+  args: { token: v.string() },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{ valid: false } | { valid: true; unitLabel: string | null; remaining: number }> => {
+    const link = await peekPublicLink(ctx, args.token, "maintenance_media");
+    if (!link) return { valid: false };
+    const id = ctx.db.normalizeId("maintenanceRequests", link.targetId);
+    const req = id ? await ctx.db.get(id) : null;
+    if (!req || req.orgId !== link.orgId || !OPEN.includes(req.status)) return { valid: false };
+    const unit = req.unitId ? await ctx.db.get(req.unitId) : null;
+    return { valid: true, unitLabel: unit?.unitNumber ?? null, remaining: link.maxUses - link.useCount };
+  },
+});
+
+/** Like peekPublicLink but tolerates a link whose last use was spent minting this very upload. */
+async function peekPublicLinkAllowSpent(ctx: QueryCtx, token: string) {
+  const trimmed = token.trim();
+  if (!trimmed || trimmed.length > 200) return null;
+  const tokenHash = await sha256(trimmed);
+  const link = await ctx.db
+    .query("publicLinks")
+    .withIndex("by_token_hash", (q) => q.eq("tokenHash", tokenHash))
+    .unique();
+  if (!link || link.purpose !== "maintenance_media" || link.expiresAt <= Date.now()) return null;
+  return link;
+}
+
+/** Short-lived storage URL for one tenant upload. Does not spend a link use; publicAttach does. */
+export const publicUploadUrl = mutation({
+  args: { token: v.string() },
+  handler: async (ctx, args): Promise<{ ok: true; url: string } | { ok: false }> => {
+    const link = await peekPublicLink(ctx, args.token, "maintenance_media");
+    if (!link) return { ok: false };
+    const id = ctx.db.normalizeId("maintenanceRequests", link.targetId);
+    const req = id ? await ctx.db.get(id) : null;
+    if (!req || req.orgId !== link.orgId || !OPEN.includes(req.status)) return { ok: false };
+    // Minting spends one link use (publicAttach no longer spends a second), so a link can mint at
+    // most `maxUses` upload URLs: no unbounded storage-slot minting from a leaked token.
+    const useCount = link.useCount + 1;
+    await ctx.db.patch(link._id, { useCount, usedAt: useCount >= link.maxUses ? Date.now() : link.usedAt });
+    return { ok: true, url: await ctx.storage.generateUploadUrl() };
+  },
+});
+
+/**
+ * Records a tenant upload against the link's request, with the same content-type and size checks
+ * as attachMedia. Spends one link use. A bad token never deletes anything (the storage id is
+ * client-supplied, so it must not be a way to delete other people's files); a good token with a
+ * rejected file deletes only a file nothing else has claimed.
+ */
+export const publicAttach = mutation({
+  args: { token: v.string(), storageId: v.id("_storage") },
+  handler: async (ctx, args): Promise<{ ok: true } | { ok: false; error: string }> => {
+    // The use was already spent when the upload URL was minted (publicUploadUrl), and an
+    // exhausted link is still allowed to finish attaching the file it just uploaded.
+    const link = await peekPublicLinkAllowSpent(ctx, args.token);
+    if (!link) return { ok: false, error: "This link has expired." };
+    const id = ctx.db.normalizeId("maintenanceRequests", link.targetId);
+    const req = id ? await ctx.db.get(id) : null;
+    if (!req || req.orgId !== link.orgId || !OPEN.includes(req.status)) {
+      return { ok: false, error: "This link has expired." };
+    }
+
+    const unusable = await checkStorageUsable(ctx, req.orgId, args.storageId);
+    if (unusable) return { ok: false, error: unusable };
+
+    const reject = async (error: string) => {
+      await ctx.storage.delete(args.storageId);
+      return { ok: false as const, error };
+    };
+    const meta = await ctx.storage.getMetadata(args.storageId);
+    if (!meta) return { ok: false, error: "That upload wasn't found." };
+    const type = meta.contentType ?? "";
+    const isImage = type.startsWith("image/") && type !== "image/svg+xml"; // SVG can carry script
+    const isVideo = type.startsWith("video/");
+    if (!isImage && !isVideo) return await reject("Only photos and videos can be sent.");
+    if (meta.size > (isImage ? IMAGE_MAX_BYTES : VIDEO_MAX_BYTES)) {
+      return await reject(isImage ? "Photos can be at most 10 MB." : "Videos can be at most 50 MB.");
+    }
+    const existing = await ctx.db
+      .query("maintenanceMedia")
+      .withIndex("by_request", (q) => q.eq("requestId", req._id))
+      .take(MAX_MEDIA_PER_REQUEST);
+    if (existing.length >= MAX_MEDIA_PER_REQUEST) return await reject("This request has the maximum number of files.");
+
+    const now = Date.now();
+    await ctx.db.insert("maintenanceMedia", {
+      orgId: req.orgId,
+      requestId: req._id,
+      storageId: args.storageId,
+      kind: isImage ? "photo" : "video",
+      uploadedBy: "tenant",
+      createdAt: now,
+    });
+    await writeAudit(ctx, {
+      orgId: req.orgId,
+      entity: "request",
+      entityId: req._id,
+      action: "media_added",
+      to: isImage ? "photo" : "video",
+      note: "Uploaded by the tenant",
+    });
+
+    // One text per burst of uploads, not one per photo.
+    const recentTenantUpload = existing.some((m) => m.uploadedBy === "tenant" && m.createdAt > now - 15 * 60 * 1000);
+    if (!recentTenantUpload) {
+      const unit = req.unitId ? await ctx.db.get(req.unitId) : null;
+      await scheduleNotify(ctx, {
+        orgId: req.orgId,
+        userIds: req.assignedAssetManagerUserId ? [req.assignedAssetManagerUserId] : await staffExcept(ctx, req.orgId),
+        template: "request_media",
+        data: {
+          number: req.number,
+          unit: unit?.unitNumber,
+          firstName: firstNameOf(req.callerName),
+          path: `/maintenance/${req._id}`,
+        },
+      });
+    }
+    return { ok: true };
+  },
+});
+
 // --- Dashboard ----------------------------------------------------------------------
 
 /**
@@ -1243,9 +1725,10 @@ export async function maintenanceOverview(ctx: QueryCtx, org: OrgContext) {
   };
 
   // Requests
+  const scope = await scopeOf(ctx, org);
   let open: Doc<"maintenanceRequests">[] = [];
   if (view === "admin" || view === "asset_manager") {
-    for (const s of OPEN) open.push(...(await scopedByStatus(ctx, org, s, 500)));
+    for (const s of OPEN) open.push(...(await scopedByStatus(ctx, org, s, 500, scope)));
   }
   open = open.sort((a, b) => b.createdAt - a.createdAt);
 
@@ -1269,15 +1752,11 @@ export async function maintenanceOverview(ctx: QueryCtx, org: OrgContext) {
       );
     }
   } else if (view === "asset_manager") {
-    const mine = await ctx.db
-      .query("units")
-      .withIndex("by_asset_manager", (q) => q.eq("assetManagerUserId", org.user._id))
-      .collect();
-    for (const unit of mine) {
+    for (const unitId of [...scope.managed, ...scope.covering]) {
       wos.push(
         ...(await ctx.db
           .query("workOrders")
-          .withIndex("by_unit", (q) => q.eq("unitId", unit._id))
+          .withIndex("by_unit", (q) => q.eq("unitId", unitId))
           .take(100)),
       );
     }

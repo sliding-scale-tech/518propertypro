@@ -74,6 +74,8 @@ conversation_id and:
   urgent — ${SEVERITY_RUBRIC[1].detail}
   routine — ${SEVERITY_RUBRIC[2].detail} ${SEVERITY_RUBRIC[3].detail}
   informational — ${SEVERITY_RUBRIC[4].detail}
+- also severity_score: a 1-10 score using those severity levels (emergency 9-10, urgent 7-8,
+  routine 3-6, informational 1-2)
 - optionally severity_reason, caller_name, spoken_address, spoken_unit, first_noticed, pets,
   preferred_access_times, callback_phone and answers.
 Score the issue, never the caller. A calm person with no heat is urgent or worse; someone

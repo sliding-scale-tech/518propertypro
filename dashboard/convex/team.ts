@@ -84,6 +84,7 @@ export const overview = query({
     // Phone numbers are PII: only the people who dispatch work (and the owner of the number)
     // get them. Everyone else on the roster sees the member, not how to reach them.
     const canSeePhones = hasJobRole(org, "executive", "maintenance_lead");
+    const fullRoster = viewFor(org.isAdmin, org.jobRoles) === "admin";
 
     const members = await Promise.all(
       memberships.map(async (m) => {
@@ -101,11 +102,14 @@ export const overview = query({
         ]);
         const name = [user?.firstName, user?.lastName].filter(Boolean).join(" ").trim();
         const takingTours = hours?.availableForTours ?? true;
+        // Non-admin views see colleagues' name, role, skill and out-of-office flag only; email,
+        // unit counts and cover arrangements are admin-view (or self) data.
+        const full = fullRoster || m.userId === org.user._id;
         return {
           membershipId: m._id,
           userId: m.userId,
-          name: name || user?.email || "Unknown",
-          email: user?.email ?? "",
+          name: name || (full ? user?.email : undefined) || "Unknown",
+          email: full ? (user?.email ?? "") : "",
           imageUrl: user?.imageUrl ?? null,
           role: m.role,
           jobRoles: m.jobRoles ?? [],
@@ -113,7 +117,9 @@ export const overview = query({
           phone: canSeePhones || m.userId === org.user._id ? (m.phone ?? null) : null,
           notifyBy: m.notifyBy ?? [],
           unavailableUntil: m.unavailableUntil ?? null,
-          unitsOwned,
+          coveringUserId: full ? (m.coveringUserId ?? null) : null,
+          skill: m.skill ?? null,
+          unitsOwned: full ? unitsOwned : 0,
           isSelf: m.userId === org.user._id,
           joinedAt: m.createdAt,
           takingTours,
@@ -320,6 +326,7 @@ export const setContact = mutation({
     userId: v.id("users"),
     phone: v.optional(v.string()), // "" clears it
     notifyBy: v.optional(v.array(notifyChannelValidator)),
+    skill: v.optional(v.string()), // "" clears it; shown as the subtitle on Team and the dashboard
   },
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
@@ -333,12 +340,17 @@ export const setContact = mutation({
     if (!membership || membership.orgId !== org.orgId) throw new Error("Member not found.");
 
     // Fields are picked one by one — never spread args into the row.
-    const patch: { phone?: string; notifyBy?: Array<"sms" | "email" | "push"> } = {};
+    const patch: { phone?: string; notifyBy?: Array<"sms" | "email" | "push">; skill?: string } = {};
     if (args.phone !== undefined) {
       patch.phone = args.phone.trim() === "" ? undefined : assertE164(args.phone);
     }
     if (args.notifyBy !== undefined) patch.notifyBy = [...new Set(args.notifyBy)];
-    if (!("phone" in patch) && !("notifyBy" in patch)) return;
+    if (args.skill !== undefined) {
+      const skill = args.skill.trim();
+      if (skill.length > 80) throw new Error("Skill is too long.");
+      patch.skill = skill === "" ? undefined : skill;
+    }
+    if (!("phone" in patch) && !("notifyBy" in patch) && !("skill" in patch)) return;
 
     await ctx.db.patch(membership._id, patch);
     await writeAudit(ctx, {
@@ -350,6 +362,7 @@ export const setContact = mutation({
       note: [
         args.phone !== undefined ? "phone" : null,
         args.notifyBy !== undefined ? `notifyBy=${patch.notifyBy?.join(",")}` : null,
+        args.skill !== undefined ? "skill" : null,
       ]
         .filter(Boolean)
         .join("; "),
@@ -357,9 +370,13 @@ export const setContact = mutation({
   },
 });
 
-/** Out-of-office flag that sends asset-manager work to the fallback. `until` omitted clears it. */
+/**
+ * Out-of-office flag that sends asset-manager work to the fallback. `until` omitted clears it
+ * (and the covering AM with it). `coveringUserId` names the asset manager who gets read-only
+ * access to this person's units while they are out (amScope.ts).
+ */
 export const setUnavailable = mutation({
-  args: { userId: v.id("users"), until: v.optional(v.number()) },
+  args: { userId: v.id("users"), until: v.optional(v.number()), coveringUserId: v.optional(v.id("users")) },
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
     if (args.userId !== org.user._id && !hasJobRole(org, "executive", "maintenance_lead")) {
@@ -381,7 +398,20 @@ export const setUnavailable = mutation({
       if (args.until > now + MAX_UNAVAILABLE_MS) throw new Error("That is too far ahead.");
     }
 
-    await ctx.db.patch(membership._id, { unavailableUntil: args.until });
+    let coveringUserId: Id<"users"> | undefined;
+    if (args.until !== undefined && args.coveringUserId !== undefined) {
+      if (args.coveringUserId === args.userId) throw new Error("Pick someone else to cover.");
+      const cover = await ctx.db
+        .query("memberships")
+        .withIndex("by_user", (q) => q.eq("userId", args.coveringUserId!))
+        .first();
+      if (!cover || cover.orgId !== org.orgId || !(cover.jobRoles ?? []).includes("asset_manager")) {
+        throw new Error("Pick an asset manager on this team to cover.");
+      }
+      coveringUserId = cover.userId;
+    }
+
+    await ctx.db.patch(membership._id, { unavailableUntil: args.until, coveringUserId });
     await writeAudit(ctx, {
       orgId: org.orgId,
       entity: "membership",
@@ -390,6 +420,7 @@ export const setUnavailable = mutation({
       actorUserId: org.user._id,
       from: membership.unavailableUntil ? String(membership.unavailableUntil) : undefined,
       to: args.until ? String(args.until) : undefined,
+      note: coveringUserId ? `covering=${coveringUserId}` : undefined,
     });
   },
 });

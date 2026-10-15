@@ -1,5 +1,6 @@
 "use client";
 
+import { Select } from "@/components/ui";
 import { useAction, useMutation, useQuery } from "convex/react";
 import { useEffect, useState } from "react";
 import { api } from "@/convex/_generated/api";
@@ -186,13 +187,13 @@ ${RESIDENT_TRIAGE_BLOCK}`)}
 
         <Field label="Voice">
           {voices.length > 0 ? (
-            <select value={voiceId} onChange={(e) => setVoiceId(e.target.value)} className={inputClass}>
+            <Select value={voiceId} onChange={(e) => setVoiceId(e.target.value)}>
               {voices.map((v) => (
                 <option key={v.voiceId} value={v.voiceId}>
                   {v.name}
                 </option>
               ))}
-            </select>
+            </Select>
           ) : (
             <input
               value={voiceId}

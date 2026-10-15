@@ -1,7 +1,7 @@
 "use client";
 
 import { useAction, useMutation, useQuery } from "convex/react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence } from "framer-motion";
 import {
   AlertTriangle,
   Ban,
@@ -16,7 +16,6 @@ import {
   Sun,
   Trash2,
   User,
-  X,
 } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -27,6 +26,7 @@ import * as sched from "@/convex/tourSchedule";
 import { TourHoursEditor, type TourHours } from "@/components/tour-hours-editor";
 import { useToast } from "@/components/toast";
 import { RequireView } from "@/components/require-view";
+import { DatePicker, Modal, PageHeader, Select } from "@/components/ui";
 
 // What googleCalendar.handleOAuthCallback sends back in `?google=` after the consent redirect.
 const OAUTH_RESULTS: Record<string, { message: string; variant: "success" | "error" | "info" }> = {
@@ -178,13 +178,17 @@ function CalendarPageInner() {
   return (
     <div className="space-y-6 pb-10">
       <header>
-        <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Calendar</h1>
-        <p className="mt-1 max-w-3xl text-sm leading-5 text-muted-foreground">
-          Google Calendar events next to the tours Sarah booked. Only you see your own events&apos; details
-          {settings?.isAdmin
-            ? " — when you open a teammate's calendar, their events show only as busy."
-            : " — team admins see them only as busy."}
-        </p>
+        <PageHeader
+          title="Calendar"
+          subtitle={
+            <>
+              Google Calendar events next to the tours Sarah booked. Only you see your own events&apos; details
+              {settings?.isAdmin
+                ? " — when you open a teammate's calendar, their events show only as busy."
+                : " — team admins see them only as busy."}
+            </>
+          }
+        />
         {viewingSelf && selfConnected ? (
           <p className="mt-2 text-xs text-muted-foreground">
             Connected to Google Calendar as {googleStatus.googleEmail}.{" "}
@@ -200,11 +204,11 @@ function CalendarPageInner() {
       </header>
 
       {viewingSelf && googleStatus === undefined ? (
-        <p className="rounded-2xl border border-border bg-card p-10 text-center text-sm text-muted-foreground shadow-sm">
+        <p className="rounded-[20px] border border-border bg-card p-10 text-center text-sm text-muted-foreground ">
           Loading…
         </p>
       ) : viewingSelf && googleStatus === null ? (
-        <p className="rounded-2xl border border-border bg-card p-10 text-center text-sm text-muted-foreground shadow-sm">
+        <p className="rounded-[20px] border border-border bg-card p-10 text-center text-sm text-muted-foreground ">
           Sign in again to connect a calendar.
         </p>
       ) : viewingSelf && !selfConnected ? (
@@ -256,7 +260,7 @@ function CalendarPageInner() {
                   onClick={() => setMode("week")}
                   aria-pressed={mode === "week"}
                   className={`rounded-full px-4 py-1.5 text-sm font-medium transition-colors ${
-                    mode === "week" ? "bg-white text-primary shadow-sm" : "text-muted-foreground hover:text-foreground"
+                    mode === "week" ? "bg-white text-primary " : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
                   Week
@@ -265,7 +269,7 @@ function CalendarPageInner() {
                   onClick={() => setMode("month")}
                   aria-pressed={mode === "month"}
                   className={`rounded-full px-4 py-1.5 text-sm font-medium transition-colors ${
-                    mode === "month" ? "bg-white text-primary shadow-sm" : "text-muted-foreground hover:text-foreground"
+                    mode === "month" ? "bg-white text-primary " : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
                   Month
@@ -273,10 +277,9 @@ function CalendarPageInner() {
               </div>
 
               {settings?.isAdmin ? (
-                <select
+                <Select
                   value={userId ?? ""}
                   onChange={(e) => setUserId(e.target.value ? (e.target.value as Id<"users">) : null)}
-                  className="h-10 rounded-lg border border-input bg-card px-3 text-sm outline-none focus:ring-2 focus:ring-ring/20"
                   aria-label="Whose calendar"
                 >
                   {settings.team.map((m) => (
@@ -284,7 +287,7 @@ function CalendarPageInner() {
                       {m.isSelf ? `${m.name} (you)` : m.name}
                     </option>
                   ))}
-                </select>
+                </Select>
               ) : null}
               <button
                 onClick={() => setRefreshes((n) => n + 1)}
@@ -316,13 +319,13 @@ function CalendarPageInner() {
               <Legend isSelf={view.isSelf} showTourHours={mode === "week"} />
             </>
           ) : (
-            <p className="rounded-2xl border border-border bg-card p-10 text-center text-sm text-muted-foreground shadow-sm">
+            <p className="rounded-[20px] border border-border bg-card p-10 text-center text-sm text-muted-foreground ">
               Loading the calendar…
             </p>
           )}
 
           {settings && viewingSelf ? (
-            <div className="flex flex-col gap-4 rounded-2xl border border-border bg-card p-5 shadow-sm sm:flex-row sm:items-center">
+            <div className="flex flex-col gap-4 rounded-[20px] border border-border bg-card p-5  sm:flex-row sm:items-center">
               <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
                 <Sun className="h-5 w-5" />
               </span>
@@ -410,7 +413,7 @@ function ConnectCalendarCard({ needsReconnect }: { needsReconnect: boolean }) {
   };
 
   return (
-    <div className="flex flex-col items-center gap-4 rounded-2xl border border-border bg-card px-6 py-16 text-center shadow-sm">
+    <div className="flex flex-col items-center gap-4 rounded-[20px] border border-border bg-card px-6 py-16 text-center ">
       <span className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/10 text-primary">
         <CalendarDays className="h-7 w-7" />
       </span>
@@ -454,43 +457,11 @@ function HoursModal({
   }, [onClose]);
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-[2px]"
-      onClick={onClose}
-    >
-      <motion.div
-        initial={{ opacity: 0, scale: 0.97, y: 8 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.97, y: 8 }}
-        onClick={(event) => event.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="tour-hours-title"
-        className="flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-2xl"
-      >
-        <div className="flex items-start justify-between gap-4 border-b border-border px-6 py-5">
-          <div>
-            <h2 id="tour-hours-title" className="text-lg font-bold">
-              {firstTime ? "When can you give tours?" : "Your tour hours"}
-            </h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {firstTime
-                ? "Sarah only books tours for you inside these hours, and never over anything busy in your calendar. You can change them any time from this page."
-                : "Sarah only books tours for you inside these hours, in the team's time zone."}
-            </p>
-          </div>
-          <button onClick={onClose} aria-label="Close" className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent">
-            <X className="h-5 w-5" />
-          </button>
-        </div>
+    <Modal title={firstTime ? "When can you give tours?" : "Your tour hours"} onClose={onClose} bare>
         <div className="overflow-y-auto px-6 py-5">
           <TourHoursEditor saved={saved} confirmUnchanged={firstTime} onSaved={onSaved} />
         </div>
-      </motion.div>
-    </motion.div>
+      </Modal>
   );
 }
 
@@ -553,49 +524,13 @@ function DaysOffModal({
   const todayForInput = new Date().toISOString().slice(0, 10);
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-[2px]"
-      onClick={onClose}
-    >
-      <motion.div
-        initial={{ opacity: 0, scale: 0.97, y: 8 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.97, y: 8 }}
-        onClick={(event) => event.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="days-off-title"
-        className="flex max-h-[90vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-2xl"
-      >
-        <div className="flex items-start justify-between gap-4 border-b border-border px-6 py-5">
-          <div>
-            <h2 id="days-off-title" className="text-lg font-bold">
-              Days off
-            </h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Turn off a specific date — a holiday, an appointment — on top of your weekly hours. You can only
-              turn off a day with no tour booked on it.
-            </p>
-          </div>
-          <button onClick={onClose} aria-label="Close" className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent">
-            <X className="h-5 w-5" />
-          </button>
-        </div>
+    <Modal title={"Days off"} onClose={onClose} bare>
 
         <div className="overflow-y-auto px-6 py-5">
           <div className="flex items-end gap-2">
             <label className="flex-1">
               <span className="mb-1.5 block text-sm font-medium">Turn off a day</span>
-              <input
-                type="date"
-                value={date}
-                min={todayForInput}
-                onChange={(e) => setDate(e.target.value)}
-                className="h-10 w-full rounded-lg border border-input bg-card px-3 text-sm outline-none focus:ring-2 focus:ring-ring/20"
-              />
+              <DatePicker value={date} min={todayForInput} onChange={setDate} className="h-10" />
             </label>
             <button
               onClick={() => void handleAdd()}
@@ -630,8 +565,7 @@ function DaysOffModal({
             )}
           </div>
         </div>
-      </motion.div>
-    </motion.div>
+      </Modal>
   );
 }
 
@@ -770,7 +704,7 @@ function WeekGrid({ view, onOpenTour }: { view: WeekView; onOpenTour: (id: Id<"t
   const hourLabel = new Intl.DateTimeFormat("en-US", { hour: "numeric", timeZone: "UTC" });
 
   return (
-    <div className="overflow-x-auto rounded-2xl border border-border bg-card shadow-sm">
+    <div className="overflow-x-auto rounded-[20px] border border-border bg-card ">
       <div className="min-w-[760px]">
         <div className="grid grid-cols-[56px_repeat(7,minmax(0,1fr))] border-b border-border">
           <div />
@@ -936,7 +870,7 @@ function MonthGrid({
   }, [view, days]);
 
   return (
-    <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+    <div className="overflow-hidden rounded-[20px] border border-border bg-card ">
       <div className="grid grid-cols-7 border-b border-border bg-muted/30">
         {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((label) => (
           <div key={label} className="px-2 py-2 text-center text-xs font-medium text-muted-foreground">
@@ -1070,31 +1004,7 @@ function TourModal({
   };
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-[2px]"
-      onClick={onClose}
-    >
-      <motion.div
-        initial={{ opacity: 0, scale: 0.97, y: 8 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.97, y: 8 }}
-        onClick={(event) => event.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="tour-details-title"
-        className="flex max-h-[90vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-2xl"
-      >
-        <div className="flex items-start justify-between gap-4 border-b border-border px-6 py-5">
-          <h2 id="tour-details-title" className="text-lg font-bold">
-            Tour details
-          </h2>
-          <button onClick={onClose} aria-label="Close" className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent">
-            <X className="h-5 w-5" />
-          </button>
-        </div>
+    <Modal title={"Tour details"} onClose={onClose} bare>
 
         <div className="overflow-y-auto px-6 py-5">
           {details === undefined ? (
@@ -1205,8 +1115,7 @@ function TourModal({
             )}
           </div>
         ) : null}
-      </motion.div>
-    </motion.div>
+      </Modal>
   );
 }
 

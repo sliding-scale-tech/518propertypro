@@ -5,7 +5,6 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   AlignLeft,
   Bold,
-  Calendar,
   ChevronDown,
   Italic,
   Link as LinkIcon,
@@ -27,6 +26,7 @@ import {
   useMembers,
   type Member,
 } from "@/components/tasks/shared";
+import { Btn, DatePicker, Modal, PageHeader, Seg } from "@/components/ui";
 
 type Status = "todo" | "in_progress" | "completed";
 type Priority = "low" | "medium" | "high";
@@ -126,6 +126,7 @@ export default function TasksPage() {
   const [mine, setMine] = useState(false);
   const tasks = useQuery(api.tasks.list, mine ? { mine: true } : {}) as Task[] | undefined;
   const members = useMembers();
+  const isAdmin = useQuery(api.team.myAccess)?.view === "admin";
   const toggleComplete = useMutation(api.tasks.toggleComplete);
   const toast = useToast();
   const [modalOpen, setModalOpen] = useState(false);
@@ -139,37 +140,26 @@ export default function TasksPage() {
 
   return (
     <div className="space-y-8 pb-10">
-      <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Tasks</h1>
-          <p className="mt-1 max-w-2xl text-sm leading-5 text-muted-foreground">
-            Create and manage tasks for your team. Keep track of what needs to be done.
-          </p>
-        </div>
-        <button
-          onClick={() => setModalOpen(true)}
-          className="flex h-11 shrink-0 items-center justify-center gap-2 rounded-lg bg-primary px-5 text-sm font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
-        >
-          <Plus className="h-4 w-4" />
-          New task
-        </button>
-      </header>
+      <PageHeader
+        title="Tasks"
+        subtitle="Create and manage tasks for your team. Keep track of what needs to be done."
+        actions={
+          <Btn variant="pri" onClick={() => setModalOpen(true)}>
+            <Plus className="h-4 w-4" />
+            New task
+          </Btn>
+        }
+      />
 
-      <div role="group" aria-label="Task scope" className="inline-flex rounded-lg border border-input p-0.5 text-sm">
-        {([false, true] as const).map((value) => (
-          <button
-            key={String(value)}
-            type="button"
-            aria-pressed={mine === value}
-            onClick={() => setMine(value)}
-            className={`rounded-md px-3 py-1.5 font-medium ${
-              mine === value ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"
-            }`}
-          >
-            {value ? "My tasks" : "All tasks"}
-          </button>
-        ))}
-      </div>
+      <Seg
+        label="Task scope"
+        value={mine ? "mine" : "all"}
+        onChange={(v) => setMine(v === "mine")}
+        options={[
+          { value: "all", label: "All tasks" },
+          { value: "mine", label: "My tasks" },
+        ]}
+      />
 
       {tasks?.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-border bg-card py-16 text-center text-sm text-muted-foreground">
@@ -197,7 +187,7 @@ export default function TasksPage() {
 
         {selectedTask ? (
           <div className="w-full shrink-0 xl:sticky xl:top-6 xl:w-[420px]">
-            <TaskDetailPanel key={selectedTask._id} task={selectedTask} members={members} onClose={() => setSelectedId(null)} />
+            <TaskDetailPanel key={selectedTask._id} task={selectedTask} members={members} isAdmin={isAdmin} onClose={() => setSelectedId(null)} />
           </div>
         ) : null}
       </div>
@@ -206,6 +196,7 @@ export default function TasksPage() {
         {modalOpen ? (
           <NewTaskModal
             members={members}
+            isAdmin={isAdmin}
             onClose={() => setModalOpen(false)}
             onCreated={() => {
               toast("Task added");
@@ -238,7 +229,7 @@ function TaskGroup({
   const [collapsed, setCollapsed] = useState(false);
 
   return (
-    <div className="w-full overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+    <div className="w-full overflow-hidden rounded-[20px] border border-border bg-card ">
       <button
         type="button"
         onClick={() => setCollapsed((c) => !c)}
@@ -367,13 +358,21 @@ function toDateInputValue(ms?: number) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+/** "YYYY-MM-DD" -> local-midnight ms (matches toDateInputValue, which reads local fields). */
+function dateInputToMs(value: string) {
+  const [y, m, d] = value.split("-").map(Number);
+  return new Date(y, m - 1, d).getTime();
+}
+
 function TaskDetailPanel({
   task,
   members,
+  isAdmin,
   onClose,
 }: {
   task: Task;
   members: Member[];
+  isAdmin: boolean;
   onClose: () => void;
 }) {
   const update = useMutation(api.tasks.update);
@@ -442,7 +441,7 @@ function TaskDetailPanel({
       initial={{ opacity: 0, x: 12 }}
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0, x: 12 }}
-      className="flex max-h-[calc(100vh-8rem)] flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-sm"
+      className="flex max-h-[calc(100vh-8rem)] flex-col overflow-hidden rounded-[20px] border border-border bg-card "
     >
       <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
         <div className="flex items-start gap-3">
@@ -507,32 +506,37 @@ function TaskDetailPanel({
 
 
             <span className="text-muted-foreground">Assignee</span>
-            <Dropdown
-              value={task.assigneeUserId ?? UNASSIGNED}
-              options={assigneeOptions(members)}
-              onChange={(value) =>
-                void patch(
-                  value === UNASSIGNED
-                    ? { taskId: task._id, clearAssignee: true }
-                    : { taskId: task._id, assigneeUserId: value as Id<"users"> },
-                )
-              }
-              buttonClassName="h-9"
-            />
+            {isAdmin ? (
+              <Dropdown
+                value={task.assigneeUserId ?? UNASSIGNED}
+                options={assigneeOptions(members)}
+                onChange={(value) =>
+                  void patch(
+                    value === UNASSIGNED
+                      ? { taskId: task._id, clearAssignee: true }
+                      : { taskId: task._id, assigneeUserId: value as Id<"users"> },
+                  )
+                }
+                buttonClassName="h-9"
+              />
+            ) : (
+              <span className="text-foreground">Assigned to you</span>
+            )}
 
             <span className="text-muted-foreground">Due date</span>
             <div className="flex items-center gap-1.5">
-              <div className="relative flex-1">
-                <Calendar className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                <input
-                  type="date"
+              <div className="flex-1">
+                <DatePicker
+                  aria-label="Due date"
                   value={toDateInputValue(task.dueDate)}
-                  onChange={(event) => {
-                    const value = event.target.value;
-                    if (!value) return;
-                    void patch({ taskId: task._id, dueDate: new Date(value).getTime() });
+                  onChange={(value) => {
+                    if (!value) {
+                      void patch({ taskId: task._id, clearDueDate: true });
+                      return;
+                    }
+                    void patch({ taskId: task._id, dueDate: dateInputToMs(value) });
                   }}
-                  className="h-9 w-full rounded-lg border border-input bg-card pl-9 pr-2 text-sm outline-none focus:ring-2 focus:ring-ring/20"
+                  className="h-9"
                 />
               </div>
               {task.dueDate ? (
@@ -856,10 +860,12 @@ function AttachmentList({
 
 function NewTaskModal({
   members,
+  isAdmin,
   onClose,
   onCreated,
 }: {
   members: Member[];
+  isAdmin: boolean;
   onClose: () => void;
   onCreated: () => void;
 }) {
@@ -934,10 +940,11 @@ function NewTaskModal({
         description: htmlIsBlank(cleanDescription) ? undefined : cleanDescription,
         status,
         priority,
-        dueDate: dueDate ? new Date(dueDate).getTime() : undefined,
+        dueDate: dueDate ? dateInputToMs(dueDate) : undefined,
         tags: tags.length ? tags : undefined,
         attachmentIds: attachments.map((a) => a._id),
-        assigneeUserId: assignee === UNASSIGNED ? undefined : (assignee as Id<"users">),
+        // Non-admins never send an assignee: the server assigns the task to them.
+        assigneeUserId: !isAdmin || assignee === UNASSIGNED ? undefined : (assignee as Id<"users">),
       });
       onCreated();
     } catch (err) {
@@ -948,148 +955,118 @@ function NewTaskModal({
   };
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-[2px]"
-      onClick={handleClose}
-    >
-      <motion.div
-        initial={{ opacity: 0, scale: 0.97, y: 8 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.97, y: 8 }}
-        transition={{ type: "spring", damping: 25, stiffness: 350 }}
-        onClick={(event) => event.stopPropagation()}
-        className="flex max-h-[90vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-2xl"
-      >
-        <div className="flex items-center justify-between border-b border-border px-6 py-5">
-          <h2 className="text-lg font-bold">Create task</h2>
-          <button
-            onClick={handleClose}
-            aria-label="Close"
-            className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent"
-          >
-            <X className="h-5 w-5" />
-          </button>
-        </div>
-
-        <div className="space-y-4 overflow-y-auto px-6 py-5">
-          <input
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            placeholder="Task title…"
-            autoFocus
-            className="h-11 w-full rounded-xl border border-input bg-card px-3 text-base font-medium outline-none placeholder:text-muted-foreground-subtle placeholder:font-normal focus:ring-2 focus:ring-ring/20"
-          />
-
-          <RichTextEditor
-            value={description}
-            onChange={setDescription}
-            placeholder="Add a description, details, or instructions…"
-            onAttachFiles={(files) => void handleAttachFiles(files)}
-            uploading={uploading}
-          />
-
-          <AttachmentList attachments={attachments} onRemove={handleRemoveAttachment} />
-
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <label className="block">
-              <span className="mb-2 block text-sm font-medium">Status</span>
-              <Dropdown value={status} options={STATUS_OPTIONS} onChange={setStatus} />
-            </label>
-
-            <label className="block">
-              <span className="mb-2 block text-sm font-medium">Priority</span>
-              <Dropdown value={priority} options={PRIORITY_OPTIONS} onChange={setPriority} />
-            </label>
-          </div>
-
-          <label className="block">
-            <span className="mb-2 block text-sm font-medium">Assignee</span>
-            <Dropdown value={assignee} options={assigneeOptions(members)} onChange={setAssignee} />
-          </label>
-
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <label className="block">
-              <span className="mb-2 block text-sm font-medium">Due date</span>
-              <div className="relative">
-                <Calendar className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                <input
-                  type="date"
-                  value={dueDate}
-                  onChange={(event) => setDueDate(event.target.value)}
-                  className="h-11 w-full rounded-xl border border-input bg-card pl-9 pr-3 text-sm outline-none focus:ring-2 focus:ring-ring/20"
-                />
-              </div>
-            </label>
-
-            <div className="block">
-              <span className="mb-2 block text-sm font-medium">Labels</span>
-              <div className="flex min-h-11 flex-wrap items-center gap-1.5 rounded-xl border border-input bg-card px-2 py-1.5">
-                {tags.map((tag) => (
-                  <span
-                    key={tag}
-                    className="flex items-center gap-1 rounded bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-600"
-                  >
-                    {tag}
-                    <button
-                      type="button"
-                      onClick={() => setTags((current) => current.filter((t) => t !== tag))}
-                      aria-label={`Remove tag ${tag}`}
-                      className="text-blue-400 hover:text-blue-700"
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  </span>
-                ))}
-                {addingTag ? (
-                  <input
-                    autoFocus
-                    value={newTag}
-                    onChange={(event) => setNewTag(event.target.value)}
-                    onBlur={handleAddTag}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") handleAddTag();
-                      if (event.key === "Escape") {
-                        setNewTag("");
-                        setAddingTag(false);
-                      }
-                    }}
-                    placeholder="Tag name"
-                    className="h-7 w-20 rounded border border-input bg-card px-2 text-[11px] outline-none focus:ring-2 focus:ring-ring/20"
-                  />
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => setAddingTag(true)}
-                    className="flex items-center gap-1 rounded border border-dashed border-input px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-accent"
-                  >
-                    <Tag className="h-3 w-3" />
-                    Add tag
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex items-center justify-end gap-2 border-t border-border bg-muted/30 px-6 py-4">
-          <button
-            onClick={handleClose}
-            className="rounded-lg border border-input bg-card px-4 py-2 text-sm font-medium hover:bg-accent"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={busy || !title.trim()}
-            className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
-          >
+    <Modal
+      title="Create task"
+      onClose={handleClose}
+      size="lg"
+      footer={
+        <>
+          <Btn onClick={handleClose}>Cancel</Btn>
+          <Btn variant="pri" onClick={handleSave} disabled={busy || !title.trim()}>
             {busy ? "Creating…" : "Create task"}
-          </button>
+          </Btn>
+        </>
+      }
+    >
+      <div className="space-y-4">
+      <input
+        value={title}
+        onChange={(event) => setTitle(event.target.value)}
+        placeholder="Task title…"
+        autoFocus
+        className="h-11 w-full rounded-xl border border-input bg-card px-3 text-base font-medium outline-none placeholder:text-muted-foreground-subtle placeholder:font-normal focus:ring-2 focus:ring-ring/20"
+      />
+
+      <RichTextEditor
+        value={description}
+        onChange={setDescription}
+        placeholder="Add a description, details, or instructions…"
+        onAttachFiles={(files) => void handleAttachFiles(files)}
+        uploading={uploading}
+      />
+
+      <AttachmentList attachments={attachments} onRemove={handleRemoveAttachment} />
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <label className="block">
+          <span className="mb-2 block text-sm font-medium">Status</span>
+          <Dropdown value={status} options={STATUS_OPTIONS} onChange={setStatus} />
+        </label>
+
+        <label className="block">
+          <span className="mb-2 block text-sm font-medium">Priority</span>
+          <Dropdown value={priority} options={PRIORITY_OPTIONS} onChange={setPriority} />
+        </label>
+      </div>
+
+      {isAdmin ? (
+        <label className="block">
+          <span className="mb-2 block text-sm font-medium">Assignee</span>
+          <Dropdown value={assignee} options={assigneeOptions(members)} onChange={setAssignee} />
+        </label>
+      ) : (
+        <div className="block">
+          <span className="mb-2 block text-sm font-medium">Assignee</span>
+          <p className="text-sm text-muted-foreground">Assigned to you</p>
         </div>
-      </motion.div>
-    </motion.div>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <label className="block">
+          <span className="mb-2 block text-sm font-medium">Due date</span>
+          <DatePicker aria-label="Due date" value={dueDate} onChange={setDueDate} className="h-11" />
+        </label>
+
+        <div className="block">
+          <span className="mb-2 block text-sm font-medium">Labels</span>
+          <div className="flex min-h-11 flex-wrap items-center gap-1.5 rounded-xl border border-input bg-card px-2 py-1.5">
+            {tags.map((tag) => (
+              <span
+                key={tag}
+                className="flex items-center gap-1 rounded bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-600"
+              >
+                {tag}
+                <button
+                  type="button"
+                  onClick={() => setTags((current) => current.filter((t) => t !== tag))}
+                  aria-label={`Remove tag ${tag}`}
+                  className="text-blue-400 hover:text-blue-700"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            ))}
+            {addingTag ? (
+              <input
+                autoFocus
+                value={newTag}
+                onChange={(event) => setNewTag(event.target.value)}
+                onBlur={handleAddTag}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") handleAddTag();
+                  if (event.key === "Escape") {
+                    event.stopPropagation();
+                    setNewTag("");
+                    setAddingTag(false);
+                  }
+                }}
+                placeholder="Tag name"
+                className="h-7 w-20 rounded border border-input bg-card px-2 text-[11px] outline-none focus:ring-2 focus:ring-ring/20"
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={() => setAddingTag(true)}
+                className="flex items-center gap-1 rounded border border-dashed border-input px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-accent"
+              >
+                <Tag className="h-3 w-3" />
+                Add tag
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+      </div>
+    </Modal>
   );
 }

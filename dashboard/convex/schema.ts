@@ -59,6 +59,12 @@ export default defineSchema({
     phone: v.optional(v.string()), // E.164, for SMS
     notifyBy: v.optional(v.array(notifyChannelValidator)),
     unavailableUntil: v.optional(v.number()), // out-of-office flag for AM fallback
+    // The asset manager who gets READ access to this person's units while they are out of
+    // office (see amScope.ts). Cleared together with unavailableUntil.
+    coveringUserId: v.optional(v.id("users")),
+    // Free-text speciality shown as the subtitle on Team and the dashboard, and matched against
+    // the issue type when suggesting a technician (workOrders.suggestTechnician).
+    skill: v.optional(v.string()),
     createdAt: v.number(),
   })
     .index("by_user", ["userId"])
@@ -183,6 +189,9 @@ export default defineSchema({
     prompt: v.string(),
     firstMessage: v.string(),
     voiceId: v.string(),
+    // Set by agents.createDedicatedAgent: the ElevenLabs agent this row pointed at before it was
+    // re-created. Kept for reference/rollback only; nothing resolves an org from it.
+    previousElevenLabsAgentId: v.optional(v.string()),
     updatedAt: v.number(),
   })
     .index("by_elevenlabs_id", ["elevenLabsAgentId"])
@@ -332,11 +341,15 @@ export default defineSchema({
     status: v.union(v.literal("bot"), v.literal("escalated")),
     escalationReason: v.optional(v.string()),
     lastMessageAt: v.number(),
-  }).index("by_channel_and_phone", ["channel", "customerPhone"]),
+    // Owning team. Optional only for rows predating it; threads without one are hidden from the
+    // inbox until threads.backfillOrgId runs.
+    orgId: v.optional(v.id("organizations")),
+  })
+    .index("by_channel_and_phone", ["channel", "customerPhone"])
+    .index("by_org_and_last_message", ["orgId", "lastMessageAt"]),
 
-  // Temporary: captures the raw post-call webhook body so its real payload shape can be
-  // inspected and the parser corrected, since ElevenLabs' docs 404'd all session and the
-  // transcript_format setting hasn't reliably stuck. Remove once ingestFromWebhook is fixed.
+  // DEPRECATED: no longer written to (raw post-call payloads contained PII). Kept so existing
+  // rows still validate; delete the table once its data has been cleared.
   debugWebhookLogs: defineTable({
     body: v.string(),
     at: v.number(),
@@ -379,6 +392,12 @@ export default defineSchema({
     // tools) still returns the oldest one, so adding buildings never changes what she reads.
     isPilot: v.optional(v.boolean()), // pilot buildings get maintenance intake first
     utilityGasPhone: v.optional(v.string()), // E.164, the gas company's emergency line
+    // Default asset manager: prefills new units and can be bulk-applied to units without an
+    // override. Units still store their own AM (units.ts is the only writer of that column).
+    defaultAssetManagerUserId: v.optional(v.id("users")),
+    // Display only (Property page, owner statements later).
+    ownerName: v.optional(v.string()),
+    ownerEmail: v.optional(v.string()),
     updatedAt: v.number(),
   })
     .index("by_org", ["orgId"])
@@ -688,7 +707,8 @@ export default defineSchema({
     .index("by_org", ["orgId"])
     .index("by_property", ["propertyId"])
     .index("by_property_and_unit_key", ["propertyId", "unitNumberKey"])
-    .index("by_asset_manager", ["assetManagerUserId"]),
+    .index("by_asset_manager", ["assetManagerUserId"])
+    .index("by_org_and_asset_manager", ["orgId", "assetManagerUserId"]),
 
   // Append-only history, written in the same mutation as the change it describes so a change
   // never exists without its trail. convex/audit.ts exports no update or delete.
@@ -867,6 +887,8 @@ export default defineSchema({
       v.literal("cancelled"),
     ),
     dueDate: v.optional(v.number()),
+    // Appointment window for the technician visit, e.g. "Today 2-4pm". Free text with presets in the UI.
+    window: v.optional(v.string()),
     cancelReason: v.optional(v.string()),
     createdBy: v.id("users"),
     createdAt: v.number(),

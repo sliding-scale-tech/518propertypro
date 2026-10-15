@@ -7,9 +7,6 @@ export type Manager = { userId: Id<"users">; name: string };
 
 export const UNIT_TYPES = ["studio", "1br", "2br", "3br+"] as const;
 
-export const inputClass =
-  "h-10 w-full rounded-lg border border-input bg-card px-3 text-sm outline-none focus:ring-2 focus:ring-ring/20 disabled:opacity-50";
-
 /** Server errors arrive as ConvexError data or Error.message; never show a raw object. */
 export function errorMessage(err: unknown): string {
   if (err && typeof err === "object" && "data" in err && typeof err.data === "string") {

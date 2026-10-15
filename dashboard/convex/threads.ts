@@ -9,21 +9,77 @@ import {
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import * as twilio from "./twilioApi";
+import { currentOrg, requireAdminView, requireAdminViewId, tenantOrgId, viewFor } from "./authz";
+import type { QueryCtx } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
+
+/**
+ * Inbox access: admin view only (team admin, executive, maintenance lead, simplr_admin) and only
+ * threads stamped with the caller's own team. Threads with no orgId are hidden from everyone
+ * until threads.backfillOrgId has run.
+ */
+async function adminOrgOrNull(ctx: QueryCtx) {
+  const org = await currentOrg(ctx);
+  if (!org || viewFor(org.isAdmin, org.jobRoles) !== "admin") return null;
+  return org;
+}
+
+const MAX_REPLY_CHARS = 1600;
 
 // --- Reads ----------------------------------------------------------------
 
 export const list = query({
   args: {},
-  handler: (ctx) => ctx.db.query("threads").order("desc").collect(),
+  handler: async (ctx) => {
+    const org = await adminOrgOrNull(ctx);
+    if (!org) return [];
+    return ctx.db
+      .query("threads")
+      .withIndex("by_org_and_last_message", (q) => q.eq("orgId", org.orgId))
+      .order("desc")
+      .take(500);
+  },
 });
 
 export const messages = query({
   args: { threadId: v.id("threads") },
-  handler: (ctx, args) =>
-    ctx.db
+  handler: async (ctx, args) => {
+    const org = await adminOrgOrNull(ctx);
+    if (!org) return [];
+    const thread = await ctx.db.get(args.threadId);
+    if (!thread || thread.orgId !== org.orgId) return [];
+    return ctx.db
       .query("smsMessages")
       .withIndex("by_thread", (q) => q.eq("threadId", args.threadId))
-      .collect(),
+      .collect();
+  },
+});
+
+/** For staffReply: the thread only if it belongs to this team. */
+export const getForOrg = internalQuery({
+  args: { threadId: v.id("threads"), orgId: v.id("organizations") },
+  handler: async (ctx, args) => {
+    const thread = await ctx.db.get(args.threadId);
+    return thread && thread.orgId === args.orgId ? thread : null;
+  },
+});
+
+/** One-off: stamps threads created before orgId existed with this deployment's single team. */
+export const backfillOrgId = internalMutation({
+  args: {},
+  handler: async (ctx): Promise<number> => {
+    const orgId = await tenantOrgId(ctx);
+    if (!orgId) return 0;
+    const rows = await ctx.db.query("threads").collect();
+    let n = 0;
+    for (const t of rows) {
+      if (!t.orgId) {
+        await ctx.db.patch(t._id, { orgId });
+        n++;
+      }
+    }
+    return n;
+  },
 });
 
 export const getInternal = internalQuery({
@@ -73,16 +129,20 @@ export const ingestInbound = internalMutation({
       .first();
 
     const now = Date.now();
+    // Single-tenant deployment: inbound SMS/WhatsApp has no per-team routing (one Twilio
+    // number), so threads belong to the deployment's one team.
+    const orgId = (await tenantOrgId(ctx)) ?? undefined;
     let threadId;
     if (thread) {
       threadId = thread._id;
-      await ctx.db.patch(threadId, { lastMessageAt: now });
+      await ctx.db.patch(threadId, { lastMessageAt: now, ...(thread.orgId ? {} : { orgId }) });
     } else {
       threadId = await ctx.db.insert("threads", {
         channel: args.channel,
         customerPhone: args.customerPhone,
         status: "bot",
         lastMessageAt: now,
+        orgId,
       });
       thread = await ctx.db.get(threadId);
     }
@@ -185,6 +245,13 @@ export const markEscalated = internalMutation({
 export const staffReply = action({
   args: { threadId: v.id("threads"), text: v.string() },
   handler: async (ctx, args): Promise<void> => {
+    const org = await requireAdminViewId(ctx);
+    const text = args.text.trim();
+    if (!text || text.length > MAX_REPLY_CHARS) throw new Error("Message is empty or too long.");
+    const thread: Id<"threads"> | null = (
+      await ctx.runQuery(internal.threads.getForOrg, { threadId: args.threadId, orgId: org.orgId })
+    )?._id ?? null;
+    if (!thread) throw new Error("Thread not found.");
     await ctx.runMutation(internal.threads.markEscalated, {
       threadId: args.threadId,
       reason: "Staff replied directly.",
@@ -192,7 +259,7 @@ export const staffReply = action({
     await ctx.runAction(internal.threads.sendMessage, {
       threadId: args.threadId,
       sender: "staff",
-      text: args.text,
+      text,
     });
   },
 });
@@ -200,6 +267,10 @@ export const staffReply = action({
 /** Hands a thread back to the bot for future messages. */
 export const resumeBot = mutation({
   args: { threadId: v.id("threads") },
-  handler: (ctx, args) =>
-    ctx.db.patch(args.threadId, { status: "bot", escalationReason: undefined }),
+  handler: async (ctx, args) => {
+    const org = await requireAdminView(ctx);
+    const thread = await ctx.db.get(args.threadId);
+    if (!thread || thread.orgId !== org.orgId) throw new Error("Thread not found.");
+    await ctx.db.patch(args.threadId, { status: "bot", escalationReason: undefined });
+  },
 });

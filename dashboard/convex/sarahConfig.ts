@@ -12,6 +12,8 @@ import {
   isApprovalRequired,
   normalizeConfig,
   sarahConfigValidator,
+  tenantMessagesOf,
+  TENANT_MESSAGE_KEYS,
   validateConfigShape,
 } from "./sarahConfigLib";
 import type { SarahConfig } from "./sarahConfigLib";
@@ -106,7 +108,26 @@ function mergeApprovals(incoming: SarahConfig, prev: SarahConfig): SarahConfig {
     ...(trSame && ptr.approvedBy ? { approvedBy: ptr.approvedBy, approvedAt: ptr.approvedAt } : {}),
   };
 
-  return { ...incoming, callTypes, emergencyScripts, tenantResponsibility };
+  // Same rule as the emergency scripts: a stamp survives only while the approved wording is unchanged.
+  const inMsgs = tenantMessagesOf(incoming);
+  const prevMsgs = tenantMessagesOf(prev);
+  const tenantMessages = Object.fromEntries(
+    TENANT_MESSAGE_KEYS.map((k) => {
+      const m = inMsgs[k];
+      const p = prevMsgs[k];
+      const same = p.approved && !!p.approvedBy && p.wording.trim() === m.wording.trim();
+      return [
+        k,
+        {
+          wording: m.wording,
+          approved: same,
+          ...(same ? { approvedBy: p.approvedBy, approvedAt: p.approvedAt } : {}),
+        },
+      ];
+    }),
+  ) as ReturnType<typeof tenantMessagesOf>;
+
+  return { ...incoming, callTypes, emergencyScripts, tenantResponsibility, tenantMessages };
 }
 
 /** Server-side lock on the call types that need sign-off. */
@@ -190,6 +211,67 @@ export const draftForOrg = internalQuery({
   },
 });
 
+/**
+ * Read-only escalation rules for the Asset managers page (A6): the PUBLISHED severity levels
+ * with their response targets and escalation contacts (names only, no phones), plus the
+ * approval flags that decide what the page may claim. "Call forward" is only real when the
+ * owner_routing call type is live; owner leads go to Alex only when owner_prospect is live.
+ */
+export const escalationSummary = query({
+  args: {},
+  handler: async (ctx) => {
+    const org = await requireAdminView(ctx);
+    const row = await rowFor(ctx, org.orgId);
+    const source = row?.published ?? null;
+    const config = normalizeConfig(source ?? row?.draft ?? defaultConfig());
+
+    const names = new Map<string, string>();
+    for (const e of config.escalationContacts) {
+      for (const id of e.userIds) {
+        if (names.has(id)) continue;
+        const m = await ctx.db
+          .query("memberships")
+          .withIndex("by_user", (q) => q.eq("userId", id))
+          .first();
+        // Only people still on this team: a stale id never leaks another team's name.
+        if (m && m.orgId === org.orgId) names.set(id, nameOf(await ctx.db.get(id)));
+      }
+    }
+    // Who owner-prospect leads reach: members with the executive job role (names only).
+    const teamMembers = await ctx.db
+      .query("memberships")
+      .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
+      .collect();
+    const ownerRecipients: Array<{ userId: Id<"users">; name: string }> = [];
+    for (const m of teamMembers) {
+      if (!(m.jobRoles ?? []).includes("executive")) continue;
+      ownerRecipients.push({ userId: m.userId, name: nameOf(await ctx.db.get(m.userId)) });
+    }
+    const callType = (key: string) => config.callTypes.find((t) => t.key === key);
+    const ownerRouting = callType("owner_routing");
+    const ownerProspect = callType("owner_prospect");
+    return {
+      published: source !== null, // false = showing the draft because nothing has been published
+      levels: config.severityLevels.map((s) => {
+        const e = config.escalationContacts.find((x) => x.level === s.level);
+        return {
+          level: s.level,
+          definition: s.definition,
+          responseTarget: s.responseTarget,
+          contacts: (e?.userIds ?? []).flatMap((id) => (names.has(id) ? [{ userId: id, name: names.get(id)! }] : [])),
+          externalContactCount: e?.externalPhones.length ?? 0,
+        };
+      }),
+      callForward: {
+        enabled: !!ownerRouting?.enabled && !!ownerRouting.approvedBy && config.routingDirectory.enabled,
+        approved: !!ownerRouting?.approvedBy,
+      },
+      ownerLeads: { enabled: !!ownerProspect?.enabled, recipients: ownerRecipients },
+      canEdit: canEdit(org),
+    };
+  },
+});
+
 // --- Writes -------------------------------------------------------------------------------------
 
 export const saveDraft = mutation({
@@ -232,8 +314,13 @@ export const saveDraft = mutation({
 
 export const approve = mutation({
   args: {
-    kind: v.union(v.literal("callType"), v.literal("emergencyScript"), v.literal("tenantResponsibility")),
-    key: v.string(),
+    kind: v.union(
+      v.literal("callType"),
+      v.literal("emergencyScript"),
+      v.literal("tenantResponsibility"),
+      v.literal("tenantMessage"),
+    ),
+    key: v.string(), // tenantMessage: photoRequest | outOfScope | received
   },
   handler: async (ctx, args): Promise<void> => {
     const org = await requireAdminView(ctx);
@@ -258,6 +345,12 @@ export const approve = mutation({
       draft.emergencyScripts = draft.emergencyScripts.map((x) =>
         x.incident === args.key ? { ...x, approvedBy: by, approvedAt: at } : x,
       );
+    } else if (args.kind === "tenantMessage") {
+      const key = TENANT_MESSAGE_KEYS.find((k) => k === args.key);
+      if (!key) throw new Error("Unknown tenant message.");
+      const msgs = tenantMessagesOf(draft);
+      if (!msgs[key].wording.trim()) throw new Error("Write the wording before approving it.");
+      draft.tenantMessages = { ...msgs, [key]: { ...msgs[key], approved: true, approvedBy: by, approvedAt: at } };
     } else {
       if (!draft.tenantResponsibility.wording.trim()) throw new Error("Write the wording before approving it.");
       draft.tenantResponsibility = { ...draft.tenantResponsibility, approved: true, approvedBy: by, approvedAt: at };

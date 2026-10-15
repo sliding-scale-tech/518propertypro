@@ -3,6 +3,38 @@ import { internalMutation, internalQuery, mutation, query } from "./_generated/s
 import { clampSeverity } from "./severity";
 import { realValue, realPhone } from "./sanitize";
 import { currentOrg, requireAdminView, requireOrgAdmin, viewFor } from "./authz";
+import type { OrgContext } from "./authz";
+import type { QueryCtx } from "./_generated/server";
+import type { Doc } from "./_generated/dataModel";
+import { amScope, canSeeUnit } from "./amScope";
+import { findResidentsByPhone } from "./residents";
+
+/**
+ * For an asset manager, resident calls are limited to residents of their units (managed or
+ * covered). A call counts as theirs when its maintenance request is on one of those units, or
+ * when the trusted caller ID matches a resident of one. The unit the caller SAID is free text
+ * and is never used for scoping. Everyone else sees the team's calls as before.
+ */
+async function visibleIssues(ctx: QueryCtx, org: OrgContext, rows: Doc<"tenantIssues">[]) {
+  if (viewFor(org.isAdmin, org.jobRoles) !== "asset_manager") return rows;
+  const scope = await amScope(ctx, org);
+  const out: Doc<"tenantIssues">[] = [];
+  for (const issue of rows) {
+    const req = (
+      await ctx.db
+        .query("maintenanceRequests")
+        .withIndex("by_conversation", (q) => q.eq("elevenLabsConversationId", issue.elevenLabsConversationId))
+        .collect()
+    ).find((r) => r.orgId === org.orgId);
+    let visible = canSeeUnit(scope, req?.unitId);
+    if (!visible && !req?.unitId && issue.callerNumber) {
+      const matches = await findResidentsByPhone(ctx, org.orgId, issue.callerNumber);
+      visible = matches.some((m) => canSeeUnit(scope, m.unitId));
+    }
+    if (visible) out.push(issue);
+  }
+  return out;
+}
 
 // --- Reads ----------------------------------------------------------------
 
@@ -19,11 +51,15 @@ export const issues = query({
     if (!org) return [];
     // Resident-call detail is not for technicians or accountants.
     const view = viewFor(org.isAdmin, org.jobRoles);
-    if (view === "technician" || view === "accountant") return [];
-    const rows = await ctx.db
-      .query("tenantIssues")
-      .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
-      .collect();
+    if (view !== "admin" && view !== "asset_manager") return [];
+    const rows = await visibleIssues(
+      ctx,
+      org,
+      await ctx.db
+        .query("tenantIssues")
+        .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
+        .collect(),
+    );
 
     // Join the call itself so the row can expand into a transcript the same way the Leads
     // page does. conversationId only exists once the post-call webhook has landed, so
@@ -59,10 +95,18 @@ export const stats = query({
   handler: async (ctx) => {
     const org = await currentOrg(ctx);
     if (!org) return { openIssues: 0, highSeverityOpen: 0, resolvedIssues: 0 };
-    const rows = await ctx.db
-      .query("tenantIssues")
-      .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
-      .collect();
+    const view = viewFor(org.isAdmin, org.jobRoles);
+    if (view !== "admin" && view !== "asset_manager") {
+      return { openIssues: 0, highSeverityOpen: 0, resolvedIssues: 0 };
+    }
+    const rows = await visibleIssues(
+      ctx,
+      org,
+      await ctx.db
+        .query("tenantIssues")
+        .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
+        .collect(),
+    );
     const open = rows.filter((r) => r.status === "open");
 
     return {

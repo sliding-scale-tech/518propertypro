@@ -62,7 +62,7 @@ export function TaskLinks({
   return (
     <div className="flex flex-wrap gap-2">
       {unitId ? (
-        <Link href="/units" className={cls}>
+        <Link href="/properties" className={cls}>
           Unit
         </Link>
       ) : null}

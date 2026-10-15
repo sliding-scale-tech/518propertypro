@@ -46,7 +46,7 @@ export function NewRequestModal({
           if (!valid || busy || unitId === "") return;
           setBusy(true);
           try {
-            const id = await create({
+            const { requestId: id } = await create({
               unitId,
               issueType: issueType.trim(),
               description: description.trim(),
