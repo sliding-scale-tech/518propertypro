@@ -4,7 +4,7 @@ Tracks work against [SIMPLR-518-BUILD-PLAN.md](SIMPLR-518-BUILD-PLAN.md).
 
 **Legend:** ✅ done (type-checked, not browser-tested) · 🧪 needs live test · ⬜ not started · ⏳ blocked on client input · ⚠️ caveat
 
-_Last updated: 2026-10-15 (admin view end to end)_
+_Last updated: 2026-10-15 (prototype redesign + dedicated ElevenLabs agent)_
 
 ---
 
@@ -14,6 +14,9 @@ _Last updated: 2026-10-15 (admin view end to end)_
 - ⬜ Reset Sarah prompt: `npx convex run agents:resetToDefaultPrompt` then Settings → Save (registers new tools)
 - ⬜ Team time zone → `America/New_York`
 - ⬜ Assign roles on Team page (Admin / Asset manager / Technician)
+- ⬜ Dedicated ElevenLabs agent: `npx convex run agents:listForOps` → `npx convex run agents:createDedicatedAgent '{"orgId":"<id>","name":"518 Property Pro – Sarah"}'`
+- ⬜ ElevenLabs → Phone numbers: assign the 518 number to the new agent
+- ⬜ Sarah config → Tenant messages: Pat approves photo-request / out-of-scope wording, then Publish
 
 ## Phase 0: Build lock
 - ✅ Build plan · ✅ CLAUDE.md model rule
@@ -53,6 +56,7 @@ _Last updated: 2026-10-15 (admin view end to end)_
 - ✅ AM inbox (same page, scoped) · ✅ Technician `/tech` mobile job list + job page
 - 🧪 Camera upload on real iPhone/Android
 - ⬜ Tenant photo upload page `/m/[token]`
+- ⬜ ★ Revisit leads scoping: decide whether asset managers should see only leads for their own properties (currently every AM sees all leads).
 
 ## Sarah (voice)
 - ✅ Tools: lookup_caller, find_unit, log_maintenance_request, route_owner_prospect
@@ -70,6 +74,18 @@ _Last updated: 2026-10-15 (admin view end to end)_
 
 ## Finance
 - ⏳ Stripe payments · ⏳ Owner statements (ROS)
+
+## Prototype redesign (Pat admin view)
+- ✅ Design tokens + UI primitives (`components/ui`) · ✅ prototype sidebar + redirects
+- ✅ Work orders: one board (AM review → Waiting on lead → With technician → Needs sign-off) + drawer, two records (request + WO)
+- ✅ Exceptions banner · ✅ New work order drawer (auto-forward) · ✅ tenant photo upload `/m/[token]`
+- ✅ Dashboard (pipeline, AMs, technicians, attention, schedule) · ✅ Asset managers page (default AM, tours toggle, escalation rules, upcoming tours)
+- ✅ Property page (default AM + per-unit override, owner) · ✅ Tenants: Resident calls | Residents tabs
+- ✅ Team: invite card, skills, Audit log tab · ✅ Sarah config: Tenant messages tab · ✅ technician phone restyle
+- ✅ Approve & send to Pat · reject with optional tenant notice (approved wording only) · severity n/10
+- ✅ Accountant read-only board · ✅ dedicated ElevenLabs agent command
+- 🧪 Browser + live test of all of the above
+- ⬜ tasks/calendar/docs/call bodies only partly restyled
 
 ---
 ⚠️ Nothing committed (per instruction).
