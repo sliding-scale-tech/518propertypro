@@ -59,12 +59,24 @@ export default defineSchema({
     phone: v.optional(v.string()), // E.164, for SMS
     notifyBy: v.optional(v.array(notifyChannelValidator)),
     unavailableUntil: v.optional(v.number()), // out-of-office flag for AM fallback
+    // Admin-entered profile extras (Asset Managers profile). The work email is the Clerk sign-in
+    // identity and is never editable here; these are contact/notes only.
+    personalEmail: v.optional(v.string()),
+    internalNotes: v.optional(v.string()), // admin-only, never shown to the member
     // The asset manager who gets READ access to this person's units while they are out of
     // office (see amScope.ts). Cleared together with unavailableUntil.
     coveringUserId: v.optional(v.id("users")),
     // Free-text speciality shown as the subtitle on Team and the dashboard, and matched against
     // the issue type when suggesting a technician (workOrders.suggestTechnician).
     skill: v.optional(v.string()),
+    // Admin-chosen: receives new leasing leads and is the ONLY pool tours are booked from (also
+    // needs the asset_manager job role, a connected calendar, tours on, and not out of office).
+    leadAssignee: v.optional(v.boolean()),
+    // Admin-chosen: receives callback contacts for callers Sarah could not match to a unit.
+    unmatchedAssignee: v.optional(v.boolean()),
+    // Round-robin tie-breakers: when this person was last handed a lead / unmatched caller.
+    lastLeadAssignedAt: v.optional(v.number()),
+    lastUnmatchedAssignedAt: v.optional(v.number()),
     createdAt: v.number(),
   })
     .index("by_user", ["userId"])
@@ -82,6 +94,9 @@ export default defineSchema({
     // Copied onto the membership when the invite is redeemed.
     jobRoles: v.optional(v.array(jobRoleValidator)),
     phone: v.optional(v.string()),
+    // Display name typed on the Asset Managers invite form. Not an identity: the real name
+    // comes from Clerk once the invitee signs up.
+    fullName: v.optional(v.string()),
     tokenHash: v.string(),
     createdBy: v.id("users"),
     createdAt: v.number(),
@@ -123,6 +138,17 @@ export default defineSchema({
   })
     .index("by_state_hash", ["stateHash"])
     .index("by_user", ["userId"]),
+
+  // Throttle for assetManagers.sendPasswordReset: one row per email sent, so "max 3 per target
+  // per day" is a count over the last 24h. Holds no secret and no token.
+  passwordResetRequests: defineTable({
+    orgId: v.string(),
+    targetUserId: v.id("users"),
+    requestedBy: v.id("users"),
+    at: v.number(),
+  })
+    .index("by_target_and_at", ["targetUserId", "at"])
+    .index("by_org", ["orgId"]),
 
   // Each person's own tour hours. No row means the defaults in tourSchedule.ts (available,
   // Monday to Friday 9 to 5), so a new teammate is bookable the moment their calendar connects.
@@ -172,7 +198,8 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_org_and_start", ["orgId", "start"])
-    .index("by_assignee_and_start", ["assignedUserId", "start"]),
+    .index("by_assignee_and_start", ["assignedUserId", "start"])
+    .index("by_conversation", ["elevenLabsConversationId"]),
 
   agents: defineTable({
     // The Clerk organization this row belongs to. Every dashboard table is keyed by org rather
@@ -302,12 +329,15 @@ export default defineSchema({
     unitId: v.optional(v.id("units")),
     requestId: v.optional(v.id("maintenanceRequests")),
     workOrderId: v.optional(v.id("workOrders")),
+    // Set when Sarah created the task from a resident call (log_task_request); upsert key.
+    elevenLabsConversationId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index("by_org", ["orgId"])
     .index("by_user", ["userId"])
-    .index("by_assignee", ["assigneeUserId"]),
+    .index("by_assignee", ["assigneeUserId"])
+    .index("by_conversation", ["elevenLabsConversationId"]),
 
   // Files attached to a task from the Create task modal or the detail panel's Attach files
   // button. `taskId` is optional because the create modal uploads to storage (so the file picks
@@ -363,8 +393,28 @@ export default defineSchema({
     twilioSid: v.optional(v.string()), // dedupes Twilio's occasional webhook retries
   }).index("by_thread", ["threadId"]),
 
+  // SINGLE-TENANT ROW: no orgId, one row for the whole deployment (read with .first()). The
+  // forwarding fields below inherit that assumption; add an orgId + index before a second
+  // customer shares this deployment.
   orgSettings: defineTable({
     staffPhoneNumber: v.string(),
+    // Optional "Business line forwarding" (convex/orgSettings.ts). The customer's own office
+    // number that they forward to our Twilio number at THEIR carrier; nothing here sets
+    // forwarding anywhere. Not part of the Sarah draft/publish flow.
+    forwardingNumber: v.optional(v.string()), // E.164
+    forwardingLineType: v.optional(
+      v.union(
+        v.literal("verizon_mobile"),
+        v.literal("other_mobile"),
+        v.literal("landline_office"),
+        v.literal("phone_system"),
+        v.literal("unknown"),
+      ),
+    ),
+    forwardingSetUpAt: v.optional(v.number()), // number saved
+    forwardingConfirmedAt: v.optional(v.number()), // admin said "I've set it up"
+    forwardingLastSeenAt: v.optional(v.number()), // start of the latest phone call Sarah took
+    forwardingLastSeenFrom: v.optional(v.string()), // last 4 digits of that caller ONLY
   }),
 
   properties: defineTable({
@@ -444,6 +494,17 @@ export default defineSchema({
     nearMiss: v.optional(v.boolean()),
     tourSlot: v.optional(v.string()),
     tourConfirmed: v.boolean(),
+
+    // Lead routing (leads.ts). Kept here rather than on conversations because a phone call has
+    // no conversations row until it ends, while this row exists from the first tool call.
+    callerEmail: v.optional(v.string()),
+    assignedUserId: v.optional(v.id("users")),
+    assignedAt: v.optional(v.number()),
+    assignmentReason: v.optional(v.string()),
+    leadNotifiedAt: v.optional(v.number()), // staff were texted about this lead
+    // Capture-and-flag: staff-facing only, NEVER relayed to the caller.
+    leadClass: v.optional(v.string()), // "ready" | "partial"
+    leadFlags: v.optional(v.array(v.string())),
 
     // Set by route_owner_prospect: someone who owns property and wants 518 to manage it, not a
     // renter. Lives on the call's qualifications row because that is the one per-call capture
@@ -743,7 +804,8 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_org", ["orgId"])
-    .index("by_unit", ["unitId"]),
+    .index("by_unit", ["unitId"])
+    .index("by_org_and_email", ["orgId", "email"]),
 
   // Convex cannot index the elements of an array, so each phone gets its own row. Caller ID ->
   // resident is then one indexed read. Rows exist only for ACTIVE residents (removed on
@@ -778,7 +840,20 @@ export default defineSchema({
     unitId: v.optional(v.id("units")),
     matchConfidence: v.union(v.literal("exact"), v.literal("caller_id"), v.literal("none")),
 
-    // Issue
+    callerEmail: v.optional(v.string()),
+    // Legacy (find_resident was removed): kept so old rows still validate. No longer written.
+    identityConfirmed: v.optional(v.boolean()),
+    // Server-side comparison of the spoken name against the residents of the matched unit.
+    // Shown to the AM only; never told to the caller.
+    nameMatchesResident: v.optional(v.union(v.literal("true"), v.literal("false"), v.literal("unknown"))),
+    // "Photo request from the call": the caller agreed to send photos. Sarah texts nobody; the
+    // unit's asset manager decides what to do (see maintenance.photoRequestFromCall).
+    photosRequestedByCaller: v.optional(v.boolean()),
+    photosRequestNote: v.optional(v.string()), // the caller's words / limits
+    photosRequestedAt: v.optional(v.number()),
+
+    // Issue (work-order format: title + category (issueType) + description + answers + severity)
+    title: v.optional(v.string()),
     issueType: v.string(), // electrical | water_leak | broken_item | gas | fire | flooding | tenant_responsibility | other
     description: v.string(),
     firstNoticed: v.optional(v.string()),
@@ -795,6 +870,8 @@ export default defineSchema({
     severityReason: v.optional(v.string()),
     originalSeverity: v.optional(v.string()), // preserved when staff override
     mediaRequested: v.boolean(),
+    // Photos/video were asked for and none has arrived yet.
+    photosPending: v.optional(v.boolean()),
 
     // Routing
     assignedAssetManagerUserId: v.optional(v.id("users")),
@@ -814,6 +891,8 @@ export default defineSchema({
     validatedAt: v.optional(v.number()),
     validatedBy: v.optional(v.id("users")),
     closeReason: v.optional(v.string()),
+    // Written explanation required when rejecting (closeOutOfScope / closeNoWorkOrder).
+    closeExplanation: v.optional(v.string()),
     possibleDuplicateOf: v.optional(v.id("maintenanceRequests")),
     nextAction: v.optional(v.string()),
     // Unread indicator: set the first time the ASSIGNED asset manager opens it.
@@ -834,6 +913,8 @@ export default defineSchema({
     storageId: v.id("_storage"),
     kind: v.union(v.literal("photo"), v.literal("video")),
     uploadedBy: v.union(v.literal("tenant"), v.literal("staff")),
+    // Who uploaded a staff photo (absent on older rows and tenant uploads); drives "remove your own".
+    uploadedByUserId: v.optional(v.id("users")),
     createdAt: v.number(),
   })
     .index("by_request", ["requestId"])
@@ -859,6 +940,7 @@ export default defineSchema({
     title: v.string(),
     scope: v.string(),
     priority: v.union(v.literal("emergency"), v.literal("urgent"), v.literal("routine")),
+    // DEPRECATED (checklist feature removed 2026-10-16): always [] on new rows; kept so old data stays valid.
     checklist: v.array(
       v.object({
         id: v.string(),
@@ -906,7 +988,7 @@ export default defineSchema({
     workOrderId: v.id("workOrders"),
     unitId: v.id("units"),
     storageId: v.id("_storage"),
-    kind: v.union(v.literal("completion_photo"), v.literal("receipt"), v.literal("other")),
+    kind: v.union(v.literal("completion_photo"), v.literal("completion_video"), v.literal("receipt"), v.literal("other")),
     uploadedByUserId: v.id("users"),
     createdAt: v.number(),
   })
@@ -952,7 +1034,7 @@ export default defineSchema({
     .index("by_work_order", ["workOrderId"])
     .index("by_org", ["orgId"]),
 
-  // Editable default checklist per issue type; workOrders.checklistFor falls back to built-ins.
+  // DEPRECATED (checklist feature removed 2026-10-16): no longer read or written; table kept to avoid data loss.
   checklistTemplates: defineTable({
     orgId: v.string(),
     issueType: v.string(),
@@ -989,6 +1071,40 @@ export default defineSchema({
   })
     .index("by_token_hash", ["tokenHash"])
     .index("by_org", ["orgId"]),
+  // --- Unmatched callers --------------------------------------------------------
+  // A resident-type caller Sarah could not match to a unit. No maintenance request exists for
+  // them: this is a callback to-do for the "unmatched caller" asset manager.
+  callbackContacts: defineTable({
+    orgId: v.string(),
+    elevenLabsConversationId: v.optional(v.string()),
+    conversationId: v.optional(v.id("conversations")),
+    callerName: v.optional(v.string()),
+    callerNumber: v.optional(v.string()), // telephony caller ID
+    callbackNumber: v.optional(v.string()), // spoken
+    callerEmail: v.optional(v.string()),
+    reason: v.string(), // why no match
+    issueSummary: v.string(),
+    assignedUserId: v.optional(v.id("users")),
+    status: v.union(v.literal("open"), v.literal("called_back"), v.literal("closed")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_conversation", ["elevenLabsConversationId"])
+    .index("by_org_and_created", ["orgId", "createdAt"])
+    .index("by_assignee_and_status", ["assignedUserId", "status"]),
+
+  // Legacy per-call counters (find_resident / send_photo_link caps). Nothing writes them any
+  // more; the table stays so existing rows still validate.
+  sarahAttempts: defineTable({
+    orgId: v.string(),
+    key: v.string(), // `${tool}:${elevenLabsConversationId}`
+    count: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_key", ["key"])
+    .index("by_updated", ["updatedAt"])
+    .index("by_org", ["orgId"]),
+
   // --- Sarah configuration (P17) ---------------------------------------------
   // One row per org. `draft` is what /sarah edits; `published` is what the live agent was last
   // composed from. Approval stamps inside the config are written only by sarahConfig.approve.
@@ -1011,4 +1127,41 @@ export default defineSchema({
     publishedAt: v.number(),
     note: v.optional(v.string()),
   }).index("by_org_and_version", ["orgId", "version"]),
+
+  // Approval workflow per "Missing from Pat" item (draft -> pending_approval -> approved |
+  // changes_requested). `fingerprint` is a hash of the content the status applies to: if the
+  // content changes (here or on a tab) the status no longer applies and the item reads as draft.
+  sarahConfigItems: defineTable({
+    orgId: v.string(),
+    itemId: v.string(),
+    status: v.union(
+      v.literal("draft"),
+      v.literal("pending_approval"),
+      v.literal("changes_requested"),
+      v.literal("approved"),
+    ),
+    fingerprint: v.string(),
+    text: v.optional(v.string()), // proposal text for the two decision items only
+    lastEditedBy: v.optional(v.id("users")),
+    lastEditedByLabel: v.optional(v.string()),
+    lastEditedAt: v.optional(v.number()),
+    note: v.optional(v.string()), // the approver's change request, max 1000 chars
+    noteBy: v.optional(v.string()),
+    noteAt: v.optional(v.number()),
+    updatedAt: v.number(),
+  })
+    .index("by_org_and_item", ["orgId", "itemId"])
+    .index("by_org", ["orgId"]),
+
+  // Append-only history shown in the item modal (created / edited / submitted / approved /
+  // changes requested). Org-scoped; written inside the same mutation as the change.
+  sarahConfigAudit: defineTable({
+    orgId: v.string(),
+    itemId: v.string(),
+    action: v.string(),
+    actorUserId: v.optional(v.id("users")),
+    actorLabel: v.string(),
+    note: v.optional(v.string()),
+    at: v.number(),
+  }).index("by_org_and_item", ["orgId", "itemId", "at"]),
 });

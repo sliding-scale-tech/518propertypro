@@ -50,7 +50,15 @@ export function AssetManagersCard({ rows }: { rows: Am[] | undefined }) {
 export function TechniciansCard({ rows }: { rows: Tech[] | undefined }) {
   return (
     <Card>
-      <CardHead title="Technicians" icon={<HardHat />} right="Today" />
+      <CardHead
+        title="Technicians"
+        icon={<HardHat />}
+        right={
+          <Link href="/team?role=technician" className="font-medium text-primary hover:underline">
+            Team →
+          </Link>
+        }
+      />
       {rows && rows.length === 0 ? (
         <p className="py-4 text-center text-[12.5px] text-muted-foreground">No technicians on the team yet.</p>
       ) : (

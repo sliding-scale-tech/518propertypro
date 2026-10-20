@@ -105,35 +105,39 @@ export function InvitePanel() {
       ) : null}
       <p className="mt-3 text-xs text-muted-foreground">
         {APP_ROLE_OPTIONS.find((o) => o.value === role)?.blurb}. They get an email with a link that expires in 7
-        days and works once. Only admins can open this page.
+        days and works once.
       </p>
     </Card>
   );
 }
 
-export type RoleFilter = "all" | "admins" | "asset_managers" | "technicians" | "none";
+export type RoleFilter = "all" | AppRole | "none";
 
+// URL values (?role=admin|asset_manager|technician). Old plural links still land on the right chip.
 export const ROLE_FILTERS: ReadonlyArray<{ value: RoleFilter; label: string }> = [
   { value: "all", label: "All" },
-  { value: "admins", label: "Admins" },
-  { value: "asset_managers", label: "Asset managers" },
-  { value: "technicians", label: "Technicians" },
+  { value: "admin", label: "Admins" },
+  { value: "asset_manager", label: "Asset managers" },
+  { value: "technician", label: "Technicians" },
   { value: "none", label: "No role" },
 ];
 
+const ROLE_ALIASES: Record<string, RoleFilter> = {
+  admins: "admin",
+  asset_managers: "asset_manager",
+  technicians: "technician",
+};
+
+export function parseRoleFilter(raw: string | null): RoleFilter {
+  if (!raw) return "all";
+  const value = ROLE_ALIASES[raw] ?? raw;
+  return ROLE_FILTERS.some((f) => f.value === value) ? (value as RoleFilter) : "all";
+}
+
 export function matchesRoleFilter(filter: RoleFilter, m: { appRole: AppRole | null }): boolean {
-  switch (filter) {
-    case "all":
-      return true;
-    case "admins":
-      return m.appRole === "admin";
-    case "asset_managers":
-      return m.appRole === "asset_manager";
-    case "technicians":
-      return m.appRole === "technician";
-    case "none":
-      return m.appRole === null;
-  }
+  if (filter === "all") return true;
+  if (filter === "none") return m.appRole === null;
+  return m.appRole === filter;
 }
 
 /** Pending-invite label: Admin / Asset manager / Technician, from the invite's app role. */

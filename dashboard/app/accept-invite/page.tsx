@@ -5,7 +5,7 @@ import { useAction } from "convex/react";
 import { Loader2 } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
 
 /**
@@ -37,6 +37,9 @@ function AcceptInvite() {
   const [summary, setSummary] = useState<{ orgName: string; email: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [state, setState] = useState<"checking" | "ready" | "joining" | "done">("checking");
+  // One redeem attempt per page load: a failure puts state back to "ready", which would otherwise
+  // re-run the effect below forever.
+  const attempted = useRef(false);
 
   const check = useCallback(async () => {
     if (!token) {
@@ -63,16 +66,29 @@ function AcceptInvite() {
   // Signed in with a live invite: redeem it straight away. There is nothing to confirm — they
   // clicked the link in their own email, which is the confirmation.
   useEffect(() => {
-    if (!isLoaded || !isSignedIn || !token || !summary || state !== "ready") return;
+    if (!isLoaded || !isSignedIn || !token || !summary || state !== "ready" || attempted.current) return;
+    attempted.current = true;
     setState("joining");
     void (async () => {
-      try {
-        await acceptInvite({ token });
-        setState("done");
-        router.replace("/call");
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not accept that invitation.");
-        setState("ready");
+      // A brand-new account can reach this page before the Clerk webhook has created its row;
+      // that one error is worth a few quiet retries.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await acceptInvite({ token });
+          setState("done");
+          // /home sends each person to their own landing page (admin, asset manager, technician).
+          router.replace("/home");
+          return;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "";
+          if (attempt < 4 && message.includes("still being set up")) {
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+            continue;
+          }
+          setError(message || "Could not accept that invitation.");
+          setState("ready");
+          return;
+        }
       }
     })();
   }, [isLoaded, isSignedIn, token, summary, state, acceptInvite, router]);
@@ -87,8 +103,11 @@ function AcceptInvite() {
       <Frame title="Team invitation">
         {error}
         <p className="mt-4">
-          <Link href="/sign-in" className="font-medium text-primary hover:underline">
-            Go to sign in
+          <Link
+            href={isSignedIn ? "/home" : "/sign-in"}
+            className="font-medium text-primary hover:underline"
+          >
+            {isSignedIn ? "Go to your dashboard" : "Go to sign in"}
           </Link>
         </p>
       </Frame>

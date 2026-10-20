@@ -9,12 +9,6 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { RequireView } from "@/components/require-view";
 import { useToast } from "@/components/toast";
-import {
-  ChecklistEditor,
-  newDraftItem,
-  toChecklistArgs,
-  type ChecklistDraftItem,
-} from "@/components/work-orders/checklist-editor";
 import type { WoPriority } from "@/components/work-orders/shared";
 import { WindowField } from "@/components/work-orders/window-field";
 import { Btn, Card, CardHead, DatePicker, PageHeader, Select } from "@/components/ui";
@@ -49,7 +43,6 @@ type Initial = {
   scope: string;
   priority: WoPriority;
   accessNotes: string;
-  checklist: string[];
   window: string;
 };
 
@@ -59,11 +52,9 @@ function NewWorkOrderInner() {
   const requestId = requestParam ? (requestParam as Id<"maintenanceRequests">) : undefined;
 
   const detail = useQuery(api.maintenance.get, requestId ? { requestId } : "skip");
-  const issueType = detail?.request.issueType;
-  const template = useQuery(api.workOrders.checklistFor, issueType ? { issueType } : "skip");
 
   if (requestId) {
-    if (detail === undefined || (issueType && template === undefined)) return <Spinner />;
+    if (detail === undefined) return <Spinner />;
     if (detail === null) {
       return (
         <div className="py-16 text-center text-sm text-muted-foreground">
@@ -88,7 +79,6 @@ function NewWorkOrderInner() {
       scope: scopeLines.join("\n"),
       priority: sev === "emergency" ? "emergency" : sev === "urgent" ? "urgent" : "routine",
       accessNotes: access,
-      checklist: template ?? [],
       // Prefilled from the tenant's preferred times; Pat can pick a preset or type another.
       window: r.preferredAccessTimes ?? "",
     };
@@ -97,7 +87,7 @@ function NewWorkOrderInner() {
 
   return (
     <Form
-      initial={{ unitId: "", issueType: "other", title: "", scope: "", priority: "routine", accessNotes: "", checklist: [], window: "" }}
+      initial={{ unitId: "", issueType: "other", title: "", scope: "", priority: "routine", accessNotes: "", window: "" }}
     />
   );
 }
@@ -114,7 +104,6 @@ function Form({ initial }: { initial: Initial }) {
   const router = useRouter();
   const toast = useToast();
   const create = useMutation(api.workOrders.create);
-  const saveTemplate = useMutation(api.workOrders.saveChecklistTemplate);
 
   const access = useQuery(api.team.myAccess);
   const team = useQuery(api.team.overview);
@@ -127,7 +116,6 @@ function Form({ initial }: { initial: Initial }) {
   const [scope, setScope] = useState(initial.scope);
   const [priority, setPriority] = useState<WoPriority>(initial.priority);
   const [accessNotes, setAccessNotes] = useState(initial.accessNotes);
-  const [items, setItems] = useState<ChecklistDraftItem[]>(() => initial.checklist.map((l) => newDraftItem(l)));
   const [technician, setTechnician] = useState("");
   const [req, setReq] = useState({ photos: true, hours: true, receipts: false, notes: false });
   const [due, setDue] = useState("");
@@ -135,12 +123,10 @@ function Form({ initial }: { initial: Initial }) {
   const [techTouched, setTechTouched] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  const typeTemplate = useQuery(api.workOrders.checklistFor, { issueType });
   // Pat gets a suggested technician (skill match, else least loaded); returns null for anyone else.
   const suggestion = useQuery(api.workOrders.suggestTechnician, { issueType });
   // Preselect the suggestion until Pat picks someone (or "Assign later") themselves.
   const technicianValue = techTouched ? technician : (suggestion?.userId ?? "");
-  const canTemplate = access?.canManageMaintenance ?? false;
   const technicians = (team?.members ?? []).filter((m) => m.appRole === "technician");
   // The server enforces ownership; this only keeps the picker honest for asset managers.
   const unitOptions = (units ?? []).filter((u) => access?.view === "admin" || u.isMine);
@@ -155,7 +141,6 @@ function Form({ initial }: { initial: Initial }) {
         title,
         scope,
         priority,
-        checklist: toChecklistArgs(items),
         technicianUserId: technicianValue ? (technicianValue as Id<"users">) : undefined,
         accessNotes: accessNotes.trim() || undefined,
         requiredOnSubmit: req,
@@ -167,15 +152,6 @@ function Form({ initial }: { initial: Initial }) {
     } catch (err) {
       toast(errorText(err), "error");
       setBusy(false);
-    }
-  };
-
-  const doSaveTemplate = async () => {
-    try {
-      await saveTemplate({ issueType, items: toChecklistArgs(items).map((i) => i.label) });
-      toast(`Template saved for ${label(issueType)}`);
-    } catch (err) {
-      toast(errorText(err), "error");
     }
   };
 
@@ -258,44 +234,21 @@ function Form({ initial }: { initial: Initial }) {
           </label>
         </div>
 
+        <label className={field}>
+          <span className={cap}>Issue type</span>
+          <Select value={issueType} onChange={(e) => setIssueType(e.target.value)}>
+            {ISSUE_TYPES.map((t) => (
+              <option key={t} value={t}>
+                {label(t)}
+              </option>
+            ))}
+          </Select>
+        </label>
+
         <div className={field}>
           <span className={cap}>Time window</span>
           <WindowField value={windowText} onChange={setWindowText} />
         </div>
-      </Card>
-
-      <Card className="space-y-4">
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <CardHead title="Checklist" />
-          <div className="flex flex-wrap items-center gap-2">
-            <Select
-              aria-label="Issue type"
-              className="w-auto"
-              value={issueType}
-              onChange={(e) => setIssueType(e.target.value)}
-            >
-              {ISSUE_TYPES.map((t) => (
-                <option key={t} value={t}>
-                  {label(t)}
-                </option>
-              ))}
-            </Select>
-            <Btn disabled={!typeTemplate} onClick={() => typeTemplate && setItems(typeTemplate.map((l) => newDraftItem(l)))}>
-              Load template
-            </Btn>
-          </div>
-        </div>
-        <ChecklistEditor items={items} onChange={setItems} />
-        {canTemplate ? (
-          <button
-            type="button"
-            onClick={() => void doSaveTemplate()}
-            disabled={toChecklistArgs(items).length === 0}
-            className="text-sm font-medium text-primary hover:underline disabled:opacity-40"
-          >
-            Save checklist as template for {label(issueType)}
-          </button>
-        ) : null}
       </Card>
 
       <Card className="space-y-3">
@@ -331,7 +284,10 @@ function Form({ initial }: { initial: Initial }) {
 
 export default function NewWorkOrderPage() {
   return (
-    <RequireView views={["admin", "asset_manager"]}>
+    // Admin view only (any Admin, e.g. Pat or Alex, may create a work order directly). An asset
+    // manager never creates a work order: their manual entries go to Pat as a request instead
+    // (NewWorkOrderDrawer -> maintenance.createManual, always "Waiting on Pat").
+    <RequireView views={["admin"]}>
       <Suspense fallback={<Spinner />}>
         <NewWorkOrderInner />
       </Suspense>

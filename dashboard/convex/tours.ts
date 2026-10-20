@@ -2,8 +2,8 @@ import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { action, internalAction, internalMutation, internalQuery, mutation, query } from "./_generated/server";
-import type { ActionCtx } from "./_generated/server";
-import { currentOrg, requireOrg, requireOrgAdmin, requireOrgId, viewFor } from "./authz";
+import type { ActionCtx, MutationCtx } from "./_generated/server";
+import { currentOrg, requireOrg, requireOrgAdmin, requireOrgId, isAdminView, viewFor } from "./authz";
 import * as google from "./googleApi";
 import { accessTokenFor } from "./googleCalendar";
 import * as sched from "./tourSchedule";
@@ -83,7 +83,7 @@ export const availabilitySettings = query({
     const today = new Date().toISOString().slice(0, 10);
 
     return {
-      isAdmin: org.isAdmin,
+      isAdmin: isAdminView(org),
       timeZone: organization?.timeZone ?? null,
       mine: {
         // False until they have saved hours once — the Calendar page asks them on first visit.
@@ -113,29 +113,43 @@ export const saveMyHours = mutation({
   args: { weeklyHours: weeklyHoursValidator },
   handler: async (ctx, args) => {
     const { user } = await requireOrg(ctx);
-    const weeklyHours = sched.validateWeeklyHours(args.weeklyHours);
-    if (weeklyHours.length === 0) {
-      throw new Error("Pick at least one day. To stop taking tours, switch tours off on the Team page.");
-    }
-
-    const now = Date.now();
-    const existing = await ctx.db
-      .query("tourAvailability")
-      .withIndex("by_user", (q) => q.eq("userId", user._id))
-      .unique();
-    if (existing) {
-      await ctx.db.patch(existing._id, { weeklyHours, hoursSavedAt: now, updatedAt: now });
-    } else {
-      await ctx.db.insert("tourAvailability", {
-        userId: user._id,
-        availableForTours: true,
-        weeklyHours,
-        hoursSavedAt: now,
-        updatedAt: now,
-      });
-    }
+    await saveWeeklyHours(ctx, user._id, args.weeklyHours);
   },
 });
+
+/**
+ * Validates and stores one person's weekly tour hours. Shared by saveMyHours (own hours) and
+ * assetManagers.setAvailability (an admin setting an asset manager's); the CALLER is responsible
+ * for the permission and org checks. Returns the validated hours.
+ */
+export async function saveWeeklyHours(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+  input: sched.DayHours[],
+): Promise<sched.DayHours[]> {
+  const weeklyHours = sched.validateWeeklyHours(input);
+  if (weeklyHours.length === 0) {
+    throw new Error("Pick at least one day. To stop taking tours, switch tours off on the Team page.");
+  }
+
+  const now = Date.now();
+  const existing = await ctx.db
+    .query("tourAvailability")
+    .withIndex("by_user", (q) => q.eq("userId", userId))
+    .unique();
+  if (existing) {
+    await ctx.db.patch(existing._id, { weeklyHours, hoursSavedAt: now, updatedAt: now });
+  } else {
+    await ctx.db.insert("tourAvailability", {
+      userId,
+      availableForTours: true,
+      weeklyHours,
+      hoursSavedAt: now,
+      updatedAt: now,
+    });
+  }
+  return weeklyHours;
+}
 
 /**
  * Switches someone's tours on or off, from the Team page. Anyone may switch their own; only an
@@ -146,7 +160,7 @@ export const setTakingTours = mutation({
   args: { userId: v.id("users"), takingTours: v.boolean() },
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
-    if (args.userId !== org.user._id && !org.isAdmin) {
+    if (args.userId !== org.user._id && !isAdminView(org)) {
       throw new Error("Only a team admin can change a teammate's tours.");
     }
 
@@ -260,7 +274,7 @@ export const tourDetails = query({
     const org = await requireOrg(ctx);
     const tour = await ctx.db.get(args.tourId);
     if (!tour || tour.orgId !== org.orgId) return null;
-    if (tour.assignedUserId !== org.user._id && !org.isAdmin) {
+    if (tour.assignedUserId !== org.user._id && !isAdminView(org)) {
       throw new Error("Only a team admin can view a teammate's tour.");
     }
 
@@ -392,7 +406,7 @@ export const cancelBookedTour = action({
     const org = await requireOrgId(ctx);
     const tour = await ctx.runQuery(internal.tours.byId, { tourId: args.tourId });
     if (!tour || tour.orgId !== org.orgId) throw new Error("That tour was not found.");
-    if (tour.assignedUserId !== org.userId && !org.isAdmin) {
+    if (tour.assignedUserId !== org.userId && !isAdminView(org)) {
       throw new Error("Only a team admin can cancel a teammate's tour.");
     }
     if (tour.status === "cancelled") return;
@@ -405,8 +419,9 @@ export const cancelBookedTour = action({
 // --- Booking data -------------------------------------------------------------
 
 /**
- * Everyone on the team who can be booked right now: taking tours, with a calendar connected
- * that Google still accepts. Someone who needs to reconnect is left out rather than booked
+ * Everyone who can be booked right now: an admin-chosen lead assignee (memberships.leadAssignee)
+ * with the asset_manager job role, not out of office, taking tours, with a calendar connected
+ * that Google still accepts. NOT the whole team. Someone who needs to reconnect is left out rather than booked
  * blind — we cannot see their calendar, so we cannot know they are free.
  */
 export const bookingContext = internalQuery({
@@ -425,8 +440,13 @@ export const bookingContext = internalQuery({
       .withIndex("by_org", (q) => q.eq("orgId", orgId))
       .collect();
 
+    const now = Date.now();
     const members = [];
     for (const m of memberships) {
+      // Only the admin-chosen lead assignees are bookable: asset managers who are not out of
+      // office. (Taking tours + a valid calendar are checked just below.)
+      if (!m.leadAssignee || !(m.jobRoles ?? []).includes("asset_manager")) continue;
+      if (m.unavailableUntil !== undefined && m.unavailableUntil > now) continue;
       const hours = await ctx.db
         .query("tourAvailability")
         .withIndex("by_user", (q) => q.eq("userId", m.userId))
@@ -723,7 +743,10 @@ async function loadContext(ctx: ActionCtx, orgId: string | undefined): Promise<C
   if (!context) return { ok: false, reason: "This call could not be matched to a team." };
   if (!context.timeZone) return { ok: false, reason: "The team has not set a time zone yet." };
   if (context.members.length === 0) {
-    return { ok: false, reason: "Nobody on the team has a calendar connected and is taking tours." };
+    return {
+      ok: false,
+      reason: "No lead-assignee asset manager has a calendar connected and is taking tours.",
+    };
   }
   return {
     ok: true,
@@ -935,6 +958,7 @@ export type BookingResult =
       status: "booked";
       label: string;
       memberFirstName: string;
+      memberUserId: Id<"users">;
       propertyName: string;
       propertyAddress: string | null;
     }
@@ -1025,7 +1049,14 @@ export async function bookTour(
         tourEvent({ ...args, propertyName, propertyAddress, start, end, timeZone }),
       );
       await ctx.runMutation(internal.tours.attachEvent, { tourId, googleEventId: id });
-      return { status: "booked", label, memberFirstName: member.firstName, propertyName, propertyAddress };
+      return {
+        status: "booked",
+        label,
+        memberFirstName: member.firstName,
+        memberUserId: member.userId,
+        propertyName,
+        propertyAddress,
+      };
     } catch (err) {
       // A tour that is not in anyone's calendar is a tour nobody shows up to. Give the slot back
       // and try the next free person rather than confirming it to the caller.
@@ -1189,7 +1220,14 @@ export async function rescheduleTour(
           }
         }
       }
-      return { status: "booked", label, memberFirstName: member.firstName, propertyName, propertyAddress };
+      return {
+        status: "booked",
+        label,
+        memberFirstName: member.firstName,
+        memberUserId: member.userId,
+        propertyName,
+        propertyAddress,
+      };
     } catch (err) {
       console.error(`[tours] could not move ${tour.id} to ${member.userId}:`, err);
       await ctx.runMutation(internal.tours.restoreReservation, { tourId: tour.id, ...previous });

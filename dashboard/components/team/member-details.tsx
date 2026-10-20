@@ -14,7 +14,7 @@ import { Btn, DatePicker, Input, Pill, Seg, Select, type Tone } from "@/componen
 type Channel = "sms" | "email" | "push";
 
 export const APP_ROLE_OPTIONS: ReadonlyArray<{ value: AppRole; label: string; tone: Tone; blurb: string }> = [
-  { value: "admin", label: "Admin", tone: "warn", blurb: "Full access" },
+  { value: "admin", label: "Admin", tone: "warn", blurb: "Full access. Pat and Alex." },
   { value: "asset_manager", label: "Asset manager", tone: "acc", blurb: "Reviews requests for their units" },
   { value: "technician", label: "Technician", tone: "ok", blurb: "Works assigned jobs on their phone" },
 ];

@@ -8,6 +8,17 @@ import type { QueryCtx } from "./_generated/server";
 import type { Doc } from "./_generated/dataModel";
 import { amScope, canSeeUnit } from "./amScope";
 import { findResidentsByPhone } from "./residents";
+import { STATUS_LABEL, requestStatusKey, workOrderStatusKey, type StatusKey } from "./board";
+
+/**
+ * A resident-call row is either a maintenance request raised from a phone call (the normal
+ * path: Sarah's log_maintenance_request) or a legacy/non-maintenance tenantIssues row
+ * (log_tenant_issue, escalation safety net). One row per call: when a request exists for a
+ * conversation it wins and the tenantIssues row for the same conversation is hidden.
+ */
+const LEVEL_SCORE: Record<string, number> = { emergency: 10, urgent: 7, routine: 4, informational: 2 };
+
+const CLOSED_STATUS_KEYS = new Set<StatusKey>(["completed", "closed", "rejected"]);
 
 /**
  * For an asset manager, resident calls are limited to residents of their units (managed or
@@ -15,33 +26,141 @@ import { findResidentsByPhone } from "./residents";
  * when the trusted caller ID matches a resident of one. The unit the caller SAID is free text
  * and is never used for scoping. Everyone else sees the team's calls as before.
  */
-async function visibleIssues(ctx: QueryCtx, org: OrgContext, rows: Doc<"tenantIssues">[]) {
-  if (viewFor(org.isAdmin, org.jobRoles) !== "asset_manager") return rows;
-  const scope = await amScope(ctx, org);
-  const out: Doc<"tenantIssues">[] = [];
-  for (const issue of rows) {
-    const req = (
-      await ctx.db
-        .query("maintenanceRequests")
-        .withIndex("by_conversation", (q) => q.eq("elevenLabsConversationId", issue.elevenLabsConversationId))
-        .collect()
-    ).find((r) => r.orgId === org.orgId);
-    let visible = canSeeUnit(scope, req?.unitId);
-    if (!visible && !req?.unitId && issue.callerNumber) {
-      const matches = await findResidentsByPhone(ctx, org.orgId, issue.callerNumber);
-      visible = matches.some((m) => canSeeUnit(scope, m.unitId));
+async function loadCallRows(ctx: QueryCtx, org: OrgContext) {
+  const isAm = viewFor(org.isAdmin, org.jobRoles) === "asset_manager";
+  const scope = isAm ? await amScope(ctx, org) : null;
+
+  const visibleByPhone = async (unitId: Doc<"units">["_id"] | undefined, callerNumber?: string) => {
+    if (!scope) return true;
+    if (canSeeUnit(scope, unitId)) return true;
+    if (!unitId && callerNumber) {
+      const matches = await findResidentsByPhone(ctx, org.orgId, callerNumber);
+      return matches.some((m) => canSeeUnit(scope, m.unitId));
     }
-    if (visible) out.push(issue);
+    return false;
+  };
+
+  const requests = (
+    await ctx.db
+      .query("maintenanceRequests")
+      .withIndex("by_org_and_created", (q) => q.eq("orgId", org.orgId))
+      .collect()
+  ).filter((r) => r.source === "phone");
+  const requestConvIds = new Set(requests.map((r) => r.elevenLabsConversationId).filter(Boolean));
+
+  const issues = await ctx.db
+    .query("tenantIssues")
+    .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
+    .collect();
+
+  const rows: CallRow[] = [];
+
+  for (const r of requests) {
+    if (!(await visibleByPhone(r.unitId, r.callerNumber))) continue;
+    const wo = (await ctx.db.query("workOrders").withIndex("by_request", (q) => q.eq("requestId", r._id)).collect())
+      .filter((w) => w.orgId === org.orgId)
+      .sort((x, y) => y.createdAt - x.createdAt)[0];
+    const key: StatusKey = wo ? workOrderStatusKey(wo) : (requestStatusKey(r) ?? "in_progress");
+    const unit = r.unitId ? await ctx.db.get(r.unitId) : null;
+    const conv = r.conversationId ? await ctx.db.get(r.conversationId) : null;
+    rows.push({
+      kind: "request",
+      key: `request:${r._id}`,
+      requestId: r._id,
+      workOrderId: wo?._id,
+      mrNumber: `MR-${r.number}`,
+      woNumber: wo ? `WO-${wo.number}` : undefined,
+      conversationId: r.conversationId,
+      callerName: r.callerName,
+      unit: unit?.unitNumber ?? r.spokenUnit,
+      callerNumber: r.callerNumber,
+      callbackNumber: r.callbackNumber,
+      reason: r.title?.trim() || r.description,
+      description: r.description,
+      category: r.issueType,
+      severity: r.severityScore ?? LEVEL_SCORE[r.severity] ?? 4,
+      severityLevel: r.severity,
+      severityReason: r.severityReason,
+      status: CLOSED_STATUS_KEYS.has(key) ? "resolved" : "open",
+      statusLabel: STATUS_LABEL[key],
+      createdAt: r.createdAt,
+      channel: conv?.channel ?? null,
+      durationSec: conv?.durationSec ?? null,
+      messageCount: 0,
+    });
   }
-  return out;
+
+  for (const issue of issues) {
+    if (requestConvIds.has(issue.elevenLabsConversationId)) continue;
+    if (scope) {
+      // Legacy rows have no request; scope on the caller ID only (never the spoken unit).
+      const matches = issue.callerNumber ? await findResidentsByPhone(ctx, org.orgId, issue.callerNumber) : [];
+      if (!matches.some((m) => canSeeUnit(scope, m.unitId))) continue;
+    }
+    const conv = issue.conversationId ? await ctx.db.get(issue.conversationId) : null;
+    rows.push({
+      kind: "issue",
+      key: `issue:${issue._id}`,
+      issueId: issue._id,
+      conversationId: issue.conversationId,
+      callerName: issue.callerName,
+      unit: issue.unit,
+      callerNumber: issue.callerNumber,
+      callbackNumber: issue.callbackNumber,
+      reason: issue.reason,
+      category: issue.category,
+      callType: issue.callType,
+      severity: issue.severity,
+      severityReason: issue.severityReason,
+      originalSeverity: issue.originalSeverity,
+      status: issue.status,
+      statusLabel: issue.status === "open" ? "Open" : "Resolved",
+      createdAt: issue.createdAt,
+      channel: conv?.channel ?? null,
+      durationSec: conv?.durationSec ?? null,
+      messageCount: 0,
+    });
+  }
+
+  return rows;
 }
+
+export type CallRow = {
+  kind: "request" | "issue";
+  key: string;
+  issueId?: Doc<"tenantIssues">["_id"];
+  requestId?: Doc<"maintenanceRequests">["_id"];
+  workOrderId?: Doc<"workOrders">["_id"];
+  mrNumber?: string;
+  woNumber?: string;
+  conversationId?: Doc<"conversations">["_id"];
+  callerName?: string;
+  unit?: string;
+  callerNumber?: string;
+  callbackNumber?: string;
+  reason: string;
+  description?: string;
+  category?: string;
+  callType?: string;
+  severity: number;
+  severityLevel?: string;
+  severityReason?: string;
+  originalSeverity?: number;
+  status: "open" | "resolved";
+  statusLabel: string;
+  createdAt: number;
+  channel: string | null;
+  durationSec: number | null;
+  messageCount: number;
+};
 
 // --- Reads ----------------------------------------------------------------
 
 /**
- * Every logged resident call for the signed-in user, worst first.
+ * Every resident call for the signed-in user, worst first: maintenance requests raised from
+ * calls plus legacy/non-maintenance tenantIssues, one row per call.
  *
- * The severity-first sort lives here rather than in the page so no caller can get it wrong —
+ * The severity-first sort lives here rather than in the page so no caller can get it wrong --
  * an urgent issue sinking below a routine one is the one failure mode that actually matters.
  */
 export const issues = query({
@@ -52,41 +171,8 @@ export const issues = query({
     // Resident-call detail is not for technicians or accountants.
     const view = viewFor(org.isAdmin, org.jobRoles);
     if (view !== "admin" && view !== "asset_manager") return [];
-    const rows = await visibleIssues(
-      ctx,
-      org,
-      await ctx.db
-        .query("tenantIssues")
-        .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
-        .collect(),
-    );
-
-    // Join the call itself so the row can expand into a transcript the same way the Leads
-    // page does. conversationId only exists once the post-call webhook has landed, so
-    // everything from the conversation is optional here.
-    const withCall = await Promise.all(
-      rows.map(async (issue) => {
-        const conv = issue.conversationId ? await ctx.db.get(issue.conversationId) : null;
-        const messageCount = conv
-          ? (
-              await ctx.db
-                .query("messages")
-                .withIndex("by_conversation", (q) => q.eq("conversationId", conv._id))
-                .collect()
-            ).length
-          : 0;
-        return {
-          ...issue,
-          channel: conv?.channel ?? null,
-          durationSec: conv?.durationSec ?? null,
-          startedAt: conv?.startedAt ?? null,
-          callSummary: conv?.summary ?? null,
-          messageCount,
-        };
-      }),
-    );
-
-    return withCall.sort((a, b) => b.severity - a.severity || b.createdAt - a.createdAt);
+    const rows = await loadCallRows(ctx, org);
+    return rows.sort((a, b) => b.severity - a.severity || b.createdAt - a.createdAt);
   },
 });
 
@@ -94,21 +180,12 @@ export const stats = query({
   args: {},
   handler: async (ctx) => {
     const org = await currentOrg(ctx);
-    if (!org) return { openIssues: 0, highSeverityOpen: 0, resolvedIssues: 0 };
+    const none = { openIssues: 0, highSeverityOpen: 0, resolvedIssues: 0 };
+    if (!org) return none;
     const view = viewFor(org.isAdmin, org.jobRoles);
-    if (view !== "admin" && view !== "asset_manager") {
-      return { openIssues: 0, highSeverityOpen: 0, resolvedIssues: 0 };
-    }
-    const rows = await visibleIssues(
-      ctx,
-      org,
-      await ctx.db
-        .query("tenantIssues")
-        .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
-        .collect(),
-    );
+    if (view !== "admin" && view !== "asset_manager") return none;
+    const rows = await loadCallRows(ctx, org);
     const open = rows.filter((r) => r.status === "open");
-
     return {
       openIssues: open.length,
       highSeverityOpen: open.filter((r) => r.severity >= 7).length,

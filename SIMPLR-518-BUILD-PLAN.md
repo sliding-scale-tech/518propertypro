@@ -4,6 +4,9 @@
 >
 > **Plan written:** 2026-10-15 · **Target handover:** **2026-11-01** (PRD §15) · **Commercial terms:** free for 60 days, then $600/month
 
+> [!NOTE]
+> Checklist removed per client decision (2026-10-16); PRD §6.4/6.5 checklist requirement waived by user. DB fields/table kept (deprecated) so no data is lost. Checklist mentions below are historical.
+
 > [!CAUTION]
 > **Schedule reality check.** There are **17 calendar days** between today and the target handover. PRD §15 assumes about one week to a *first reviewable build*, followed by review rounds and hardening. Maintenance (Phases 0 to 3 below) fits in that window if client inputs arrive now. **Stripe payments and the ROS cannot be finished by Nov 1** unless Alex, Pat and the accountant supply the payment model and a real ROS example this week. Agree this split in writing before starting.
 

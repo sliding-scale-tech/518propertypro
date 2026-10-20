@@ -3,7 +3,7 @@ import { internalMutation, internalQuery, mutation, query } from "./_generated/s
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { writeAudit } from "./audit";
-import { currentOrg, requireAdminView, requireJobRole, viewFor } from "./authz";
+import { currentOrg, requireAdminView, viewFor } from "./authz";
 import { requireE164 } from "./phone";
 import { propertyAddressValidator } from "./placesApi";
 import { amScope } from "./amScope";
@@ -309,7 +309,7 @@ export const setDefaultAssetManager = mutation({
     applyTo: v.union(v.literal("units_without_override"), v.literal("all")),
   },
   handler: async (ctx, args): Promise<{ changed: number; total: number }> => {
-    const org = await requireJobRole(ctx, "executive", "maintenance_lead");
+    const org = await requireAdminView(ctx);
     const property = await ctx.db.get(args.propertyId);
     if (!property || property.orgId !== org.orgId) throw new Error("Property not found.");
     return await applyDefaultAssetManager(ctx, org, property, args.userId, args.applyTo);

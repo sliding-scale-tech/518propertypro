@@ -1,10 +1,10 @@
 "use client";
 
 import { useMutation, useQuery } from "convex/react";
-import { AlertTriangle, ArrowLeft, Camera, Check, Loader2, MapPin, Minus, PawPrint, Plus, Receipt, RotateCw } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Camera, Check, Loader2, MapPin, Minus, PawPrint, Plus, Receipt, RotateCw, Video, X } from "lucide-react";
 import Link from "next/link";
 import { Component, useRef, useState, type ReactNode } from "react";
-import { DatePicker, Pill } from "@/components/ui";
+import { ConfirmDialog, DatePicker, Pill, SevChip } from "@/components/ui";
 import { useToast } from "@/components/toast";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -65,18 +65,18 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
   const toast = useToast();
   const data = useQuery(api.workOrders.get, { workOrderId: id });
   const start = useMutation(api.workOrders.start);
-  const toggle = useMutation(api.workOrders.toggleChecklistItem);
   const addTime = useMutation(api.workOrders.addTime);
   const addExpense = useMutation(api.workOrders.addExpense);
   const addNote = useMutation(api.workOrders.addNote);
   const genUrl = useMutation(api.workOrders.generateUploadUrl);
   const attach = useMutation(api.workOrders.attachFile);
   const submit = useMutation(api.workOrders.submitCompleted);
+  const removeOwn = useMutation(api.workOrders.removeOwnFile);
+  const [removeId, setRemoveId] = useState<Id<"workOrderFiles"> | null>(null);
 
-  const [overrides, setOverrides] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
-  const blobs = useRef(new Map<number, { blob: Blob; kind: "completion_photo" | "receipt" }>());
+  const blobs = useRef(new Map<number, { blob: Blob; kind: "completion_photo" | "completion_video" | "receipt" }>());
   const keySeq = useRef(0);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [justSubmitted, setJustSubmitted] = useState(false);
@@ -110,7 +110,7 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
   const inProgress = wo.status === "in_progress";
   const canStart = data.viewerCan.work && wo.status === "assigned";
   const canEdit = data.viewerCan.work && inProgress;
-  const photos = files.filter((f) => f.kind === "completion_photo");
+  const photos = files.filter((f) => f.kind === "completion_photo" || f.kind === "completion_video");
   const receipts = files.filter((f) => f.kind === "receipt");
 
   async function run(label: string, fn: () => Promise<void>, ok?: string) {
@@ -122,21 +122,6 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
       toast(errorMessage(e), "error");
     } finally {
       setBusy(null);
-    }
-  }
-
-  async function onToggle(itemId: string, done: boolean) {
-    setOverrides((o) => ({ ...o, [itemId]: done }));
-    try {
-      await toggle({ workOrderId: id, itemId, done });
-    } catch (e) {
-      toast(errorMessage(e), "error");
-    } finally {
-      setOverrides((o) => {
-        const next = { ...o };
-        delete next[itemId];
-        return next;
-      });
     }
   }
 
@@ -173,6 +158,26 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
       blobs.current.set(key, { blob: await compressImage(file), kind: "completion_photo" });
       await uploadOne(key);
     }
+  }
+
+  async function onVideo(list: FileList | null) {
+    const file = list?.[0];
+    if (!file) return;
+    if (file.size > 50 * 1024 * 1024) {
+      toast("Videos can be at most 50 MB.", "error");
+      return;
+    }
+    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+    const guessed: Record<string, string> = { mp4: "video/mp4", mov: "video/quicktime", webm: "video/webm", ogg: "video/ogg", m4v: "video/x-m4v" };
+    const type = file.type && file.type !== "application/octet-stream" ? file.type : guessed[ext];
+    if (!type) {
+      toast("Choose an mp4, webm, or mov video.", "error");
+      return;
+    }
+    const key = ++keySeq.current;
+    setUploads((u) => [...u, { key, name: file.name || "Video", pct: 0, state: "working" }]);
+    blobs.current.set(key, { blob: type === file.type ? file : new Blob([file], { type }), kind: "completion_video" });
+    await uploadOne(key);
   }
 
   async function onReceipt() {
@@ -213,15 +218,43 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
     }
   }
 
+  // Mirrors the server's submit gate so the button only lights up when it would succeed.
+  const need = wo.requiredOnSubmit;
+  const ready =
+    (!need.photos || photos.length > 0) &&
+    (!need.hours || time.length > 0) &&
+    (!need.receipts || receipts.length > 0) &&
+    (!need.notes || notes.length > 0);
   const missing = submitError?.match(/Missing:\s*(.*?)\.?$/)?.[1]?.split(/,\s*/);
   const hasPets = /\b(pet|pets|dog|dogs|cat|cats)\b/i.test(wo.accessNotes ?? "");
 
   return (
     <div className={canEdit ? "pb-28" : "pb-6"}>
+      <ConfirmDialog
+        open={removeId !== null}
+        title="Remove this photo?"
+        message="This can't be undone."
+        confirmLabel="Remove"
+        danger
+        busy={busy !== null}
+        onCancel={() => setRemoveId(null)}
+        onConfirm={() => {
+          const fileId = removeId;
+          if (!fileId) return;
+          void run("remove", async () => {
+            await removeOwn({ workOrderId: id, fileId });
+            setRemoveId(null);
+          }, "Photo removed");
+        }}
+      />
       <Link href="/tech" className="inline-flex min-h-11 items-center gap-1 text-sm font-medium text-muted-foreground">
         <ArrowLeft className="h-4 w-4" /> My jobs
       </Link>
 
+      <p className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+        <span className="font-mono">WO-{wo.number}</span>
+        <SevChip level={wo.priority} />
+      </p>
       <h1 className="mt-1 text-xl font-semibold leading-snug">{wo.title}</h1>
       <p className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
         <Pill>{STATUS_LABEL[wo.status] ?? wo.status}</Pill>
@@ -276,45 +309,33 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
         </button>
       )}
 
-      {wo.checklist.length > 0 && (
-        <Section title={`Checklist (${wo.checklist.filter((c) => overrides[c.id] ?? c.done).length}/${wo.checklist.length})`}>
-          <ul className="space-y-2">
-            {wo.checklist.map((c) => {
-              const done = overrides[c.id] ?? c.done;
-              return (
-                <li key={c.id}>
-                  <label
-                    className={`flex min-h-12 items-center gap-3 rounded-xl border border-border px-3 py-2 ${
-                      canEdit ? "" : "opacity-80"
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={done}
-                      disabled={!canEdit}
-                      onChange={(e) => void onToggle(c.id, e.target.checked)}
-                      className="h-7 w-7 shrink-0 accent-primary"
-                    />
-                    <span className={`text-sm ${done ? "text-muted-foreground line-through" : ""}`}>
-                      {c.label}
-                      {c.required && <span className="ml-1 text-xs text-danger-ink">required</span>}
-                    </span>
-                  </label>
-                </li>
-              );
-            })}
-          </ul>
-        </Section>
-      )}
-
       {(canEdit || photos.length > 0) && (
-        <Section title={`Photos (${photos.length})`}>
+        <Section title={`Photos & videos (${photos.length})`}>
           {photos.length > 0 && (
             <div className="grid grid-cols-3 gap-2">
               {photos.map((f) =>
                 f.url ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img key={f._id} src={f.url} alt="Completion photo" className="aspect-square w-full rounded-xl object-cover" />
+                  <div key={f._id} className="group relative aspect-square">
+                    {f.kind === "completion_video" ? (
+                      <video src={f.url} controls playsInline className="h-full w-full rounded-xl bg-black object-cover" />
+                    ) : (
+                      <a href={f.url} target="_blank" rel="noopener noreferrer" className="block h-full w-full">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={f.url} alt="Completion photo" className="h-full w-full rounded-xl object-cover" />
+                      </a>
+                    )}
+                    {f.canRemove ? (
+                      <button
+                        type="button"
+                        aria-label="Remove photo"
+                        title="Remove photo"
+                        onClick={() => setRemoveId(f._id)}
+                        className="absolute right-1.5 top-1.5 flex h-9 w-9 items-center justify-center rounded-full bg-black/65 text-white focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100"
+                      >
+                        <X aria-hidden className="h-4 w-4" />
+                      </button>
+                    ) : null}
+                  </div>
                 ) : null,
               )}
             </div>
@@ -348,11 +369,12 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
             </div>
           ))}
           {canEdit && (
+            <div className="flex flex-col gap-2">
             <label className={`${btnCls} cursor-pointer`}>
               <Camera className="h-5 w-5" /> Add photos
               <input
                 type="file"
-                accept="image/*"
+                accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif"
                 capture="environment"
                 multiple
                 className="sr-only"
@@ -362,6 +384,19 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
                 }}
               />
             </label>
+            <label className={`${btnCls} cursor-pointer`}>
+              <Video className="h-5 w-5" /> Add video
+              <input
+                type="file"
+                accept="video/mp4,video/webm,video/quicktime,.mov,.mp4,.webm"
+                className="sr-only"
+                onChange={(e) => {
+                  void onVideo(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+            </label>
+            </div>
           )}
         </Section>
       )}
@@ -580,12 +615,17 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
             )}
             <button
               onClick={() => void onSubmit()}
-              disabled={busy !== null}
+              disabled={busy !== null || !ready}
               className={bigBtnCls}
             >
               {busy === "submit" && <Loader2 className="h-5 w-5 animate-spin" />}
               Mark complete
             </button>
+            <p className="mt-2 text-center text-xs text-muted-foreground">
+              {ready
+                ? "Pat gets the photos, receipts and hours right away."
+                : "Add what is still needed (photo, hours, receipt or note) to submit."}
+            </p>
           </div>
         </div>
       )}

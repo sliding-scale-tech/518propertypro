@@ -20,9 +20,9 @@ import {
 } from "./screeningPrompt";
 import { coreBlock } from "./coreQuestions";
 import { withTourBooking } from "./tourPrompt";
-import { currentOrg, requireOrgId } from "./authz";
+import { currentOrg, isAdminView, requireOrgId } from "./authz";
 import { writeAudit } from "./audit";
-import { composeSarahSections } from "./sarahConfigLib";
+import { composeSarahSections, defaultConfig, normalizeConfig } from "./sarahConfigLib";
 import type { SarahConfig } from "./sarahConfigLib";
 
 // Jessica — premade, American, female, "conversational" use case. Premade rather than a
@@ -114,19 +114,17 @@ YOUR JOB, IN ORDER:
    address and a few plain details about it (type, number of units) if they offer them, then
    call route_owner_prospect. Tell them someone from the team will be in touch. Do not discuss
    fees, terms or what the company can promise.
-2. If it's a leasing inquiry, gather everything listed under WHAT TO ASK EVERY LEASING
-   CALLER below, then everything under LEASING QUESTIONS WE ONLY RECORD and EXTRA SCREENING
-   QUESTIONS. Never invent questions of your own.
-3. Once you have them, call check_qualification. Send only the fields you were actually told to
-   ask about — leave the rest out entirely rather than guessing at them — plus every extra
-   screening answer in the screening_answers argument. This only records their answers for the
-   team; it does not decide anything.
-4. Speak the result plainly and warmly. Tell them their answers are recorded and the team will
-   review them. Follow CAPTURE ONLY below: you never tell a caller whether they qualify. If
-   the result says something of the type they asked for is available, offer a tour. If not, say
-   so and follow WHEN THERE'S NO MATCH.
-5. If they want a tour, follow TOUR BOOKING below to find a time and book it.
-6. Once the reason for the call is resolved — a tour is booked, their details are recorded and
+2. If it's a leasing inquiry, follow the LEASING CALLS section below: collect what is listed under
+   WHAT TO ASK EVERY LEASING CALLER, LEASING QUESTIONS WE ONLY RECORD and EXTRA SCREENING QUESTIONS,
+   exactly ONE question per turn, recording it with log_lead as you go. Never invent questions of your own.
+3. Record, never judge. log_lead only stores their answers for the team and returns what is
+   available; it never decides anything. If EXTRA SCREENING QUESTIONS are listed, record those
+   answers with check_qualification too. Tell them their answers are recorded and the team will
+   review them. Follow CAPTURE ONLY below: you never tell a caller whether they qualify. If the
+   result says something of the type they asked for is available, offer a tour. If not, say so and
+   follow WHEN THERE'S NO MATCH.
+4. If they want a tour, follow TOUR BOOKING below to find a time and book it.
+5. Once the reason for the call is resolved — a tour is booked, their details are recorded and
    next steps given, or you've handed off with escalate — the call is done. Ask one time, "Is
    there anything else I can help with?" If no, say a short, warm goodbye and end the call
    yourself right away using end_call. Do not keep talking, recap what already happened, or
@@ -136,10 +134,9 @@ YOUR JOB, IN ORDER:
 {{CORE_QUESTIONS}}
 
 LEASING QUESTIONS WE ONLY RECORD:
-These are approved for ${COMPANY_NAME} and are the only exception to the rule that the list above
-is exhaustive. Ask them conversationally, after the questions above, and send the answers to
-check_qualification with the argument named in brackets. Include every answer you have each time
-you call it.
+These are approved for ${COMPANY_NAME} and are the only questions allowed besides the list above.
+They are OPTIONAL: ask them one at a time, only after the required questions are done, and send the
+answers to log_lead with the argument named in brackets. Include every answer you have each time you call it.
 - Whether someone else, such as an agency, an employer or a family member, will be paying part or
   all of the rent [third_party_payer, true or false]. If yes, ask for that payer's name
   [payer_name], phone number [payer_phone] and email address [payer_email].
@@ -149,11 +146,11 @@ you call it.
 - Anything else they'd like us to know [other_info].
 
 PACING:
-Move at a natural, brisk pace. Once you have a piece of information, use it and move on —
-don't repeat it back for confirmation unless you genuinely didn't catch it. Don't re-explain
-things you've already said. The call should feel like it's clearly moving toward a resolution
-from the first question onward, not meandering — every turn should either be gathering
-something you still need or acting on what you already have.
+The HARD RULES FOR EVERY TURN at the top and bottom of these instructions are the only pacing rules:
+exactly ONE question per turn, a few words of acknowledgement, at most 25 words. Once you have a piece
+of information, use it and move on and never ask for something you already have. Record early: call
+the logging tool after the first useful answer and again as you learn more. The call should feel like
+it is clearly moving toward a resolution from the first question onward.
 
 CAPTURE ONLY — YOU NEVER JUDGE:
 Your job with a renter is to record their answers accurately, not to judge them. Never tell a
@@ -237,9 +234,9 @@ function screeningBlock(questions: ScreeningQuestion[]): string {
   });
 
   return `EXTRA SCREENING QUESTIONS FOR THIS PROPERTY:
-Ask every one of these as well, in your own words, worked naturally into the conversation
-rather than read out as a list. Ask them after the five core fields unless the caller brings
-one up first. They are set by the property manager and are not optional.
+Ask each of these as well, one question per turn, in your own words, never read out as a list.
+Ask them after the core fields unless the caller brings one up first. They are set by the
+property manager and are not optional.
 
 ${lines.join("\n")}
 
@@ -279,7 +276,9 @@ export function composePrompt(
   }
   // Last: the published Sarah configuration (P17) replaces the hard-coded life-safety and
   // resident blocks, so nothing above can re-introduce an unapproved script.
-  return sarah ? applySarahConfig(next, sarah) : next;
+  // With nothing published the defaults still apply: they carry the safe emergency fallback
+  // (leave the area, call 911), the one-question-at-a-time rules and the capture-only leasing flow.
+  return applySarahConfig(next, sarah ?? normalizeConfig(defaultConfig()));
 }
 
 /** Swaps one known block for its configured replacement, or appends the replacement if the stored prompt no longer contains it verbatim. */
@@ -290,6 +289,21 @@ function replaceBlock(prompt: string, old: string, replacement: string): string 
 }
 
 /**
+ * Swaps the resident-calls block for its configured replacement. A stored prompt can still carry an
+ * OLDER version of RESIDENT_TRIAGE_BLOCK (the text was reworded to ask one question at a time), which
+ * would not match verbatim and would be left in place next to the new one. So when the current text
+ * is not found, the old block is cut out by its fixed start line and the section that follows it.
+ */
+function replaceResidentBlock(prompt: string, replacement: string): string {
+  if (prompt.includes(RESIDENT_TRIAGE_BLOCK)) return replaceBlock(prompt, RESIDENT_TRIAGE_BLOCK, replacement);
+  const start = prompt.indexOf("RESIDENT CALLS:\nThis section supersedes");
+  const endMarker = "\n\nWHEN THERE'S NO MATCH:";
+  const end = start === -1 ? -1 : prompt.indexOf(endMarker, start);
+  if (start === -1 || end === -1) return `${prompt}\n\n${replacement}`;
+  return `${prompt.slice(0, start)}${replacement}${prompt.slice(end)}`;
+}
+
+/**
  * Renders a Sarah configuration into a prompt: company name, call types, the life-safety block
  * with per-incident scripts (approved ones verbatim), the resident-calls block and the
  * leasing mode. Pure, so the /sarah preview and the real push produce identical text.
@@ -297,11 +311,12 @@ function replaceBlock(prompt: string, old: string, replacement: string): string 
 export function applySarahConfig(prompt: string, config: SarahConfig): string {
   const sections = composeSarahSections(config);
   let next = replaceBlock(prompt, LIFE_SAFETY_BLOCK, sections.lifeSafety);
-  next = replaceBlock(next, RESIDENT_TRIAGE_BLOCK, sections.resident);
+  next = replaceResidentBlock(next, sections.resident);
   if (config.identity.companyName !== COMPANY_NAME) {
     next = next.split(COMPANY_NAME).join(config.identity.companyName);
   }
-  return sections.extra ? `${next}\n\n${sections.extra}` : next;
+  // The one-question-at-a-time rules open and close the prompt, so nothing between can outweigh them.
+  return [sections.top, next, sections.extra, sections.bottom].filter(Boolean).join("\n\n");
 }
 
 // --- Reads ----------------------------------------------------------------
@@ -419,9 +434,10 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       "Records a prospective tenant's stated bedrooms, budget, move-in date, pet needs, the " +
       "leasing answers your instructions list and any extra screening answers, and returns " +
       "what is available. It is capture only: the team reviews every answer, and the result " +
-      "never says whether the caller qualifies, so never tell them they do or do not. Call " +
-      "this once you have the answers your instructions list. Safe to call again in the same " +
-      "call if the caller revises an answer; include every answer you have each time.",
+      "never says whether the caller qualifies, so never tell them they do or do not. Use " +
+      "log_lead for the normal leasing answers as you collect them; call this only when your " +
+      "instructions list EXTRA SCREENING QUESTIONS, to record those answers. Safe to call again " +
+      "in the same call; include every answer you have each time.",
     url: `${siteUrl}/tools/check-qualification`,
     // Only the two structural fields are required. move_in_date, budget and pets_wanted are
     // optional because each property manager can switch those questions off (see
@@ -516,8 +532,8 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       "Books a tour for a leasing caller who wants one. Pass slot_start with a start value " +
       "from your latest find_tour_times result, only after reading it back and hearing yes. " +
       "Only if find_tour_times said booking isn't available, pass " +
-      "preferred_slot with their preferred day and time instead. Only call this after " +
-      "check_qualification has recorded their answers.",
+      "preferred_slot with their preferred day and time instead. Call log_lead first so the " +
+      "caller's answers are recorded.",
     url: `${siteUrl}/tools/request-tour`,
     // Neither slot field is required: which one applies depends on whether the team has booking
     // set up, and the webhook rejects a call that sends neither.
@@ -724,7 +740,8 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       "Looks up the caller's phone number (caller ID) against the resident list. Call it at the " +
       "start of a resident or maintenance call. If it matches, you get a first name and a unit " +
       "label: use them only to CONFIRM ('Am I speaking with Sam in unit 4B?'), never to assume. " +
-      "It returns nothing else about the resident.",
+      "It returns nothing else about the resident. If it does not match, ask the caller's name, " +
+      "then the property and unit, and use find_unit.",
     url: `${siteUrl}/tools/lookup-caller`,
     required: ["conversation_id"],
     properties: {
@@ -736,9 +753,11 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
   {
     name: "find_unit",
     description:
-      "Checks whether the address and unit number a caller said match a unit in our records. " +
-      "Returns only whether it matched and the unit's label; it never returns anything about who " +
-      "lives there. Use it when a caller gives an address and unit you want to check.",
+      "Checks whether the property name or address and the unit number a caller said match a unit " +
+      "in our records. Returns only whether it matched and the unit's label; it never returns " +
+      "anything about who lives there. Use it after lookup_caller did not match, once you have the " +
+      "caller's name, the property and the unit. It is the last lookup: if it does not match, take " +
+      "a callback number or email only to record it and use log_unmatched_caller.",
     url: `${siteUrl}/tools/find-unit`,
     required: ["conversation_id", "spoken_unit"],
     properties: {
@@ -756,12 +775,16 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
     description:
       "Records a resident's maintenance request, including emergencies. Use it for anything " +
       "broken, leaking, not working or unsafe, and for tenant-responsibility items (bulbs, " +
-      "blinds, trash to the curb) with issue_type tenant_responsibility. Ask for their name, " +
+      "blinds, trash to the curb) with issue_type tenant_responsibility. A matched resident's " +
+      "question that is not a repair (a lease question, a package, parking) is also logged here, " +
+      "with issue_type other, severity informational and a description that begins 'Question, not " +
+      "a repair:'; the asset manager reviews it. Ask for their name, " +
       "address, unit and a callback number first and pass them here, EXCEPT in a life-safety " +
       "emergency, where you log immediately with whatever you have. Never pass a placeholder " +
       "like 'unknown' for anything — leave the field out instead. Safe to call more than once " +
       "in the same call: each call updates the same request, so if you learn or correct " +
-      "anything afterwards, call it again with the full details. For an emergency or urgent " +
+      "anything afterwards, call it again: only the fields you send are updated. Log it as soon " +
+      "as you know the issue, then update as you learn more. For an emergency or urgent " +
       "issue, call escalate after logging it.",
     url: `${siteUrl}/tools/log-maintenance-request`,
     // Only what an emergency can supply with nothing else known. caller_name and the rest are
@@ -778,6 +801,8 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
           "The resident's full name, exactly as they gave it. Never a placeholder such as " +
           "'unknown' — if you don't have it yet, ask, or leave it out.",
       },
+      caller_email: { type: "string", description: "The caller's email address, only if they gave one." },
+      title: { type: "string", description: "A short title for the request, e.g. 'Kitchen ceiling leak'." },
       callback_phone: {
         type: "string",
         description:
@@ -825,6 +850,93 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
         type: "string",
         description: "A few words on why that level, e.g. 'no heat, unlivable but not dangerous'.",
       },
+    },
+  },
+  {
+    name: "log_unmatched_caller",
+    description:
+      "Records a caller who could not be matched to a unit by caller ID or by the property and unit " +
+      "they gave. Passes their details to an asset manager for a callback. It creates no " +
+      "maintenance request. Ask for a callback phone (and email if offered) only to record it, and " +
+      "read the number back. Never use them to look anyone up. Safe to call again to add details.",
+    url: `${siteUrl}/tools/log-unmatched-caller`,
+    required: ["conversation_id", "issue_summary"],
+    properties: {
+      conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
+      agent_id: { type: "string", dynamicVariable: "system__agent_id" },
+      caller_id: { type: "string", dynamicVariable: "system__caller_id" },
+      issue_summary: { type: "string", description: "One or two plain sentences on what the caller needs." },
+      reason: { type: "string", description: "Why they could not be matched, in a few words. Optional." },
+      caller_name: { type: "string", description: "The caller's name, if they gave it." },
+      callback_phone: { type: "string", description: "The number to call them back on, as digits, read back." },
+      caller_email: { type: "string", description: "Their email address, if they gave one." },
+      spoken_unit: { type: "string", description: "The unit number they said, if any." },
+      severity: {
+        type: "string",
+        description:
+          "Optional. Set to 'emergency' ONLY when the issue is life-safety (fire, gas leak, flooding, " +
+          "break-in, someone in danger). The team is then alerted. Leave it out otherwise.",
+      },
+    },
+  },
+  {
+    name: "send_photo_link",
+    description:
+      "Use ONLY when the caller says they are willing to send photos or video of the problem. It sends " +
+      "nothing to the caller: it records the offer on the maintenance request logged on this call and " +
+      "tells their asset manager, who decides what to do and follows up. Call it only after " +
+      "log_maintenance_request has run. Put the caller's own words, limits or caveats in note (for " +
+      "example 'can send photos tonight, no video'). Never tell the caller you will text them a link; " +
+      "say what the tool's say line says.",
+    url: `${siteUrl}/tools/send-photo-link`,
+    required: ["conversation_id"],
+    properties: {
+      conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
+      agent_id: { type: "string", dynamicVariable: "system__agent_id" },
+      caller_id: { type: "string", dynamicVariable: "system__caller_id" },
+      note: {
+        type: "string",
+        description: "What the caller said about photos or video, in a short sentence, including any limits.",
+      },
+      callback_phone: {
+        type: "string",
+        description: "A number the caller gave for the asset manager to reach them on, as digits. Leave out if none.",
+      },
+      caller_email: { type: "string", description: "Their email address, only if they gave one." },
+    },
+  },
+  {
+    name: "log_lead",
+    description:
+      "Records a prospective tenant's answers as you learn them. Capture only: it never says whether " +
+      "they qualify. Call it after the first useful answer and again as you learn more, with everything " +
+      "you have so far; later calls add to the same lead. Returns available_units (the only units you " +
+      "may offer) and who the lead is assigned to.",
+    url: `${siteUrl}/tools/log-lead`,
+    required: ["conversation_id"],
+    properties: {
+      conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
+      agent_id: { type: "string", dynamicVariable: "system__agent_id" },
+      caller_id: { type: "string", dynamicVariable: "system__caller_id" },
+      caller_name: { type: "string", description: "The caller's name." },
+      caller_phone: { type: "string", description: "A callback number for the caller, as digits." },
+      caller_email: { type: "string", description: "Their email address, if they gave one." },
+      bedrooms: { type: "string", description: "The bedroom count they want: 'studio', '1br', '2br', or '3br+'." },
+      move_in_date: { type: "string", description: "When they want to move in, in their own words." },
+      budget: { type: "number", description: "Their monthly budget in dollars." },
+      pets_wanted: { type: "boolean", description: "Whether they have or plan to bring pets." },
+      pet_type: { type: "string", description: "The kind of pet, if they have one." },
+      pet_count: { type: "number", description: "How many pets." },
+      third_party_payer: {
+        type: "boolean",
+        description: "Whether someone else (an agency, employer or family member) will pay some or all of the rent.",
+      },
+      payer_name: { type: "string", description: "That payer's name, only if third_party_payer is true." },
+      payer_phone: { type: "string", description: "That payer's phone number, as digits." },
+      payer_email: { type: "string", description: "That payer's email address." },
+      preferred_communities: { type: "string", description: "Communities in the Capital Region they would prefer." },
+      avoid_communities: { type: "string", description: "Communities in the Capital Region they want to avoid." },
+      other_info: { type: "string", description: "Anything else the caller wants the team to know." },
     },
   },
   {
@@ -889,6 +1001,11 @@ export const ensureTools = internalAction({
       ...d,
       requestHeaders: { "x-simplr-tool-secret": toolSecret },
     }));
+    // Only the tools in TOOL_DEFS are returned, and callers send that list as the agent's full
+    // tool_ids on every publish. A tool that was removed from TOOL_DEFS (find_resident, route
+    // /tools/find-resident) is therefore detached from the agent on its next save; it is never
+    // looked up here again. The orphaned workspace tool is left in ElevenLabs (it may still be
+    // attached to agents that have not been re-saved) and its route now answers 404.
     const ids: string[] = [];
 
     for (const def of defs) {
@@ -963,8 +1080,9 @@ export const saveAgent = action({
     voiceId: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<string> => {
-    const { orgId, userId, isAdmin } = await requireOrgId(ctx);
-    if (!isAdmin) throw new Error("Only a team admin can do that.");
+    const org = await requireOrgId(ctx);
+    if (!isAdminView(org)) throw new Error("You don't have access to that.");
+    const { orgId, userId } = org;
     // A no-op if this user already has an agent. Guarantees that even someone who opens
     // Settings and hits Save before ever placing a call still starts from the same seeded
     // setup (property + knowledge base included) as everyone else — not a bare prompt with
@@ -1209,14 +1327,30 @@ export const connectPhoneNumber = internalAction({
  */
 export const pushKnowledgeBase = internalAction({
   args: { orgId: v.string() },
-  handler: async (ctx, args): Promise<void> => {
+  handler: async (ctx, args): Promise<{ resynced: boolean }> => {
     const agent = await ctx.runQuery(internal.agents.currentInternal, { orgId: args.orgId });
-    if (!agent) return;
+    if (!agent) return { resynced: false };
 
-    const knowledgeBase: el.KnowledgeBaseEntry[] = await ctx.runQuery(
+    let resynced = false;
+    let knowledgeBase: el.KnowledgeBaseEntry[] = await ctx.runQuery(
       internal.docs.syncedEntries,
       { orgId: args.orgId },
     );
+    // Self-healing: drop any entry whose ElevenLabs document is gone and queue a re-upload,
+    // rather than letting the agent PATCH 404 on it.
+    const alive: el.KnowledgeBaseEntry[] = [];
+    for (const entry of knowledgeBase) {
+      if (await el.kbDocExists(entry.id)) {
+        alive.push(entry);
+      } else {
+        resynced = true;
+        await ctx.runMutation(internal.docs.invalidateKbDoc, {
+          orgId: args.orgId,
+          kbDocumentId: entry.id,
+        });
+      }
+    }
+    knowledgeBase = alive;
     const toolIds: string[] = await ctx.runAction(internal.agents.ensureTools, {});
     const questions: ScreeningQuestion[] = await ctx.runQuery(
       internal.screening.activeForOrg,
@@ -1229,16 +1363,33 @@ export const pushKnowledgeBase = internalAction({
     const sarah: SarahConfig | null = await ctx.runQuery(internal.sarahConfig.publishedForOrg, {
       orgId: args.orgId,
     });
-    await el.updateAgent(agent.elevenLabsAgentId, {
-      name: agent.name,
-      prompt: composePrompt(agent.prompt, questions, disabledCore, sarah),
-      firstMessage: agent.firstMessage,
-      voiceId: agent.voiceId,
-      knowledgeBase,
-      toolIds,
-      voice: VOICE_TUNING,
-      turn: TURN_TUNING,
-    });
+    const prompt = composePrompt(agent.prompt, questions, disabledCore, sarah);
+    // Belt and braces: a doc can still vanish between the check and the PATCH. On a
+    // document_not_found 404 drop that id, queue its re-upload, and retry.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await el.updateAgent(agent.elevenLabsAgentId, {
+          name: agent.name,
+          prompt,
+          firstMessage: agent.firstMessage,
+          voiceId: agent.voiceId,
+          knowledgeBase,
+          toolIds,
+          voice: VOICE_TUNING,
+          turn: TURN_TUNING,
+        });
+        return { resynced };
+      } catch (err) {
+        const missing = el.missingKbDocId(err);
+        if (!missing || attempt >= 3) throw err;
+        resynced = true;
+        knowledgeBase = knowledgeBase.filter((k) => k.id !== missing);
+        await ctx.runMutation(internal.docs.invalidateKbDoc, {
+          orgId: args.orgId,
+          kbDocumentId: missing,
+        });
+      }
+    }
   },
 });
 

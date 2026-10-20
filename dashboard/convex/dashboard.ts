@@ -7,7 +7,7 @@ import type { Id } from "./_generated/dataModel";
 import { maintenanceOverview, scopedByStatus } from "./maintenance";
 import { isLeasingLead } from "./conversations";
 import { localDateKey, startOfLocalDay, addDays, isValidTimeZone, weekBounds } from "./tourSchedule";
-import { loadScope, makeLookups, requestCard, requestLane, workOrderCard, workOrderLane } from "./board";
+import { loadScope, makeLookups, requestCard, requestLane, requestStatusKey, STATUS_LABEL, workOrderCard, workOrderLane, workOrderStatusKey } from "./board";
 import type { Card } from "./board";
 
 /**
@@ -35,7 +35,7 @@ function changePct(current: number, previous: number): number | null {
  * units they MANAGE. The one definition behind both the admin "Asset managers" rows and the AM's
  * own dashboard, so an admin's count for an AM always equals what that AM sees.
  */
-function toReviewFor(requests: Doc<"maintenanceRequests">[], managed: Set<Id<"units">>) {
+export function toReviewFor(requests: Doc<"maintenanceRequests">[], managed: Set<Id<"units">>) {
   return requests.filter((r) => requestLane(r) === "review" && r.unitId !== undefined && managed.has(r.unitId));
 }
 
@@ -229,7 +229,7 @@ export const overview = query({
 
     // --- Maintenance pipeline, people and attention (the board's data, summarised) -----------
     // Scoped like the board: admin = team, asset manager = their requests and units, others empty.
-    const { view, requests, wos } = await loadScope(ctx, org);
+    const { view, requests, wos, scope: amScopeSet } = await loadScope(ctx, org);
     const L = makeLookups(ctx);
     const inLane = (lane: Card["lane"]) => ({
       requests: requests.filter((r) => requestLane(r) === lane),
@@ -271,6 +271,7 @@ export const overview = query({
     }
     const assetManagers: Array<{ userId: string; name: string; units: number; toursThisWeek: number; toReview: number }> = [];
     const technicians: Array<{ userId: string; name: string; skill: string | null; assigned: number; toSignOff: number }> = [];
+    let activeTechnicianCount = 0;
     if (view === "admin") {
       const memberships = await ctx.db
         .query("memberships")
@@ -289,6 +290,7 @@ export const overview = query({
           });
         }
         if (roles.includes("technician")) {
+          if (!(m.unavailableUntil !== undefined && m.unavailableUntil > now)) activeTechnicianCount += 1;
           technicians.push({
             userId: m.userId,
             name: (await L.user(m.userId)) ?? "Unknown",
@@ -343,6 +345,133 @@ export const overview = query({
       )),
     ].sort((a, b) => (a.start ?? Infinity) - (b.start ?? Infinity));
 
+    // --- Figma dashboard block --------------------------------------------------------------
+    // Admin view: the team. Asset manager: their own scoped equivalents (same lead scoping as
+    // above, tours assigned to them, work orders on their units). Everyone else: null.
+    let adminDash: {
+      kpis: {
+        callsHandled: { value: number; deltaPct: number | null };
+        toursBooked: { value: number; deltaPct: number | null };
+        activeWorkOrders: { value: number; highPriority: number };
+      };
+      todaySchedule: Array<{ id: string; kind: "tour" | "work_order"; start: number | null; time: string; title: string; sub: string }>;
+      recentLeads: Array<{ id: string; name: string; property: string; sourceLabel: "Call" | "Browser"; status: string; statusLabel: string; startedAt: number; dateLabel: string }>;
+      openWorkOrders: Array<{ kind: "work_order" | "request"; id: string; number: string; unit: string | null; property: string | null; issue: string; assignedToName: string | null; statusLabel: string; dueDate: number | null }>;
+      propertiesSnapshot: { workOrders: number; totalUnits: number; assetManagers: number | null; activeTechnicians: number | null };
+    } | null = null;
+
+    if (view === "admin" || view === "asset_manager") {
+      const clock = new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", timeZone });
+      const monthDay = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone });
+      const todayK = localDateKey(now, timeZone);
+      const yesterdayK = addDays(todayK, -1);
+      const tomorrowK = addDays(todayK, 1);
+      const dayWord = (ms: number) => {
+        const k = localDateKey(ms, timeZone);
+        return k === todayK ? "Today" : k === yesterdayK ? "Yesterday" : k === tomorrowK ? "Tomorrow" : monthDay.format(new Date(ms));
+      };
+      const bedroomLabel = (b: string | null | undefined) => {
+        if (!b) return null;
+        const k = b.toLowerCase();
+        if (k === "studio") return "Studio";
+        if (k === "1br") return "1 Bedroom";
+        if (k === "2br") return "2 Bedroom";
+        if (k === "3br+") return "3+ Bedroom";
+        return b;
+      };
+      const LEAD_LABEL = { tour_booked: "Tour Booked", escalated: "Escalated", disqualified: "Disqualified", qualified: "Qualified", contacted: "Contacted", new: "New" } as const;
+
+      const tourItems = scheduleTours.map((t) => ({
+        id: String(t.id),
+        kind: "tour" as const,
+        start: t.start as number | null,
+        time: clock.format(new Date(t.start)),
+        title: `Tour – ${t.propertyName}`,
+        sub: [bedroomLabel(t.bedrooms), t.propertyName].filter(Boolean).join(" • "),
+      }));
+      const woItems = todayWos.map((w) => ({
+        id: String(w._id),
+        kind: "work_order" as const,
+        start: null as number | null,
+        time: w.window ?? "Today",
+        title: `WO-${w.number} – ${w.title}`,
+        sub: w.window ?? "",
+      }));
+
+      // Open work orders: active work orders plus requests waiting on the admin (forwarded).
+      const rankOf = { emergency: 0, urgent: 1, routine: 2, informational: 3 } as const;
+      type OpenRow = { kind: "work_order" | "request"; id: string; number: string; unit: string | null; property: string | null; issue: string; assignedToName: string | null; statusLabel: string; dueDate: number | null; rank: number; created: number };
+      const openRows: OpenRow[] = [];
+      for (const w of wos) {
+        openRows.push({
+          kind: "work_order",
+          id: w._id,
+          number: `WO-${w.number}`,
+          unit: (await L.unit(w.unitId))?.unitNumber ?? null,
+          property: (await L.property(w.propertyId)) ?? null,
+          issue: shortTitle(w.title),
+          assignedToName: (await L.user(w.technicianUserId)) ?? null,
+          statusLabel: STATUS_LABEL[workOrderStatusKey(w)],
+          dueDate: w.dueDate ?? null,
+          rank: rankOf[w.priority],
+          created: w.createdAt,
+        });
+      }
+      for (const r of requests) {
+        const key = r.status === "forwarded_to_pat" ? requestStatusKey(r) : null;
+        if (!key) continue;
+        openRows.push({
+          kind: "request",
+          id: r._id,
+          number: `MR-${r.number}`,
+          unit: (await L.unit(r.unitId))?.unitNumber ?? r.spokenUnit ?? null,
+          property: (await L.property(r.propertyId)) ?? null,
+          issue: shortTitle(r.title?.trim() || r.description),
+          assignedToName: null,
+          statusLabel: STATUS_LABEL[key],
+          dueDate: null,
+          rank: rankOf[r.severity],
+          created: r.createdAt,
+        });
+      }
+      openRows.sort((a, b) => a.rank - b.rank || (a.dueDate ?? Infinity) - (b.dueDate ?? Infinity) || a.created - b.created);
+
+      const totalUnits =
+        view === "admin"
+          ? (await ctx.db.query("units").withIndex("by_org", (q) => q.eq("orgId", org.orgId)).collect()).length
+          : amScopeSet.managed.size;
+
+      adminDash = {
+        kpis: {
+          callsHandled: { value: thisWeekCalls.length, deltaPct: stats.callsHandled.changePct },
+          toursBooked: { value: bookedThisWeek, deltaPct: stats.toursBooked.changePct },
+          activeWorkOrders: { value: wos.length, highPriority: wos.filter((w) => w.priority === "emergency" || w.priority === "urgent").length },
+        },
+        todaySchedule: [...tourItems, ...woItems].sort((a, b) => (a.start ?? Infinity) - (b.start ?? Infinity)),
+        recentLeads: recentLeads.map((l) => ({
+          id: String(l.id),
+          name: l.name,
+          property: l.property,
+          sourceLabel: l.source === "call" ? ("Call" as const) : ("Browser" as const),
+          status: l.status,
+          statusLabel: LEAD_LABEL[l.status],
+          startedAt: l.startedAt,
+          dateLabel: dayWord(l.startedAt),
+        })),
+        openWorkOrders: openRows.slice(0, 5).map(({ rank, created, ...row }) => {
+          void rank;
+          void created;
+          return row;
+        }),
+        propertiesSnapshot: {
+          workOrders: wos.length,
+          totalUnits,
+          assetManagers: view === "admin" ? assetManagers.length : null,
+          activeTechnicians: view === "admin" ? activeTechnicianCount : null,
+        },
+      };
+    }
+
     return {
       timeZone,
       propertyName,
@@ -355,6 +484,7 @@ export const overview = query({
       technicians,
       attention,
       todaySchedule,
+      adminDash,
       callsThisWeek: { value: thisWeekCalls.length, changePct: stats.callsHandled.changePct },
     };
   },

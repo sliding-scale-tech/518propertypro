@@ -197,7 +197,47 @@ export const history = query({
           .withIndex("by_conversation", (q) => q.eq("conversationId", c._id))
           .collect();
         const qualification = allQualifications.find((q) => q.conversationId === c._id);
-        return { ...c, messageCount: messages.length, leadScore: computeLeadScore(qualification) };
+
+        // Who the lead is assigned to, and the tour if one is booked (both admin and AM views).
+        // AMs still see every lead; assignedToMe lets the UI highlight theirs.
+        const assignee = qualification?.assignedUserId ? await ctx.db.get(qualification.assignedUserId) : null;
+        const assignedUser =
+          qualification?.assignedUserId && assignee
+            ? {
+                userId: qualification.assignedUserId,
+                name: [assignee.firstName, assignee.lastName].filter(Boolean).join(" ").trim() || assignee.email || "Team member",
+              }
+            : null;
+        const tourRow = c.elevenLabsConversationId
+          ? (
+              await ctx.db
+                .query("tours")
+                .withIndex("by_conversation", (q) => q.eq("elevenLabsConversationId", c.elevenLabsConversationId))
+                .take(5)
+            )
+              .filter((t) => t.orgId === org.orgId && t.status === "booked")
+              .sort((a, b) => b.start - a.start)[0]
+          : undefined;
+        const tourUser = tourRow ? await ctx.db.get(tourRow.assignedUserId) : null;
+        const tour = tourRow
+          ? {
+              start: tourRow.start,
+              timeZone: tourRow.timeZone,
+              assignedUserId: tourRow.assignedUserId,
+              assignedName: tourUser
+                ? [tourUser.firstName, tourUser.lastName].filter(Boolean).join(" ").trim() || tourUser.email || "Team member"
+                : "Team member",
+            }
+          : null;
+        return {
+          ...c,
+          messageCount: messages.length,
+          leadScore: computeLeadScore(qualification),
+          assignedUser,
+          assignedToMe:
+            qualification?.assignedUserId === org.user._id || tourRow?.assignedUserId === org.user._id,
+          tour,
+        };
       }),
     );
 
@@ -409,6 +449,50 @@ export const funnel = query({
     };
   },
 });
+
+/**
+ * Guarantees a conversations row (with the team on it) exists for a phone call that has just
+ * captured a leasing lead. A phone call has no conversations row until the post-call webhook, and
+ * the Leads page lists conversations, so without this a lead would be invisible until the webhook
+ * arrives -- and forever if it never does. The row is a placeholder like markEscalation's: no
+ * intent/outcome (the webhook still classifies it from the qualification), status "active"
+ * (the webhook ends it; reconcileStaleActive is the net under that). Never creates a second row
+ * for a call that already has one; an existing row with no team just gets the team stamped on.
+ */
+export async function ensureLeadConversation(
+  ctx: MutationCtx,
+  orgId: string,
+  elevenLabsConversationId: string,
+): Promise<Id<"conversations"> | null> {
+  const existing = await ctx.db
+    .query("conversations")
+    .withIndex("by_elevenlabs_conversation_id", (q) =>
+      q.eq("elevenLabsConversationId", elevenLabsConversationId),
+    )
+    .first();
+  const agent = await ctx.db
+    .query("agents")
+    .withIndex("by_org", (q) => q.eq("orgId", orgId))
+    .first();
+  if (existing) {
+    // Never hand back (or link a lead to) another team's conversation row.
+    if (existing.orgId && existing.orgId !== orgId) return null;
+    if (!existing.orgId && agent) {
+      await ctx.db.patch(existing._id, { orgId, userId: existing.userId ?? agent.userId });
+    }
+    return existing._id;
+  }
+  if (!agent) return null;
+  return await ctx.db.insert("conversations", {
+    userId: agent.userId,
+    orgId,
+    agentId: agent._id,
+    elevenLabsConversationId,
+    channel: "phone",
+    startedAt: Date.now(),
+    status: "active",
+  });
+}
 
 /**
  * Called by the escalate server tool. The conversations row may not exist yet for a phone

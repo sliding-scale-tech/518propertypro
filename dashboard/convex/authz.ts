@@ -79,15 +79,25 @@ export type { JobRole };
 export type { AppRole } from "./jobRoles";
 
 /**
- * True if the person holds any of `roles`. simplr_admin satisfies every check, and so does a
- * team admin: before job roles were backfilled an admin had none, and locking them out of their
- * own team would be worse than the extra reach.
+ * THE one authorization rule: an Admin is anyone whose view is "admin" (team admin flag, or the
+ * executive / maintenance_lead / simplr_admin job role). There is no "team admin" tier above that.
+ * Every admin-type guard in the app (requireOrgAdmin, requireAdminView, requireAdminViewId,
+ * canManageMaintenance, hasJobRole, requireJobRole) reduces to this. An Admin by membership flag
+ * with empty jobRoles still passes (viewFor checks isAdmin first).
+ */
+export function isAdminView(org: { jobRoles?: JobRole[] | null; isAdmin: boolean }): boolean {
+  return viewFor(org.isAdmin, org.jobRoles ?? []) === "admin";
+}
+
+/**
+ * True if the person holds any of `roles`. Every Admin satisfies every check (the roles asked for
+ * are admin-flavoured job roles, and Admin has full power); non-Admin views must hold one of them.
  */
 export function hasJobRole(
   org: { jobRoles: JobRole[]; isAdmin: boolean },
   ...roles: JobRole[]
 ): boolean {
-  if (org.isAdmin || org.jobRoles.includes("simplr_admin")) return true;
+  if (isAdminView(org)) return true;
   return roles.some((r) => org.jobRoles.includes(r));
 }
 
@@ -105,7 +115,7 @@ export async function requireJobRole(
 export type AppView = "admin" | "asset_manager" | "technician" | "accountant" | "none";
 
 /**
- * Pure: team admins and the three admin-flavoured job roles get the admin view; otherwise the
+ * Pure: the team admin flag and the three admin-flavoured job roles get the admin view; otherwise the
  * first of asset_manager, technician, accountant they hold; otherwise none.
  */
 export function viewFor(isAdmin: boolean, jobRoles: JobRole[]): AppView {
@@ -126,23 +136,22 @@ export function viewFor(isAdmin: boolean, jobRoles: JobRole[]): AppView {
 /** Server-side gate on the admin view, the query/mutation counterpart of requireOrgAdmin. */
 export async function requireAdminView(ctx: QueryCtx | MutationCtx): Promise<OrgContext> {
   const org = await requireOrg(ctx);
-  if (viewFor(org.isAdmin, org.jobRoles) !== "admin") throw new Error("You don't have access to that.");
+  if (!isAdminView(org)) throw new Error("You don't have access to that.");
   return org;
 }
 
 /**
- * "Pat powers": what the maintenance lead can do beyond reviewing — forward, close without a
- * work order, create work orders for any unit, close them out. Team admins and simplr_admin
- * pass via hasJobRole; an executive alone does not (read-only per the roles matrix).
+ * Maintenance management (forward, close without a work order, create work orders for any unit,
+ * close them out). Every Admin has it; nobody else does.
  */
 export function canManageMaintenance(org: { jobRoles: JobRole[]; isAdmin: boolean }): boolean {
-  return hasJobRole(org, "maintenance_lead", "simplr_admin");
+  return isAdminView(org);
 }
 
 /** Action-context equivalent of requireAdminView. */
 export async function requireAdminViewId(ctx: ActionCtx): Promise<Awaited<ReturnType<typeof requireOrgId>>> {
   const org = await requireOrgId(ctx);
-  if (viewFor(org.isAdmin, org.jobRoles) !== "admin") throw new Error("You don't have access to that.");
+  if (!isAdminView(org)) throw new Error("You don't have access to that.");
   return org;
 }
 
@@ -177,13 +186,13 @@ export async function requireOrg(ctx: QueryCtx | MutationCtx): Promise<OrgContex
 }
 
 /**
- * Guards the things only an admin may do — inviting, removing members, renaming the team.
- * Checked server-side and not merely hidden in the sidebar: a hidden tab is a courtesy, this
- * is the actual boundary.
+ * Guards the things only an Admin may do — inviting, removing members, renaming the team.
+ * Same rule as requireAdminView (any Admin). Checked server-side and not merely hidden in the
+ * sidebar: a hidden tab is a courtesy, this is the actual boundary.
  */
 export async function requireOrgAdmin(ctx: QueryCtx | MutationCtx): Promise<OrgContext> {
   const org = await requireOrg(ctx);
-  if (!org.isAdmin) throw new Error("Only a team admin can do that.");
+  if (!isAdminView(org)) throw new Error("You don't have access to that.");
   return org;
 }
 

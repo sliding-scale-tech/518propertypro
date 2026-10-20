@@ -87,7 +87,7 @@ export function PropertyPage() {
               managers={managers}
               isAdmin={isAdmin}
               isAm={isAm}
-              canHistory={isAdmin && (access?.isAdmin === true || access?.isExecutive === true)}
+              canHistory={isAdmin}
               canSetDefault={isAdmin}
             />
           )}

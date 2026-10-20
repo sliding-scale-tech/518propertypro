@@ -2,7 +2,7 @@ import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import { query } from "./_generated/server";
 import type { MutationCtx } from "./_generated/server";
-import { currentOrg, hasJobRole, requireAdminView } from "./authz";
+import { currentOrg, isAdminView, requireAdminView } from "./authz";
 import { auditEntityValidator } from "./auditEntities";
 
 /**
@@ -60,7 +60,7 @@ export async function writeAudit(
   });
 }
 
-/** History of one record, newest first. Executives and admins only (Pat's "own records" view comes with F5). */
+/** History of one record, newest first. Any Admin (Pat's "own records" view comes with F5). */
 export const forEntity = query({
   args: {
     entity: auditEntityValidator,
@@ -68,7 +68,7 @@ export const forEntity = query({
   },
   handler: async (ctx, args) => {
     const org = await currentOrg(ctx);
-    if (!org || !hasJobRole(org, "executive")) throw new Error("You don't have access to that.");
+    if (!org || !isAdminView(org)) throw new Error("You don't have access to that.");
 
     const rows = await ctx.db
       .query("auditEvents")

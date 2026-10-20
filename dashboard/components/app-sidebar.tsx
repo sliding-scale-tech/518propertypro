@@ -10,25 +10,22 @@ import {
   Menu,
   X,
   BookOpen,
-  ClipboardCheck,
   ClipboardList,
-  UserPlus,
-  UsersRound,
-  UserRoundSearch,
+  Users,
+  UserRound,
   FileText,
   ChevronDown,
-  LayoutDashboard,
+  ChevronRight,
+  Home,
   LogOut,
   CalendarRange,
-  Wrench,
   Sparkles,
-  Wallet,
+  CircleDollarSign,
   Box,
-  ShieldCheck,
   Target,
   CircleUser,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { AppView } from "@/convex/authz";
@@ -43,11 +40,19 @@ type NavLeaf = {
   badge?: "workorders";
   // Extra path prefixes that light this link up (detail pages and legacy URLs).
   alsoActive?: string[];
+  // When set, the link is active only if this query key matches (Team vs Technicians).
+  query?: { key: string; value: string };
 };
 
 type NavEntry = NavLeaf | { group: string; icon: typeof Phone; items: NavLeaf[] };
 
-function isActiveLink(pathname: string, link: NavLeaf): boolean {
+function isActiveLink(pathname: string, search: string, link: NavLeaf): boolean {
+  const params = new URLSearchParams(search);
+  if (link.query) {
+    return pathname === link.href && params.get(link.query.key) === link.query.value;
+  }
+  if (link.href === "/team" && params.get("role")) return false;
+  if (link.href === "/finance" && params.get("view")) return false;
   if (isActiveHref(pathname, link.href)) return true;
   return (link.alsoActive ?? []).some((p) => pathname === p || pathname.startsWith(`${p}/`));
 }
@@ -75,23 +80,27 @@ function isGroup(entry: NavEntry): entry is { group: string; icon: typeof Phone;
  * new homes; `alsoActive` keeps the right link lit on the detail pages that still live there.
  */
 const NAV: NavEntry[] = [
-  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, views: ["admin", "accountant", "asset_manager"] },
-  { href: "/call", label: "Call", icon: Phone, views: ["admin"] },
-  // Accountant flat list (admins and asset managers reach the same pages through the groups below).
+  { href: "/dashboard", label: "Dashboard", icon: Home, views: ["admin", "accountant", "asset_manager"] },
   {
-    href: "/work-orders",
-    label: "Work orders",
-    icon: ClipboardList,
-    views: ["accountant"],
-    badge: "workorders",
-    alsoActive: ["/maintenance"],
+    group: "Maintenance",
+    icon: Users,
+    items: [
+      {
+        href: "/work-orders",
+        label: "Work Orders",
+        icon: ClipboardList,
+        views: ["admin", "asset_manager", "accountant"],
+        badge: "workorders",
+        alsoActive: ["/maintenance"],
+      },
+      { href: "/asset-managers", label: "Assets Managers", icon: Sparkles, views: ["admin"] },
+    ],
   },
-  { href: "/properties", label: "Property", icon: Building2, views: ["accountant"], alsoActive: ["/units"] },
   {
     group: "Customers",
-    icon: UsersRound,
+    icon: UserRound,
     items: [
-      { href: "/leads", label: "Leads", icon: UserRoundSearch, views: ["admin", "asset_manager"] },
+      { href: "/leads", label: "Leads", icon: Sparkles, views: ["admin", "asset_manager"] },
       { href: "/tenants", label: "Tenants", icon: FileText, views: ["admin", "asset_manager"], alsoActive: ["/residents"] },
     ],
   },
@@ -100,38 +109,42 @@ const NAV: NavEntry[] = [
     icon: Box,
     items: [
       { href: "/docs", label: "Knowledge", icon: BookOpen, views: ["admin"] },
-      { href: "/properties", label: "Property", icon: Building2, views: ["admin", "asset_manager"], alsoActive: ["/units"] },
+      {
+        href: "/properties",
+        label: "Property",
+        icon: Building2,
+        views: ["admin", "asset_manager", "accountant"],
+        alsoActive: ["/units"],
+      },
     ],
   },
   {
-    group: "Maintenance",
-    icon: Wrench,
+    group: "Finance",
+    icon: CircleDollarSign,
     items: [
+      { href: "/finance", label: "Payment", icon: FileText, views: ["admin"] },
       {
-        href: "/work-orders",
-        label: "Work orders",
-        icon: ClipboardList,
-        views: ["admin", "asset_manager"],
-        badge: "workorders",
-        alsoActive: ["/maintenance"],
+        href: "/finance",
+        label: "Owner Reports",
+        icon: FileText,
+        views: ["admin"],
+        query: { key: "view", value: "statements" },
       },
-      { href: "/asset-managers", label: "Asset managers", icon: ShieldCheck, views: ["admin"] },
     ],
   },
-  { href: "/finance", label: "Finance", icon: Wallet, views: ["admin"] },
   {
     group: "Productivity",
     icon: Target,
     items: [
-      { href: "/tasks", label: "Tasks", icon: ClipboardCheck, views: ["admin", "asset_manager"] },
       { href: "/calendar", label: "Calendar", icon: CalendarRange, views: ["admin", "asset_manager"] },
     ],
   },
+  { href: "/call", label: "Call", icon: Phone, views: ["admin"] },
   { href: "/sarah", label: "Sarah config", icon: Sparkles, views: ["admin"] },
   { href: "/profile", label: "Profile", icon: CircleUser, views: ["asset_manager"] },
   // The roster: hidden from asset managers, who manage themselves on /profile. The page hides
   // every control a viewer cannot use, and convex/team.ts re-checks the role on every write.
-  { href: "/team", label: "Team", icon: UserPlus, views: ["admin", "accountant", "technician"] },
+  { href: "/team", label: "Team", icon: Users, views: ["admin", "accountant", "technician"] },
 ];
 
 const NAV_HREFS = NAV.flatMap((e) => (isGroup(e) ? e.items.map((i) => i.href) : [e.href]));
@@ -197,6 +210,11 @@ function NavBadge() {
   );
 }
 
+function linkHref(link: NavLeaf): string {
+  if (!link.query) return link.href;
+  return `${link.href}?${link.query.key}=${encodeURIComponent(link.query.value)}`;
+}
+
 function NavRow({
   link,
   active,
@@ -211,15 +229,21 @@ function NavRow({
   const Icon = link.icon;
   return (
     <Link
-      href={link.href}
+      href={linkHref(link)}
       onClick={onNavigate}
       aria-current={active ? "page" : undefined}
-      className={`flex items-center gap-2.5 rounded-2xl px-[11px] text-sm transition-colors ${
-        nested ? "ml-5 py-1.5" : "py-[7px]"
-      } ${active ? "bg-accent font-medium text-primary" : "text-sidebar-foreground/80 hover:bg-muted"}`}
+      className={`flex items-center gap-3 text-[14px] leading-5 transition-colors ${
+        nested ? "rounded-lg px-3 py-2" : "rounded-xl px-3.5 py-2.5"
+      } ${
+        active
+          ? "bg-[#eff6ff] font-medium text-[#2563eb]"
+          : nested
+            ? "font-medium text-[#475569] hover:bg-[#f8fafc]"
+            : "font-semibold text-[#475569] hover:bg-[#f8fafc]"
+      }`}
     >
-      <Icon className={`h-4 w-4 shrink-0 ${active ? "text-primary" : "text-muted-foreground"}`} />
-      <span>{link.label}</span>
+      <Icon className={`h-5 w-5 shrink-0 ${active ? "text-[#2563eb]" : "text-[#64748b]"}`} />
+      <span className="truncate">{link.label}</span>
       {link.badge ? (
         <span className="ml-auto flex items-center gap-1.5">
           <NavBadge />
@@ -234,41 +258,46 @@ function NavGroup({
   icon: Icon,
   items,
   pathname,
+  search,
   onNavigate,
+  open,
+  onToggle,
 }: {
   group: string;
   icon: typeof Phone;
   items: NavLeaf[];
   pathname: string;
+  search: string;
   onNavigate?: () => void;
+  open: boolean;
+  onToggle: () => void;
 }) {
-  const [open, setOpen] = useState(true);
 
   return (
-    <div>
+    <div className="pt-1">
       <button
         type="button"
-        onClick={() => setOpen((current) => !current)}
+        onClick={onToggle}
         aria-expanded={open}
-        className="flex w-full items-center gap-2.5 rounded-2xl px-[11px] pb-[5px] pt-[9px] text-sm transition-colors hover:bg-muted"
+        className="flex w-full items-center justify-between rounded-xl px-3.5 py-2.5 text-[14px] font-medium leading-5 text-[#475569] transition-colors hover:bg-[#f8fafc]"
       >
-        <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
-        <span className="flex-1 text-left font-medium text-sidebar-foreground/80">{group}</span>
+        <span className="flex items-center gap-3">
+          <Icon className="h-5 w-5 shrink-0 text-[#64748b]" />
+          {group}
+        </span>
         <ChevronDown
-          className={`h-4 w-4 shrink-0 text-sidebar-foreground/40 transition-transform ${
-            open ? "" : "-rotate-90"
-          }`}
+          className={`h-4 w-4 shrink-0 text-[#94a3b8] transition-transform ${open ? "" : "-rotate-90"}`}
         />
       </button>
 
       {open ? (
-        <div className="flex flex-col gap-0.5">
+        <div className="flex flex-col gap-1 py-1 pl-8 pr-2">
           {items.map((item) => (
             <NavRow
-              key={item.href}
+              key={item.label}
               link={item}
               nested
-              active={isActiveLink(pathname, item)}
+              active={isActiveLink(pathname, search, item)}
               onNavigate={onNavigate}
             />
           ))}
@@ -278,12 +307,55 @@ function NavGroup({
   );
 }
 
+function useLocationSearch(pathname: string): string {
+  const [search, setSearch] = useState("");
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- read after mount to avoid hydration mismatch
+    setSearch(window.location.search);
+  }, [pathname]);
+  return search;
+}
+
+const GROUPS_KEY = "simplr:sidebar-closed-groups";
+
+/** Which groups the person collapsed, remembered in this browser only (a convenience, never state). */
+function useClosedGroups(): [Record<string, boolean>, (group: string) => void] {
+  const [closed, setClosed] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(GROUPS_KEY);
+      const parsed: unknown = raw ? JSON.parse(raw) : null;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const next: Record<string, boolean> = {};
+        for (const [k, v] of Object.entries(parsed)) if (v === true) next[k] = true;
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time hydrate from browser storage
+        setClosed(next);
+      }
+    } catch {
+      // storage blocked or corrupt: start with every group open
+    }
+  }, []);
+  const toggle = (group: string) =>
+    setClosed((current) => {
+      const next = { ...current, [group]: !current[group] };
+      try {
+        window.localStorage.setItem(GROUPS_KEY, JSON.stringify(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  return [closed, toggle];
+}
+
 function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
+  const search = useLocationSearch(pathname);
   const view = useAppView();
+  const [closed, toggleGroup] = useClosedGroups();
 
   return (
-    <nav aria-label="Main" className="flex flex-1 flex-col gap-0.5 overflow-y-auto">
+    <nav aria-label="Main" className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto">
       {entriesFor(view).map((entry) => {
         if (isGroup(entry)) {
           return (
@@ -293,15 +365,18 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
               icon={entry.icon}
               items={entry.items}
               pathname={pathname}
+              search={search}
               onNavigate={onNavigate}
+              open={!closed[entry.group]}
+              onToggle={() => toggleGroup(entry.group)}
             />
           );
         }
         return (
           <NavRow
-            key={entry.href}
+            key={entry.label}
             link={entry}
-            active={isActiveLink(pathname, entry)}
+            active={isActiveLink(pathname, search, entry)}
             onNavigate={onNavigate}
           />
         );
@@ -312,9 +387,9 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
 
 function Brand() {
   return (
-    <Link href="/home" className="block px-1" aria-label="Simplr — go home">
+    <Link href="/dashboard" className="block h-[45px] w-[123px] shrink-0" aria-label="Simplr — go home">
       {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src="/brand/simplr-logo.png" alt="Simplr" className="h-9 w-auto" />
+      <img src="/brand/simplr-logo.png" alt="Simplr" className="h-[45px] w-[123px] object-contain object-left" />
     </Link>
   );
 }
@@ -333,6 +408,7 @@ function initialsOf(name: string) {
 function UserProfile({ compact = false }: { compact?: boolean }) {
   const { user, isSignedIn } = useUser();
   const { signOut } = useClerk();
+  const view = useAppView();
   const [open, setOpen] = useState(false);
 
   if (!isSignedIn || !user) return null;
@@ -345,14 +421,20 @@ function UserProfile({ compact = false }: { compact?: boolean }) {
   const email = user.primaryEmailAddress?.emailAddress;
   const logout = () => void signOut({ redirectUrl: "/" });
 
+  const roleLabel =
+    view === "admin"
+      ? "Admin"
+      : view === "asset_manager"
+        ? "Asset Manager"
+        : view === "accountant"
+          ? "Accountant"
+          : view === "technician"
+            ? "Technician"
+            : "Member";
+
   const avatar = (
-    <span className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-sidebar-primary text-sm font-semibold text-sidebar-primary-foreground">
-      {user.imageUrl ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={user.imageUrl} alt="" className="h-full w-full object-cover" />
-      ) : (
-        initialsOf(name)
-      )}
+    <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-[#2563eb] text-[12px] font-bold tracking-[0.3px] text-white">
+      {initialsOf(name)}
     </span>
   );
 
@@ -363,21 +445,18 @@ function UserProfile({ compact = false }: { compact?: boolean }) {
         onClick={() => setOpen((current) => !current)}
         aria-expanded={open}
         aria-label="Account menu"
-        className={`flex items-center gap-3 rounded-xl p-1 text-left transition-colors hover:bg-sidebar-accent/60 ${
+        className={`flex items-center gap-3 rounded-xl p-2 text-left transition-colors hover:bg-[#f8fafc] ${
           compact ? "" : "w-full"
         }`}
       >
         {avatar}
         {compact ? null : (
           <>
-            <span className="min-w-0 flex-1 truncate text-sm font-semibold text-sidebar-foreground">
-              {name}
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[14px] font-bold leading-[17.5px] text-[#1e293b]">{name}</span>
+              <span className="block truncate text-[12px] leading-4 text-[#94a3b8]">{roleLabel}</span>
             </span>
-            <ChevronDown
-              className={`h-4 w-4 shrink-0 text-sidebar-foreground/40 transition-transform ${
-                open ? "rotate-180" : ""
-              }`}
-            />
+            <ChevronRight className="h-4 w-4 shrink-0 text-[#94a3b8]" />
           </>
         )}
       </button>
@@ -431,15 +510,18 @@ export function AppSidebar() {
     BOTTOM_NAV_SLOTS,
   );
   const moreLinks = leaves.filter((l) => !bottomLinks.includes(l));
-  const moreActive = moreLinks.some((l) => isActiveLink(pathname, l));
+  const search = useLocationSearch(pathname);
+  const moreActive = moreLinks.some((l) => isActiveLink(pathname, search, l));
 
   return (
     <>
       {/* Desktop sidebar */}
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-[236px] flex-col gap-5 border-r border-sidebar-border bg-sidebar px-[11px] pb-3 pt-3.5 lg:flex">
-        <Brand />
-        <NavLinks />
-        <div className="mt-auto border-t border-sidebar-border pt-2.5">
+      <aside className="fixed inset-y-0 left-0 z-30 hidden w-64 flex-col border-r border-[#e2e8f0] bg-white lg:flex">
+        <div className="flex min-h-0 flex-1 flex-col gap-8 px-5 pt-5">
+          <Brand />
+          <NavLinks />
+        </div>
+        <div className="border-t border-[#f1f5f9] px-3 pb-3 pt-[13px]">
           <UserProfile />
         </div>
       </aside>
@@ -453,12 +535,12 @@ export function AppSidebar() {
       {/* Mobile bottom nav */}
       <nav className="fixed inset-x-0 bottom-0 z-40 flex items-stretch justify-around border-t border-sidebar-border bg-sidebar/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-sm lg:hidden">
         {bottomLinks.map((link) => {
-          const active = isActiveLink(pathname, link);
+          const active = isActiveLink(pathname, search, link);
           const Icon = link.icon;
           return (
             <Link
-              key={link.href}
-              href={link.href}
+              key={link.label}
+              href={linkHref(link)}
               className="flex flex-1 flex-col items-center gap-0.5 py-2.5 text-[11px]"
             >
               <Icon
@@ -512,12 +594,12 @@ export function AppSidebar() {
               </div>
               <div className="flex flex-col gap-1">
                 {moreLinks.map((link) => {
-                  const active = isActiveLink(pathname, link);
+                  const active = isActiveLink(pathname, search, link);
                   const Icon = link.icon;
                   return (
                     <Link
-                      key={link.href}
-                      href={link.href}
+                      key={link.label}
+                      href={linkHref(link)}
                       onClick={() => setMoreOpen(false)}
                       className={`flex items-center gap-3 rounded-xl px-3 py-3 text-sm ${
                         active

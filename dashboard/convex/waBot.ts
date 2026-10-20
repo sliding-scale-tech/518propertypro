@@ -266,7 +266,9 @@ export const generateReply = internalAction({
 
     const systemContext = await buildSystemContext(ctx);
 
-    await waha.startTyping(thread.chatId);
+    // Texting policy: no typing indicator when no reply will follow.
+    const canReply = waha.outboundAllowed();
+    if (canReply) await waha.startTyping(thread.chatId);
 
     let turn: gemini.WaTurn;
     try {
@@ -344,7 +346,8 @@ export const generateReply = internalAction({
 
     // --- Reply ------------------------------------------------------------
 
-    const text = turn.reply.trim();
+    // Texting policy: the bot still reads and records what the person said, but sends nothing.
+    const text = canReply ? turn.reply.trim() : "";
     if (text) {
       // Record even when sending throws — WAHA being down or unconfigured must not silently
       // swallow the reply. A row marked "failed" tells staff what the bot meant to say and

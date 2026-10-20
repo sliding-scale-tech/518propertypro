@@ -3,7 +3,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { internalQuery, mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { writeAudit } from "./audit";
-import { hasJobRole, requireJobRole, requireOrg, requireOrgAdmin, viewFor } from "./authz";
+import { isAdminView, requireAdminView, requireOrg, requireOrgAdmin, viewFor } from "./authz";
 import type { OrgContext } from "./authz";
 import { amScope } from "./amScope";
 import { scheduleNotify } from "./notify";
@@ -231,7 +231,7 @@ export const create = mutation({
     leasingFacts: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<Id<"units">> => {
-    const org = await requireJobRole(ctx, "executive", "maintenance_lead");
+    const org = await requireAdminView(ctx);
 
     const property = await ctx.db.get(args.propertyId);
     if (!property || property.orgId !== org.orgId) throw new Error("Property not found.");
@@ -294,7 +294,7 @@ export const update = mutation({
     leasingFacts: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const org = await requireJobRole(ctx, "executive", "maintenance_lead");
+    const org = await requireAdminView(ctx);
     const unit = await ownUnit(ctx, org, args.unitId);
 
     // Fields are copied one by one rather than spreading args, so nothing the client adds
@@ -342,7 +342,7 @@ export const setAvailability = mutation({
     const org = await requireOrg(ctx);
     const unit = await ownUnit(ctx, org, args.unitId);
 
-    const manager = hasJobRole(org, "executive", "maintenance_lead");
+    const manager = isAdminView(org);
     const ownAm = org.jobRoles.includes("asset_manager") && unit.assetManagerUserId === org.user._id;
     if (!manager && !ownAm) throw new Error("You don't have access to that.");
 
@@ -366,7 +366,7 @@ export const setAvailability = mutation({
 export const assignAssetManager = mutation({
   args: { unitId: v.id("units"), assetManagerUserId: v.id("users") },
   handler: async (ctx, args) => {
-    const org = await requireJobRole(ctx, "executive", "maintenance_lead");
+    const org = await requireAdminView(ctx);
     const unit = await ownUnit(ctx, org, args.unitId);
     await assertValidAssetManager(ctx, org.orgId, args.assetManagerUserId);
     await reassign(ctx, org, unit, args.assetManagerUserId);
@@ -376,7 +376,7 @@ export const assignAssetManager = mutation({
 export const bulkAssignAssetManager = mutation({
   args: { unitIds: v.array(v.id("units")), assetManagerUserId: v.id("users") },
   handler: async (ctx, args): Promise<{ changed: number }> => {
-    const org = await requireJobRole(ctx, "executive", "maintenance_lead");
+    const org = await requireAdminView(ctx);
     if (args.unitIds.length > MAX_BULK) throw new Error(`Pick at most ${MAX_BULK} units at a time.`);
     await assertValidAssetManager(ctx, org.orgId, args.assetManagerUserId);
 
@@ -444,7 +444,22 @@ async function reassign(
   unit: Doc<"units">,
   to: Id<"users">,
 ): Promise<boolean> {
-  if (unit.assetManagerUserId === to) return false;
+  return (await reassignDetailed(ctx, org, unit, to)) !== null;
+}
+
+/**
+ * The single reassign implementation. Returns null on a no-op, otherwise the open requests that
+ * moved with the unit (for the admin "Assignment Updated" summary). `reason` is validated by the
+ * caller and goes into the unit's audit note.
+ */
+async function reassignDetailed(
+  ctx: MutationCtx,
+  org: OrgContext,
+  unit: Doc<"units">,
+  to: Id<"users">,
+  reason?: string,
+): Promise<{ requestsMoved: Array<{ requestId: Id<"maintenanceRequests">; number: number }> } | null> {
+  if (unit.assetManagerUserId === to) return null;
   await ctx.db.patch(unit._id, { assetManagerUserId: to, updatedAt: Date.now() });
   await writeAudit(ctx, {
     orgId: org.orgId,
@@ -454,6 +469,7 @@ async function reassign(
     actorUserId: org.user._id,
     from: unit.assetManagerUserId,
     to,
+    note: reason ? `Reason: ${reason}` : undefined,
   });
 
   // Open requests follow the unit: the new AM must see (and be able to act on) them, and the
@@ -491,7 +507,30 @@ async function reassign(
       },
     });
   }
-  return true;
+  return { requestsMoved: open.map((r) => ({ requestId: r._id, number: r.number })) };
+}
+
+/**
+ * Admin "Asset managers" flow: move one unit to another asset manager, with a reason. Goes
+ * through the same reassign as every other AM change, so the hard rule, audit trail and
+ * open-request repointing stay in this module. Rejects a no-op.
+ */
+export async function reassignUnitWithReason(
+  ctx: MutationCtx,
+  org: OrgContext,
+  unitId: Id<"units">,
+  to: Id<"users">,
+  reason: string | undefined,
+): Promise<{
+  previousManagerUserId: Id<"users">;
+  unit: Doc<"units">;
+  requestsMoved: Array<{ requestId: Id<"maintenanceRequests">; number: number }>;
+}> {
+  const unit = await ownUnit(ctx, org, unitId);
+  await assertValidAssetManager(ctx, org.orgId, to);
+  const moved = await reassignDetailed(ctx, org, unit, to, reason);
+  if (!moved) throw new Error("That unit already belongs to this asset manager.");
+  return { previousManagerUserId: unit.assetManagerUserId, unit, requestsMoved: moved.requestsMoved };
 }
 
 export const remove = mutation({

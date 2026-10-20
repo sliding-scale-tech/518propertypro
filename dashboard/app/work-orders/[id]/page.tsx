@@ -2,18 +2,18 @@
 
 import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
-import { ArrowLeft, Check, Circle, Loader2 } from "lucide-react";
+import { ArrowLeft, Loader2, Upload } from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { RequireView } from "@/components/require-view";
 import { useToast } from "@/components/toast";
-import { ChecklistEditor, newDraftItem, toChecklistArgs, type ChecklistDraftItem } from "@/components/work-orders/checklist-editor";
-import { FileGallery, MoneyCell, PriorityBadge, StatusPill, type WoPriority } from "@/components/work-orders/shared";
+import { WorkOrderFormat, woStage } from "@/components/work-orders/format";
+import type { WoPriority } from "@/components/work-orders/shared";
 import { WindowField } from "@/components/work-orders/window-field";
-import { Btn, Card, CardHead, DatePicker, Pill, Select, Modal as UiModal } from "@/components/ui";
+import { Btn, Card, CardHead, DatePicker, DrawerSection, Pill, Select, SevChip, Modal as UiModal } from "@/components/ui";
 
 type Detail = NonNullable<FunctionReturnType<typeof api.workOrders.get>>;
 
@@ -27,8 +27,6 @@ function errorText(err: unknown): string {
   return "Something went wrong. Try again.";
 }
 
-const fmtDateTime = (ms: number) =>
-  new Date(ms).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 const fmtDate = (ms: number) => new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 const dateInput = (ms?: number) => {
   if (!ms) return "";
@@ -36,6 +34,64 @@ const dateInput = (ms?: number) => {
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 };
+
+/** Staff photo / video upload for a work order (managers while active or awaiting sign-off). */
+function AddMedia({ workOrderId }: { workOrderId: Id<"workOrders"> }) {
+  const genUrl = useMutation(api.workOrders.generateUploadUrl);
+  const attach = useMutation(api.workOrders.attachFile);
+  const toast = useToast();
+  const input = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+
+  async function upload(files: File[]) {
+    setUploading(true);
+    let saved = 0;
+    try {
+      for (const file of files) {
+        try {
+          const isImage = file.type.startsWith("image/") && file.type !== "image/svg+xml";
+          const isVideo = ["video/mp4", "video/webm", "video/quicktime"].includes(file.type);
+          if (!isImage && !isVideo) throw new Error("Choose a photo or an mp4, webm or mov video.");
+          if (file.size > (isVideo ? 50 : 10) * 1024 * 1024) {
+            throw new Error(isVideo ? "Videos can be at most 50 MB." : "Photos can be at most 10 MB.");
+          }
+          const url = await genUrl({ workOrderId });
+          const res = await fetch(url, { method: "POST", headers: { "Content-Type": file.type }, body: file });
+          if (!res.ok) throw new Error("Upload failed.");
+          const { storageId } = (await res.json()) as { storageId: Id<"_storage"> };
+          const result = await attach({ workOrderId, storageId, kind: isVideo ? "completion_video" : "completion_photo" });
+          if (!result.ok) throw new Error(result.error);
+          saved += 1;
+        } catch (e) {
+          toast(`${file.name}: ${errorText(e)}`, "error");
+        }
+      }
+      if (saved > 0) toast(saved === 1 ? "File added." : `${saved} files added.`);
+    } finally {
+      setUploading(false);
+      if (input.current) input.current.value = "";
+    }
+  }
+
+  return (
+    <div>
+      <input
+        ref={input}
+        type="file"
+        multiple
+        accept="image/*,video/*"
+        className="hidden"
+        onChange={(e) => {
+          const picked = Array.from(e.target.files ?? []);
+          if (picked.length > 0) void upload(picked);
+        }}
+      />
+      <Btn variant="default" disabled={uploading} onClick={() => input.current?.click()}>
+        {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />} Add photos / videos
+      </Btn>
+    </div>
+  );
+}
 
 function Section({ title, children, aside }: { title: string; children: ReactNode; aside?: ReactNode }) {
   return (
@@ -92,17 +148,14 @@ function WorkOrderDetailInner() {
       </div>
     );
   }
-  const names = new Map((team?.members ?? []).map((m) => [m.userId as string, m.name]));
-  return <View data={data} names={names} technicians={(team?.members ?? []).filter((m) => m.appRole === "technician")} />;
+  return <View data={data} technicians={(team?.members ?? []).filter((m) => m.appRole === "technician")} />;
 }
 
 function View({
   data,
-  names,
   technicians,
 }: {
   data: Detail;
-  names: Map<string, string>;
   technicians: Array<{ userId: Id<"users">; name: string }>;
 }) {
   const { workOrder: wo, viewerCan } = data;
@@ -115,10 +168,9 @@ function View({
   const [busy, setBusy] = useState(false);
 
   const active = wo.status === "created" || wo.status === "assigned" || wo.status === "in_progress";
-  const photos = data.files.filter((f) => f.kind === "completion_photo");
-  const receipts = data.files.filter((f) => f.kind === "receipt");
+  const stage = woStage(wo);
+  const req = useQuery(api.maintenance.get, data.request ? { requestId: data.request._id } : "skip");
   const canNote = (viewerCan.manage && (active || wo.status === "completed")) || viewerCan.review;
-  const who = (uid?: string) => (uid ? (names.get(uid) ?? "Team member") : "");
 
   const run = async (fn: () => Promise<unknown>, ok: string) => {
     setBusy(true);
@@ -135,7 +187,7 @@ function View({
   };
 
   return (
-    <div className="space-y-6 pb-10">
+    <div className="space-y-4 pb-10">
       <Link href="/work-orders" className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
         <ArrowLeft className="h-4 w-4" />
         Work orders
@@ -145,11 +197,11 @@ function View({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="space-y-2">
             <div className="flex flex-wrap items-center gap-2">
-              <h1 className="font-mono text-2xl font-bold tracking-tight">WO-{wo.number}</h1>
-              <StatusPill status={wo.status} />
-              <PriorityBadge priority={wo.priority as WoPriority} />
+              <span className="font-mono text-sm text-muted-foreground">WO-{wo.number}</span>
+              <SevChip level={wo.priority as WoPriority} score={req?.request.severityScore ?? undefined} />
+              <Pill tone={stage.tone}>{stage.label}</Pill>
             </div>
-            <p className="text-base font-medium">{wo.title}</p>
+            <h1 className="text-xl font-semibold leading-snug">{wo.title}</h1>
           </div>
           <div className="flex flex-wrap gap-2">
             {viewerCan.manage && active ? <OutlineButton onClick={() => setModal("edit")}>Edit scope</OutlineButton> : null}
@@ -170,12 +222,7 @@ function View({
             ) : null}
           </div>
         </div>
-        <dl className="grid gap-x-8 gap-y-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
-          <Meta label="Unit">
-            {data.unit.unitNumber}
-            {data.property ? ` · ${data.property.name}` : ""}
-          </Meta>
-          <Meta label="Technician">{data.technicianName ?? "Unassigned"}</Meta>
+        <dl className="grid gap-x-8 gap-y-3 text-sm sm:grid-cols-3">
           <Meta label="Due">{wo.dueDate ? fmtDate(wo.dueDate) : "None"}</Meta>
           <Meta label="Time window">{wo.window ? <Pill tone="acc">{wo.window}</Pill> : "Not set"}</Meta>
           <Meta label="Request">
@@ -193,130 +240,29 @@ function View({
         ) : null}
       </Card>
 
-      <Section title="Scope">
-        <p className="whitespace-pre-wrap text-sm">{wo.scope}</p>
-        {wo.accessNotes ? (
-          <div>
-            <div className="text-xs font-medium text-muted-foreground">Access notes</div>
-            <p className="whitespace-pre-wrap text-sm">{wo.accessNotes}</p>
-          </div>
-        ) : null}
-      </Section>
+      <Card className="space-y-5">
+        <WorkOrderFormat
+          r={req ?? null}
+          w={data}
+          evidenceAlways
+          afterRequest={
+            <DrawerSection title="Scope">
+              <p className="whitespace-pre-wrap text-[13.5px]">{wo.scope}</p>
+              {wo.accessNotes ? (
+                <div className="mt-2">
+                  <div className="text-xs font-medium text-muted-foreground">Access notes</div>
+                  <p className="whitespace-pre-wrap text-[13.5px]">{wo.accessNotes}</p>
+                </div>
+              ) : null}
+            </DrawerSection>
+          }
+          photosNote="You can't add photos to this item."
+          photosAction={viewerCan.attach ? <AddMedia workOrderId={wo._id} /> : null}
+        />
+      </Card>
 
-      <Section
-        title="Checklist"
-        aside={
-          <span className="text-sm tabular-nums text-muted-foreground">
-            {wo.checklist.filter((c) => c.done).length}/{wo.checklist.length}
-          </span>
-        }
-      >
-        {wo.checklist.length === 0 ? <p className="text-sm text-muted-foreground">No checklist.</p> : null}
-        <ul className="space-y-2">
-          {wo.checklist.map((c) => (
-            <li key={c.id} className="flex items-start gap-2 text-sm">
-              {c.done ? <Check className="mt-0.5 h-4 w-4 text-success-ink" /> : <Circle className="mt-0.5 h-4 w-4 text-muted-foreground" />}
-              <div>
-                <span className={c.done ? "text-muted-foreground line-through" : ""}>{c.label}</span>
-                {c.required ? <span className="ml-1.5 text-[11px] text-muted-foreground">required</span> : null}
-                {c.done && c.doneAt ? (
-                  <div className="text-xs text-muted-foreground">
-                    {who(c.doneBy)} · {fmtDateTime(c.doneAt)}
-                  </div>
-                ) : null}
-              </div>
-            </li>
-          ))}
-        </ul>
-      </Section>
-
-      <Section title="Completion photos">
-        <FileGallery files={photos} label="Completion photo" emptyLabel="No photos yet." />
-      </Section>
-
-      <Section title="Receipts">
-        <FileGallery files={receipts} label="Receipt" emptyLabel="No receipts yet." />
-      </Section>
-
-      <Section
-        title="Hours"
-        aside={<span className="text-sm font-medium tabular-nums">{data.totals.hours.toFixed(2)} h total</span>}
-      >
-        {data.time.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No hours logged.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="text-[11px] uppercase tracking-[0.06em] text-muted-foreground">
-                <tr>
-                  <th className="py-2 font-medium">Date</th>
-                  <th className="py-2 font-medium">Technician</th>
-                  <th className="py-2 text-right font-medium">Hours</th>
-                  <th className="py-2 pl-4 font-medium">Note</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.time.map((t) => (
-                  <tr key={t._id} className="border-t border-border">
-                    <td className="py-2">{t.date}</td>
-                    <td className="py-2">{who(t.technicianUserId)}</td>
-                    <td className="py-2 text-right tabular-nums">{t.hours}</td>
-                    <td className="py-2 pl-4 text-muted-foreground">{t.note}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Section>
-
-      <Section
-        title="Materials and expenses"
-        aside={<MoneyCell cents={data.totals.expenseCents} className="text-sm font-medium" />}
-      >
-        {data.expenses.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No materials or expenses.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="text-[11px] uppercase tracking-[0.06em] text-muted-foreground">
-                <tr>
-                  <th className="py-2 font-medium">Description</th>
-                  <th className="py-2 font-medium">Type</th>
-                  <th className="py-2 text-right font-medium">Qty</th>
-                  <th className="py-2 text-right font-medium">Amount</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.expenses.map((e) => (
-                  <tr key={e._id} className="border-t border-border">
-                    <td className="py-2">{e.description}</td>
-                    <td className="py-2 capitalize">{e.kind}</td>
-                    <td className="py-2 text-right tabular-nums">{e.quantity ?? ""}</td>
-                    <td className="py-2 text-right">
-                      <MoneyCell cents={e.amountCents} />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Section>
-
-      <Section title="Notes">
-        {data.notes.length === 0 ? <p className="text-sm text-muted-foreground">No notes yet.</p> : null}
-        <ul className="space-y-3">
-          {data.notes.map((n) => (
-            <li key={n._id} className="rounded-xl bg-muted px-3 py-2 text-sm">
-              <div className="text-xs text-muted-foreground">
-                {who(n.authorUserId)} · {fmtDateTime(n.createdAt)}
-              </div>
-              <p className="whitespace-pre-wrap">{n.body}</p>
-            </li>
-          ))}
-        </ul>
-        {canNote ? (
+      {canNote ? (
+        <Section title="Add a note">
           <div className="flex gap-2">
             <textarea
               value={note}
@@ -338,23 +284,9 @@ function View({
               Add
             </PrimaryButton>
           </div>
-        ) : null}
-      </Section>
-
-      {data.audit.length > 0 ? (
-        <Section title="Timeline">
-          <ul className="space-y-2">
-            {data.audit.map((a) => (
-              <li key={a._id} className="text-sm">
-                <span className="font-medium">{a.actorLabel}</span>{" "}
-                <span className="text-muted-foreground">{a.action.replace(/_/g, " ")}</span>
-                {a.note ? <span className="text-muted-foreground"> — {a.note}</span> : null}
-                <span className="ml-2 text-xs text-muted-foreground">{fmtDateTime(a.at)}</span>
-              </li>
-            ))}
-          </ul>
         </Section>
       ) : null}
+
 
       {modal === "edit" ? <EditScopeModal data={data} onClose={() => setModal(null)} /> : null}
       {modal === "reassign" ? <ReassignModal data={data} technicians={technicians} onClose={() => setModal(null)} /> : null}
@@ -466,7 +398,6 @@ function EditScopeModal({ data, onClose }: { data: Detail; onClose: () => void }
   const [accessNotes, setAccessNotes] = useState(wo.accessNotes ?? "");
   const [due, setDue] = useState(dateInput(wo.dueDate));
   const [windowText, setWindowText] = useState(wo.window ?? "");
-  const [items, setItems] = useState<ChecklistDraftItem[]>(() => wo.checklist.map((c) => newDraftItem(c.label, c.required)));
   const [req, setReq] = useState(wo.requiredOnSubmit);
   const [busy, setBusy] = useState(false);
 
@@ -480,7 +411,6 @@ function EditScopeModal({ data, onClose }: { data: Detail; onClose: () => void }
         scope,
         priority,
         accessNotes,
-        checklist: toChecklistArgs(items),
         requiredOnSubmit: req,
         // "" clears the window; only sent when it changed so the audit trail stays clean.
         ...(windowText.trim() !== (wo.window ?? "") ? { window: windowText.trim() } : {}),
@@ -534,10 +464,6 @@ function EditScopeModal({ data, onClose }: { data: Detail; onClose: () => void }
       <div className="space-y-1.5">
         <span className="text-sm font-medium">Time window</span>
         <WindowField value={windowText} onChange={setWindowText} />
-      </div>
-      <div className="space-y-1.5">
-        <span className="text-sm font-medium">Checklist</span>
-        <ChecklistEditor items={items} onChange={setItems} />
       </div>
       <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
         {(["photos", "hours", "receipts", "notes"] as const).map((k) => (

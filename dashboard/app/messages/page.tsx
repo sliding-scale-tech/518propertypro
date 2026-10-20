@@ -1,6 +1,6 @@
 "use client";
 
-import { useAction, useMutation, useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ArrowLeft, Send, MessageCircle, Bot, User, Undo2 } from "lucide-react";
 import { useState } from "react";
@@ -80,21 +80,7 @@ function Thread({ threadId, onBack }: { threadId: Id<"threads">; onBack: () => v
   const messages = useQuery(api.threads.messages, { threadId });
   const threads = useQuery(api.threads.list);
   const thread = threads?.find((t) => t._id === threadId);
-  const staffReply = useAction(api.threads.staffReply);
   const resumeBot = useMutation(api.threads.resumeBot);
-  const [text, setText] = useState("");
-  const [sending, setSending] = useState(false);
-
-  const handleSend = async () => {
-    if (!text.trim()) return;
-    setSending(true);
-    try {
-      await staffReply({ threadId, text: text.trim() });
-      setText("");
-    } finally {
-      setSending(false);
-    }
-  };
 
   return (
     <div className="flex h-full flex-col">
@@ -156,22 +142,24 @@ function Thread({ threadId, onBack }: { threadId: Id<"threads">; onBack: () => v
         </AnimatePresence>
       </div>
 
-      <div className="flex gap-2 border-t border-border p-3">
-        <input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && void handleSend()}
-          placeholder={`Reply as staff via ${thread?.channel === "whatsapp" ? "WhatsApp" : "SMS"}`}
-          className="flex-1 rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring"
-        />
-        <button
-          onClick={handleSend}
-          disabled={sending || !text.trim()}
-          className="flex items-center justify-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          <Send className="h-3.5 w-3.5" />
-          <span className="hidden sm:inline">Send</span>
-        </button>
+      <div className="border-t border-border p-3">
+        <div className="flex gap-2" title="Texting is off for now">
+          <input
+            disabled
+            placeholder="Texting is off for now"
+            className="flex-1 cursor-not-allowed rounded-lg border border-input bg-background px-3 py-2 text-sm opacity-50 outline-none"
+          />
+          <button
+            disabled
+            className="flex cursor-not-allowed items-center justify-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground opacity-40"
+          >
+            <Send className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Send</span>
+          </button>
+        </div>
+        <p className="mt-2 text-xs text-muted-foreground">
+          Texting is off for now. Texts are sent only for emergencies, to admins, so replies from here are paused.
+        </p>
       </div>
     </div>
   );

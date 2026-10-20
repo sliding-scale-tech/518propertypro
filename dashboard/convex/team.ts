@@ -9,12 +9,13 @@ import {
   mutation,
   query,
 } from "./_generated/server";
-import type { MutationCtx } from "./_generated/server";
+import type { ActionCtx, MutationCtx } from "./_generated/server";
 import { appBaseUrl } from "./appUrl";
 import { purgeOrgAudit, writeAudit } from "./audit";
 import {
   currentOrg,
-  hasJobRole,
+  isAdminView,
+  canManageMaintenance,
   viewFor,
   requireOrg,
   requireOrgAdmin,
@@ -24,6 +25,8 @@ import {
   tenantOrgId,
 } from "./authz";
 import * as el from "./elevenLabsApi";
+import { backfillUnassignedLeadsForOrg } from "./leads";
+import type { JobRole } from "./jobRoles";
 import {
   appRoleOf,
   appRoleValidator,
@@ -50,7 +53,7 @@ const MAX_UNAVAILABLE_MS = 365 * 24 * 60 * 60 * 1000;
 /** E.164: a plus, a non-zero first digit, 8-15 digits in all. SMS routing breaks on anything else. */
 const E164 = /^\+[1-9]\d{7,14}$/;
 
-function assertE164(phone: string): string {
+export function assertE164(phone: string): string {
   const trimmed = phone.trim();
   if (!E164.test(trimmed)) {
     throw new Error("Enter the phone number in international format, like +15185550123.");
@@ -83,7 +86,7 @@ export const overview = query({
 
     // Phone numbers are PII: only the people who dispatch work (and the owner of the number)
     // get them. Everyone else on the roster sees the member, not how to reach them.
-    const canSeePhones = hasJobRole(org, "executive", "maintenance_lead");
+    const canSeePhones = isAdminView(org);
     const fullRoster = viewFor(org.isAdmin, org.jobRoles) === "admin";
 
     const members = await Promise.all(
@@ -119,6 +122,9 @@ export const overview = query({
           unavailableUntil: m.unavailableUntil ?? null,
           coveringUserId: full ? (m.coveringUserId ?? null) : null,
           skill: m.skill ?? null,
+          // Sarah routing flags (admin picks them on the Team page); false for non-admin viewers.
+          leadAssignee: fullRoster ? Boolean(m.leadAssignee) : false,
+          unmatchedAssignee: fullRoster ? Boolean(m.unmatchedAssignee) : false,
           unitsOwned: full ? unitsOwned : 0,
           isSelf: m.userId === org.user._id,
           joinedAt: m.createdAt,
@@ -139,7 +145,7 @@ export const overview = query({
     );
 
     // A plain member has no reason to see who has been invited but not yet joined.
-    const invitations = org.isAdmin
+    const invitations = isAdminView(org)
       ? (
           await ctx.db
             .query("invites")
@@ -153,6 +159,8 @@ export const overview = query({
             role: i.role,
             jobRoles: i.jobRoles ?? [],
             appRole: appRoleOf(i.role, i.jobRoles ?? []),
+            fullName: i.fullName ?? null,
+            phone: i.phone ?? null, // admin-only list; lets "Resend" reuse the original details
             createdAt: i.createdAt,
             expiresAt: i.expiresAt,
           }))
@@ -161,7 +169,7 @@ export const overview = query({
     return {
       orgId: org.orgId,
       orgName: organization?.name ?? "Your team",
-      isAdmin: org.isAdmin,
+      isAdmin: isAdminView(org),
       members: members.sort((a, b) => {
         if (a.role !== b.role) return a.role === "admin" ? -1 : 1;
         return a.joinedAt - b.joinedAt;
@@ -179,9 +187,9 @@ export const myAccess = query({
     if (!org) return null;
     return {
       view: viewFor(org.isAdmin, org.jobRoles),
-      isAdmin: org.isAdmin,
+      isAdmin: isAdminView(org),
       jobRoles: org.jobRoles,
-      canManageMaintenance: hasJobRole(org, "maintenance_lead", "simplr_admin"),
+      canManageMaintenance: canManageMaintenance(org),
       isExecutive: org.jobRoles.includes("executive"),
     };
   },
@@ -253,6 +261,19 @@ export const setJobRoles = mutation({
       if (owned > 0) throw ownsUnitsError(owned);
     }
 
+    // Same last-Admin and self-demotion protection as setAppRole.
+    const isAdminFlag = membership.role === "admin";
+    if (isAdminView({ isAdmin: isAdminFlag, jobRoles: before }) && !isAdminView({ isAdmin: isAdminFlag, jobRoles: next })) {
+      if (membership.userId === org.user._id) throw new Error("Ask another Admin to change your role.");
+      const members = await ctx.db
+        .query("memberships")
+        .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
+        .collect();
+      if (!members.some((m) => m._id !== membership._id && isAdminView({ isAdmin: m.role === "admin", jobRoles: m.jobRoles ?? [] }))) {
+        throw new Error("The team needs at least one Admin.");
+      }
+    }
+
     await ctx.db.patch(membership._id, { jobRoles: next });
     await writeAudit(ctx, {
       orgId: org.orgId,
@@ -282,19 +303,19 @@ export const setAppRole = mutation({
 
     const before = membership.jobRoles ?? [];
     const next = jobRolesFor(args.appRole);
-    const wasAdmin = membership.role === "admin";
+    const wasAdmin = isAdminView({ isAdmin: membership.role === "admin", jobRoles: before });
 
     if (wasAdmin && next.role !== "admin") {
       // Locking yourself out is the easy mistake; another admin can make the change instead.
       if (membership.userId === org.user._id) {
-        throw new Error("Ask another admin to change your role.");
+        throw new Error("Ask another Admin to change your role.");
       }
       const members = await ctx.db
         .query("memberships")
         .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
         .collect();
-      if (!members.some((m) => m._id !== membership._id && m.role === "admin")) {
-        throw new Error("The team needs at least one admin.");
+      if (!members.some((m) => m._id !== membership._id && isAdminView({ isAdmin: m.role === "admin", jobRoles: m.jobRoles ?? [] }))) {
+        throw new Error("The team needs at least one Admin.");
       }
     }
 
@@ -330,7 +351,7 @@ export const setContact = mutation({
   },
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
-    if (!org.isAdmin && args.userId !== org.user._id) {
+    if (!isAdminView(org) && args.userId !== org.user._id) {
       throw new Error("You don't have access to that.");
     }
     const membership = await ctx.db
@@ -379,7 +400,7 @@ export const setUnavailable = mutation({
   args: { userId: v.id("users"), until: v.optional(v.number()), coveringUserId: v.optional(v.id("users")) },
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
-    if (args.userId !== org.user._id && !hasJobRole(org, "executive", "maintenance_lead")) {
+    if (args.userId !== org.user._id && !isAdminView(org)) {
       throw new Error("You don't have access to that.");
     }
     const membership = await ctx.db
@@ -425,9 +446,65 @@ export const setUnavailable = mutation({
   },
 });
 
+/** Shared by the two Sarah routing flags: admin-only, target must be an asset manager on this team. */
+async function setAssigneeFlag(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+  field: "leadAssignee" | "unmatchedAssignee",
+  value: boolean,
+): Promise<boolean> {
+  const org = await requireOrgAdmin(ctx);
+  const membership = await ctx.db
+    .query("memberships")
+    .withIndex("by_user", (q) => q.eq("userId", userId))
+    .first();
+  if (!membership || membership.orgId !== org.orgId) throw new Error("Member not found.");
+  if (value && !(membership.jobRoles ?? []).includes("asset_manager")) {
+    throw new Error("Only an asset manager can be chosen for this.");
+  }
+  if (Boolean(membership[field]) === value) return false;
+  await ctx.db.patch(membership._id, { [field]: value });
+  await writeAudit(ctx, {
+    orgId: org.orgId,
+    entity: "membership",
+    entityId: membership._id,
+    action: field === "leadAssignee" ? "lead_assignee_set" : "unmatched_assignee_set",
+    actorUserId: org.user._id,
+    from: String(!value),
+    to: String(value),
+  });
+  return value;
+}
+
+/**
+ * Admin chooses who receives new leasing leads. These are also the only people Sarah books tours
+ * for (tours.bookingContext). Turning it on requires the asset_manager job role.
+ */
+export const setLeadAssignee = mutation({
+  args: { userId: v.id("users"), value: v.boolean() },
+  handler: async (ctx, args) => {
+    const turnedOn = await setAssigneeFlag(ctx, args.userId, "leadAssignee", args.value);
+    if (turnedOn) {
+      const org = await requireOrgAdmin(ctx);
+      await backfillUnassignedLeadsForOrg(ctx, org.orgId, org.user._id);
+    }
+  },
+});
+
+/**
+ * Admin chooses who gets callback contacts for callers Sarah could not match to a unit. More than
+ * one may be chosen; the least-loaded of them gets each new one (leads.pickUnmatchedAssignee).
+ */
+export const setUnmatchedAssignee = mutation({
+  args: { userId: v.id("users"), value: v.boolean() },
+  handler: async (ctx, args) => {
+    await setAssigneeFlag(ctx, args.userId, "unmatchedAssignee", args.value);
+  },
+});
+
 /**
  * One-off: gives every membership that predates job roles a value. Team admins become
- * simplr_admin (they already act as one — see authz.hasJobRole); everyone else starts with none
+ * simplr_admin (they already act as one — see authz.isAdminView); everyone else starts with none
  * until an admin assigns roles on the Team page. Idempotent: rows that already have jobRoles
  * (even an empty array) are left alone.
  *
@@ -452,7 +529,15 @@ export const revokeInvite = mutation({
     const org = await requireOrgAdmin(ctx);
     const invite = await ctx.db.get(args.inviteId);
     if (!invite || invite.orgId !== org.orgId) return;
+    if (invite.acceptedAt || invite.revokedAt) return;
     await ctx.db.patch(args.inviteId, { revokedAt: Date.now() });
+    await writeAudit(ctx, {
+      orgId: org.orgId,
+      entity: "membership",
+      entityId: String(args.inviteId),
+      action: "invite_revoked",
+      actorUserId: org.user._id,
+    });
   },
 });
 
@@ -472,51 +557,71 @@ export const invite = action({
     // Preferred: when given, role and jobRoles above are ignored and derived from it.
     appRole: v.optional(appRoleValidator),
     phone: v.optional(v.string()),
+    fullName: v.optional(v.string()),
   },
-  handler: async (ctx, args): Promise<{ email: string }> => {
-    const { orgId, isAdmin, userId } = await requireOrgId(ctx);
-    if (!isAdmin) throw new Error("Only a team admin can do that.");
-    const phone = args.phone?.trim() ? assertE164(args.phone) : undefined;
-
-    const derived = args.appRole ? jobRolesFor(args.appRole) : null;
-    const jobRoles = derived ? derived.jobRoles : [...new Set(args.jobRoles ?? [])];
-    if (jobRoles.length === 0) throw new Error("Pick a role for this person.");
-    // An admin invite must carry an admin-flavoured job role, so they land in the admin view.
-    const role = derived ? derived.role : (args.role ?? "member");
-    if (
-      role === "admin" &&
-      !jobRoles.some((r) => r === "executive" || r === "maintenance_lead" || r === "simplr_admin")
-    ) {
-      throw new Error("Pick a role for this person.");
-    }
-
-    const email = args.email.trim().toLowerCase();
-    if (!email.includes("@") || email.length < 3) throw new Error("Enter a valid email address.");
-
-    const token = randomToken();
-    const created: { orgName: string } = await ctx.runMutation(internal.team.recordInvite, {
-      orgId,
-      email,
-      role,
-      jobRoles,
-      phone,
-      tokenHash: await sha256(token),
-      createdBy: userId,
-      expiresAt: Date.now() + INVITE_TTL_MS,
-    });
-
-    const link = `${appBaseUrl()}/accept-invite?token=${token}`;
-
-    await sendEmail({
-      to: email,
-      subject: `You have been invited to ${created.orgName}`,
-      html: inviteEmailHtml(created.orgName, link),
-      text: inviteEmailText(created.orgName, link),
-    });
-
-    return { email };
-  },
+  handler: async (ctx, args): Promise<{ email: string; resent: boolean }> => await createAndSendInvite(ctx, args),
 });
+
+/**
+ * The one invite implementation (team.invite and assetManagers.invite both call it): admin
+ * check, role derivation, supersede-and-record, then the Resend email. `fullName` is optional
+ * display text kept on the pending invite only.
+ */
+export async function createAndSendInvite(
+  ctx: ActionCtx,
+  args: {
+    email: string;
+    role?: "admin" | "member";
+    jobRoles?: JobRole[];
+    appRole?: "admin" | "asset_manager" | "technician";
+    phone?: string;
+    fullName?: string;
+  },
+): Promise<{ email: string; resent: boolean }> {
+  const inviter = await requireOrgId(ctx);
+  if (!isAdminView(inviter)) throw new Error("You don't have access to that.");
+  const { orgId, userId } = inviter;
+  const phone = args.phone?.trim() ? assertE164(args.phone) : undefined;
+
+  const derived = args.appRole ? jobRolesFor(args.appRole) : null;
+  const jobRoles = derived ? derived.jobRoles : [...new Set(args.jobRoles ?? [])];
+  if (jobRoles.length === 0) throw new Error("Pick a role for this person.");
+  // An admin invite must carry an admin-flavoured job role, so they land in the admin view.
+  const role = derived ? derived.role : (args.role ?? "member");
+  if (
+    role === "admin" &&
+    !jobRoles.some((r) => r === "executive" || r === "maintenance_lead" || r === "simplr_admin")
+  ) {
+    throw new Error("Pick a role for this person.");
+  }
+
+  const email = args.email.trim().toLowerCase();
+  if (!email.includes("@") || email.length < 3) throw new Error("Enter a valid email address.");
+
+  const token = randomToken();
+  const created: { orgName: string; resent: boolean } = await ctx.runMutation(internal.team.recordInvite, {
+    orgId,
+    email,
+    role,
+    jobRoles,
+    phone,
+    fullName: args.fullName,
+    tokenHash: await sha256(token),
+    createdBy: userId,
+    expiresAt: Date.now() + INVITE_TTL_MS,
+  });
+
+  const link = `${appBaseUrl()}/accept-invite?token=${token}`;
+
+  await sendEmail({
+    to: email,
+    subject: `You have been invited to ${created.orgName}`,
+    html: inviteEmailHtml(created.orgName, link),
+    text: inviteEmailText(created.orgName, link),
+  });
+
+  return { email, resent: created.resent };
+}
 
 /**
  * Redeems an invitation for the signed-in user.
@@ -546,11 +651,12 @@ export const recordInvite = internalMutation({
     role: v.union(v.literal("admin"), v.literal("member")),
     jobRoles: v.optional(v.array(jobRoleValidator)),
     phone: v.optional(v.string()),
+    fullName: v.optional(v.string()),
     tokenHash: v.string(),
     createdBy: v.id("users"),
     expiresAt: v.number(),
   },
-  handler: async (ctx, args): Promise<{ orgName: string }> => {
+  handler: async (ctx, args): Promise<{ orgName: string; resent: boolean }> => {
     const org = await ctx.db.get(args.orgId);
     if (!org) throw new Error("Team not found.");
 
@@ -573,12 +679,34 @@ export const recordInvite = internalMutation({
       .query("invites")
       .withIndex("by_email", (q) => q.eq("email", args.email))
       .collect();
+    // Anti email-bombing: at most 3 invites per address and 100 per team in a rolling 24h.
+    const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+    if (previous.filter((p) => p.createdAt >= dayAgo).length >= 3) {
+      throw new Error("Too many invitations were sent to that address today. Try again tomorrow.");
+    }
+    let teamToday = 0;
+    for await (const row of ctx.db.query("invites").withIndex("by_org", (q) => q.eq("orgId", args.orgId)).order("desc")) {
+      if (row.createdAt < dayAgo) break;
+      if (++teamToday >= 100) throw new Error("Your team reached today's invitation limit. Try again tomorrow.");
+    }
+    let resent = false;
     for (const old of previous) {
-      if (!old.acceptedAt && !old.revokedAt) await ctx.db.patch(old._id, { revokedAt: Date.now() });
+      if (!old.acceptedAt && !old.revokedAt) {
+        await ctx.db.patch(old._id, { revokedAt: Date.now() });
+        resent = true;
+      }
     }
 
-    await ctx.db.insert("invites", { ...args, createdAt: Date.now() });
-    return { orgName: org.name };
+    const inviteId = await ctx.db.insert("invites", { ...args, createdAt: Date.now() });
+    await writeAudit(ctx, {
+      orgId: args.orgId,
+      entity: "membership",
+      entityId: String(inviteId),
+      action: resent ? "invite_resent" : "invite_sent",
+      actorUserId: args.createdBy,
+      note: `jobRoles=${(args.jobRoles ?? []).join(",")}`,
+    });
+    return { orgName: org.name, resent };
   },
 });
 
@@ -1042,6 +1170,37 @@ export const deleteOrgRows = internalMutation({
       "publicLinks",
       (await ctx.db.query("publicLinks").withIndex("by_org", (q) => q.eq("orgId", args.orgId)).collect()) as never[],
     );
+    // Sarah configuration and callback tables (all keyed by orgId; the by_org-prefixed indexes make
+    // these indexed reads). sarahAttempts is keyed by conversation, so it is read by its by_org index.
+    await drop("callbackContacts", (await ctx.db.query("callbackContacts").withIndex("by_org_and_created", (q) => q.eq("orgId", args.orgId)).collect()) as never[]);
+    await drop("sarahAttempts", (await ctx.db.query("sarahAttempts").withIndex("by_org", (q) => q.eq("orgId", args.orgId)).collect()) as never[]);
+    await drop("sarahConfig", (await ctx.db.query("sarahConfig").withIndex("by_org", (q) => q.eq("orgId", args.orgId)).collect()) as never[]);
+    await drop("sarahConfigItems", (await ctx.db.query("sarahConfigItems").withIndex("by_org", (q) => q.eq("orgId", args.orgId)).collect()) as never[]);
+    await drop("sarahConfigAudit", (await ctx.db.query("sarahConfigAudit").withIndex("by_org_and_item", (q) => q.eq("orgId", args.orgId)).collect()) as never[]);
+    await drop("passwordResetRequests", (await ctx.db.query("passwordResetRequests").withIndex("by_org", (q) => q.eq("orgId", args.orgId)).collect()) as never[]);
+    await drop("sarahConfigVersions", (await ctx.db.query("sarahConfigVersions").withIndex("by_org_and_version", (q) => q.eq("orgId", args.orgId)).collect()) as never[]);
+    // Tasks and their attachments (uploaded files are removed from storage too).
+    for (const row of await ctx.db.query("taskAttachments").withIndex("by_org", (q) => q.eq("orgId", args.orgId)).collect()) {
+      await ctx.storage.delete(row.storageId);
+      await ctx.db.delete(row._id);
+      counts.taskAttachments = (counts.taskAttachments ?? 0) + 1;
+    }
+    await drop("tasks", (await ctx.db.query("tasks").withIndex("by_org", (q) => q.eq("orgId", args.orgId)).collect()) as never[]);
+    // SMS/WhatsApp threads: smsMessages has no orgId of its own, so remove them via their threads first.
+    const threads = await ctx.db
+      .query("threads")
+      .withIndex("by_org_and_last_message", (q) => q.eq("orgId", args.orgId))
+      .collect();
+    for (const thread of threads) {
+      for (const msg of await ctx.db
+        .query("smsMessages")
+        .withIndex("by_thread", (q) => q.eq("threadId", thread._id))
+        .collect()) {
+        await ctx.db.delete(msg._id);
+        counts.smsMessages = (counts.smsMessages ?? 0) + 1;
+      }
+    }
+    await drop("threads", threads as never[]);
     // Units and the audit trail have no delete path in the app; these purge-only helpers (see
     // units.purgeOrgUnits / audit.purgeOrgAudit) exist solely for tearing down a whole team.
     const unitsDeleted = await purgeOrgUnits(ctx, args.orgId);

@@ -23,7 +23,8 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import type { WeekView } from "@/convex/calendarView";
 import * as sched from "@/convex/tourSchedule";
-import { TourHoursEditor, type TourHours } from "@/components/tour-hours-editor";
+import { AvailabilityModal } from "@/components/asset-managers/availability-modal";
+import type { TourHours } from "@/components/tour-hours-editor";
 import { useToast } from "@/components/toast";
 import { RequireView } from "@/components/require-view";
 import { DatePicker, Modal, PageHeader, Select } from "@/components/ui";
@@ -185,7 +186,7 @@ function CalendarPageInner() {
               Google Calendar events next to the tours Sarah booked. Only you see your own events&apos; details
               {settings?.isAdmin
                 ? " — when you open a teammate's calendar, their events show only as busy."
-                : " — team admins see them only as busy."}
+                : " — Admins see them only as busy."}
             </>
           }
         />
@@ -450,18 +451,19 @@ function HoursModal({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => event.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
+  const saveMyHours = useMutation(api.tours.saveMyHours);
+  const toast = useToast();
   return (
-    <Modal title={firstTime ? "When can you give tours?" : "Your tour hours"} onClose={onClose} bare>
-        <div className="overflow-y-auto px-6 py-5">
-          <TourHoursEditor saved={saved} confirmUnchanged={firstTime} onSaved={onSaved} />
-        </div>
-      </Modal>
+    <AvailabilityModal
+      title={firstTime ? "When can you give tours?" : "Availability Timings"}
+      initial={saved.weeklyHours.map((h) => ({ day: h.day, start: h.start, end: h.end }))}
+      onClose={onClose}
+      onSave={async (hours) => {
+        await saveMyHours({ weeklyHours: hours });
+        toast("Tour hours saved");
+        onSaved();
+      }}
+    />
   );
 }
 
@@ -1031,7 +1033,7 @@ function TourModal({
                 <div className="flex items-center gap-2.5 text-sm">
                   <Phone className="h-4 w-4 shrink-0 text-muted-foreground" />
                   {details.callerPhone ? (
-                    <a href={`tel:${details.callerPhone}`} className="font-medium text-primary hover:underline">
+                    <a href={`tel:${details.callerPhone.replace(/[^\d+]/g, "")}`} className="font-medium text-primary hover:underline">
                       {details.callerPhone}
                     </a>
                   ) : (

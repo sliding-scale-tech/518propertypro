@@ -468,9 +468,7 @@ function Inbox({
 }
 
 function ChatPane({ thread, onBack }: { thread: ThreadRow; onBack: () => void }) {
-  const toast = useToast();
   const messages = useQuery(api.whatsapp.messages, { threadId: thread._id });
-  const staffReply = useAction(api.whatsapp.staffReply);
   const resumeBot = useMutation(api.whatsapp.resumeBot);
   const takeOver = useMutation(api.whatsapp.takeOver);
   const markRead = useMutation(api.whatsapp.markRead);
@@ -478,8 +476,6 @@ function ChatPane({ thread, onBack }: { thread: ThreadRow; onBack: () => void })
   const reopenThread = useMutation(api.whatsapp.reopenThread);
   const renameThread = useMutation(api.whatsapp.renameThread);
 
-  const [draft, setDraft] = useState("");
-  const [sending, setSending] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -495,20 +491,6 @@ function ChatPane({ thread, onBack }: { thread: ThreadRow; onBack: () => void })
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });
   }, [messages?.length]);
-
-  const send = async () => {
-    const text = draft.trim();
-    if (!text) return;
-    setSending(true);
-    try {
-      await staffReply({ threadId: thread._id, text });
-      setDraft("");
-    } catch (err) {
-      toast(err instanceof Error ? err.message : "Could not send", "error");
-    } finally {
-      setSending(false);
-    }
-  };
 
   const saveName = async () => {
     const name = nameDraft.trim();
@@ -668,32 +650,24 @@ function ChatPane({ thread, onBack }: { thread: ThreadRow; onBack: () => void })
           This conversation is closed. Reopen it to reply.
         </div>
       ) : (
-        <div className="flex shrink-0 gap-2 border-t border-border p-3">
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void send();
-              }
-            }}
-            rows={2}
-            placeholder={
-              thread.status === "escalated"
-                ? "Reply to customer..."
-                : "Reply - this takes over from Sarah..."
-            }
-            disabled={sending}
-            className="max-h-28 min-h-[52px] w-full resize-none rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring"
-          />
-          <button
-            onClick={send}
-            disabled={sending || !draft.trim()}
-            className="flex h-[52px] w-[52px] shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-          </button>
+        <div className="shrink-0 border-t border-border p-3">
+          <div className="flex gap-2" title="Texting is off for now">
+            <textarea
+              rows={2}
+              disabled
+              placeholder="Texting is off for now"
+              className="max-h-28 min-h-[52px] w-full cursor-not-allowed resize-none rounded-lg border border-input bg-background px-3 py-2 text-sm opacity-50 outline-none"
+            />
+            <button
+              disabled
+              className="flex h-[52px] w-[52px] shrink-0 cursor-not-allowed items-center justify-center rounded-lg bg-primary text-primary-foreground opacity-40"
+            >
+              <Send className="h-4 w-4" />
+            </button>
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">
+            Texting is off for now. Messages are sent only for emergencies, to admins, so replies from here are paused.
+          </p>
         </div>
       )}
     </div>

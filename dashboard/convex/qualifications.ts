@@ -1,5 +1,7 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery, query } from "./_generated/server";
+import type { MutationCtx } from "./_generated/server";
+import type { ObjectType } from "convex/values";
 import { canReadConversation } from "./conversations";
 
 // --- Reads ----------------------------------------------------------------
@@ -46,8 +48,7 @@ export const byElevenLabsId = internalQuery({
  * Find-or-create keyed by the ElevenLabs conversation id. Every server tool call during a
  * phone call lands here before any Convex `conversations` row necessarily exists.
  */
-export const upsertByConversationId = internalMutation({
-  args: {
+export const upsertArgs = {
     elevenLabsConversationId: v.string(),
     bedrooms: v.optional(v.string()),
     moveInDate: v.optional(v.string()),
@@ -61,6 +62,9 @@ export const upsertByConversationId = internalMutation({
     nearMiss: v.optional(v.boolean()),
     tourSlot: v.optional(v.string()),
     tourConfirmed: v.optional(v.boolean()),
+    callerEmail: v.optional(v.string()),
+    leadClass: v.optional(v.string()),
+    leadFlags: v.optional(v.array(v.string())),
     ownerProspect: v.optional(
       v.object({
         name: v.string(),
@@ -80,8 +84,16 @@ export const upsertByConversationId = internalMutation({
         }),
       ),
     ),
-  },
-  handler: async (ctx, args) => {
+};
+
+/**
+ * The shared upsert. Screening answers are MERGED by key (a later call with a subset must not
+ * erase earlier answers), so Sarah can log a lead early and add to it as the call goes on.
+ */
+export async function upsertQualification(
+  ctx: MutationCtx,
+  args: ObjectType<typeof upsertArgs>,
+) {
     const { elevenLabsConversationId, ...fields } = args;
     const existing = await ctx.db
       .query("qualifications")
@@ -93,6 +105,15 @@ export const upsertByConversationId = internalMutation({
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
     for (const [key, value] of Object.entries(fields)) {
       if (value !== undefined) patch[key] = value;
+    }
+    if (fields.leadFlags) {
+      // Flags are sticky: a later partial call must not erase what an earlier one found.
+      patch.leadFlags = [...new Set([...(existing?.leadFlags ?? []), ...fields.leadFlags])];
+    }
+    if (fields.screeningAnswers) {
+      const merged = new Map((existing?.screeningAnswers ?? []).map((a) => [a.key, a]));
+      for (const a of fields.screeningAnswers) merged.set(a.key, a);
+      patch.screeningAnswers = [...merged.values()];
     }
     // qualifies, disqualifyReason and nearMiss travel together: whenever a call recomputes the
     // decision, the other two must reflect exactly that decision, never a stale rejection left
@@ -133,7 +154,11 @@ export const upsertByConversationId = internalMutation({
       updatedAt: Date.now(),
       ...patch,
     });
-  },
+}
+
+export const upsertByConversationId = internalMutation({
+  args: upsertArgs,
+  handler: (ctx, args) => upsertQualification(ctx, args),
 });
 
 export const linkConversation = internalMutation({

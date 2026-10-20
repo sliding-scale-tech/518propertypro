@@ -22,7 +22,14 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { Dropdown } from "@/components/ui/dropdown";
 import { RequireView } from "@/components/require-view";
 import { ConversationTranscript } from "@/components/transcript";
-import { Btn, Card, CardHead, Kpi, KpiRow, PageHeader, Pill, type Tone } from "@/components/ui";
+import { Btn, Card, CardHead, Chips, Kpi, KpiRow, PageHeader, Pill, type Tone } from "@/components/ui";
+import {
+  AssigneeCell,
+  TourLine,
+  UnassignedHint,
+  isUnassigned,
+  type LeadAssignmentFields,
+} from "@/components/leads/lead-assignment";
 
 function formatDuration(seconds?: number) {
   if (seconds === undefined) return "—";
@@ -77,7 +84,9 @@ type CallRow = {
   status: string;
   messageCount: number;
   leadScore: number;
-};
+} & LeadAssignmentFields;
+
+type AssignFilter = "all" | "mine" | "unassigned";
 
 type Qualification = {
   bedrooms?: string;
@@ -88,9 +97,11 @@ type Qualification = {
   callerName?: string;
   callerPhone?: string;
   qualifies?: boolean;
+  leadClass?: string;
   disqualifyReason?: string;
   nearMiss?: boolean;
   tourSlot?: string;
+  tourConfirmed?: boolean;
   ownerProspect?: {
     name?: string;
     phone?: string;
@@ -121,6 +132,12 @@ function LeadsPageInner() {
   const [search, setSearch] = useState("");
 
   const [ownerOnly, setOwnerOnly] = useState(false);
+  // ?filter=mine deep link (dashboard card). Read from window to avoid a Suspense boundary.
+  const [assignFilter, setAssignFilter] = useState<AssignFilter>(() => {
+    if (typeof window === "undefined") return "all";
+    const f = new URLSearchParams(window.location.search).get("filter");
+    return f === "mine" || f === "unassigned" ? f : "all";
+  });
 
   const filtered = useMemo(() => {
     if (!history) return history;
@@ -128,6 +145,8 @@ function LeadsPageInner() {
     return history.filter((call) => {
       if (intentFilter !== "all" && call.intent !== intentFilter) return false;
       if (outcomeFilter !== "all" && call.outcome !== outcomeFilter) return false;
+      if (assignFilter === "mine" && !call.assignedToMe) return false;
+      if (assignFilter === "unassigned" && !isUnassigned(call)) return false;
       if (!term) return true;
       return [
         call.callerNumber,
@@ -138,7 +157,7 @@ function LeadsPageInner() {
         .filter(Boolean)
         .some((value) => value!.toLowerCase().includes(term));
     });
-  }, [history, intentFilter, outcomeFilter, search]);
+  }, [history, intentFilter, outcomeFilter, assignFilter, search]);
 
   return (
     <div className="space-y-5 pb-10">
@@ -159,6 +178,18 @@ function LeadsPageInner() {
       {funnel ? <FunnelChart funnel={funnel} /> : null}
 
       <section className="overflow-hidden rounded-[20px] border border-border bg-card">
+        <div className="border-b border-border px-4 pt-4 pb-3 sm:px-5">
+          <Chips<AssignFilter>
+            label="Filter by assignment"
+            value={assignFilter}
+            onChange={setAssignFilter}
+            options={[
+              { value: "all", label: "All" },
+              { value: "mine", label: "Mine" },
+              { value: "unassigned", label: "Unassigned" },
+            ]}
+          />
+        </div>
         <div className="flex flex-col gap-3 border-b border-border px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
           <div className="flex flex-wrap gap-3">
             <Dropdown
@@ -233,6 +264,7 @@ function LeadsPageInner() {
                 <th className="px-2 py-3 font-medium">Timestamp</th>
                 <th className="px-3 py-3 font-medium">Channel</th>
                 <th className="px-3 py-3 font-medium">Caller</th>
+                <th className="px-3 py-3 font-medium">Assigned to</th>
                 <th className="px-3 py-3 font-medium">Outcome</th>
                 <th className="px-3 py-3 font-medium">Duration</th>
                 <th className="w-12 px-3 py-3" />
@@ -347,25 +379,28 @@ function OutcomeBadge({
 }) {
   const owner = qualification?.ownerProspect ? <Pill tone="vio">Owner prospect → Alex</Pill> : null;
   // Capture only: the pill reports whether the answers match the criteria, never a verdict on the lead.
+  const ready = qualification?.leadClass ? qualification.leadClass === "ready" : qualification?.qualifies;
   const match =
-    qualification?.qualifies === true ? (
+    ready === true ? (
       <Pill tone="ok">Matches criteria</Pill>
-    ) : qualification?.qualifies === false && call.outcome !== "disqualified" ? (
+    ) : ready === false && call.outcome !== "disqualified" ? (
       <Pill tone="warn">Review needed</Pill>
     ) : null;
   return (
     <span className="inline-flex flex-wrap items-center gap-1.5">
-      <OutcomeBase call={call} />
+      <OutcomeBase call={call} qualification={qualification} />
       {match}
       {owner}
     </span>
   );
 }
 
-function OutcomeBase({ call }: { call: CallRow }) {
+function OutcomeBase({ call, qualification }: { call: CallRow; qualification?: Qualification }) {
   if (call.outcome) {
     return <Pill tone={OUTCOME_TONES[call.outcome] ?? "neutral"}>{OUTCOME_LABELS[call.outcome] ?? call.outcome}</Pill>;
   }
+  // Before the post-call webhook classifies the call, the captured lead already knows a tour was booked.
+  if (qualification?.tourConfirmed) return <Pill tone="ok">Tour booked</Pill>;
   if (call.status === "active") {
     return (
       <Pill tone="ok" dot>
@@ -400,7 +435,9 @@ function CallTableRow({
         animate={{ opacity: 1 }}
         transition={{ delay: Math.min(index, 8) * 0.03 }}
         onClick={onToggle}
-        className="cursor-pointer border-b border-border last:border-0 hover:bg-muted"
+        className={`cursor-pointer border-b border-border last:border-0 hover:bg-muted ${
+          call.assignedToMe ? "bg-accent/40" : ""
+        }`}
       >
         <td className="px-5 py-3.5">
           <motion.span
@@ -421,7 +458,13 @@ function CallTableRow({
             {call.channel}
           </span>
         </td>
-        <td className="px-3 py-3.5">{call.callerNumber ?? "—"}</td>
+        <td className="px-3 py-3.5">{call.callerNumber ?? qualification?.callerPhone ?? qualification?.callerName ?? "—"}</td>
+        <td className="px-3 py-3.5">
+          <div className="flex flex-col items-start gap-1">
+            <AssigneeCell lead={call} />
+            <TourLine lead={call} />
+          </div>
+        </td>
         <td className="px-3 py-3.5">
           <OutcomeBadge call={call} qualification={qualification} />
         </td>
@@ -433,7 +476,7 @@ function CallTableRow({
       <AnimatePresence initial={false}>
         {expanded ? (
           <tr>
-            <td colSpan={7} className="border-b border-border bg-muted p-0">
+            <td colSpan={8} className="border-b border-border bg-muted p-0">
               <motion.div
                 initial={{ height: 0, opacity: 0 }}
                 animate={{ height: "auto", opacity: 1 }}
@@ -442,6 +485,7 @@ function CallTableRow({
               >
                 <div className="p-5">
                   <ExpandedDetail
+                    lead={call}
                     conversationId={call._id}
                     qualification={qualification}
                     summary={call.summary}
@@ -478,14 +522,20 @@ function CallCard({
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: Math.min(index, 8) * 0.04 }}
-      className="overflow-hidden rounded-2xl border border-border bg-card"
+      className={`overflow-hidden rounded-2xl border bg-card ${
+        call.assignedToMe ? "border-accent-line bg-accent/40" : "border-border"
+      }`}
     >
       <button onClick={onToggle} className="flex w-full items-center justify-between gap-3 p-4 text-left">
         <div className="min-w-0">
           <p className="text-xs text-muted-foreground">{new Date(call.startedAt).toLocaleString()}</p>
           <div className="mt-2 flex items-center gap-2">
-            <span className="text-sm font-medium">{call.callerNumber ?? "Browser call"}</span>
+            <span className="text-sm font-medium">{call.callerNumber ?? qualification?.callerPhone ?? "Browser call"}</span>
             <OutcomeBadge call={call} qualification={qualification} />
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+            <AssigneeCell lead={call} />
+            <TourLine lead={call} />
           </div>
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -505,6 +555,7 @@ function CallCard({
           >
             <div className="p-4">
               <ExpandedDetail
+                lead={call}
                 conversationId={call._id}
                 qualification={qualification}
                 summary={call.summary}
@@ -518,16 +569,25 @@ function CallCard({
 }
 
 function ExpandedDetail({
+  lead,
   conversationId,
   qualification,
   summary,
 }: {
+  lead: LeadAssignmentFields;
   conversationId: Id<"conversations">;
   qualification?: Qualification;
   summary?: string;
 }) {
   return (
     <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+        <span className="flex items-center gap-2 text-xs text-muted-foreground">
+          Assigned to <AssigneeCell lead={lead} />
+        </span>
+        <TourLine lead={lead} />
+      </div>
+      <UnassignedHint lead={lead} />
       {summary ? <p className="text-sm italic text-muted-foreground">{summary}</p> : null}
       {qualification ? (
         <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm sm:grid-cols-3">
@@ -562,7 +622,7 @@ function ExpandedDetail({
             </p>
           ) : (
             <p className="mb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">
-              Staff note: criteria not met
+              Staff note: review needed
             </p>
           )}
           <p className={qualification.nearMiss ? "text-warning-ink" : "text-foreground"}>

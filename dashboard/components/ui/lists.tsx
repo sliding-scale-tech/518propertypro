@@ -1,4 +1,4 @@
-import { Check, Image as ImageIcon } from "lucide-react";
+import { Check, Image as ImageIcon, X } from "lucide-react";
 import type { KeyboardEvent, ReactNode } from "react";
 import { cx } from "./cx";
 
@@ -198,17 +198,24 @@ export function Checklist({ items }: { items: Array<{ label: ReactNode; done: bo
 }
 
 /** Grid of photo tiles (real image when `url` is set, striped placeholder otherwise). */
-export function PhotoGrid({ photos }: { photos: Array<{ url?: string | null; caption?: string; alt?: string }> }) {
+export function PhotoGrid({
+  photos,
+}: {
+  /** onRemove: set only when the viewer may delete the photo; shows a hover/focus "x" (always visible on touch). */
+  photos: Array<{ url?: string | null; caption?: string; alt?: string; onRemove?: () => void }>;
+}) {
   return (
     <div className="grid grid-cols-[repeat(auto-fill,minmax(92px,1fr))] gap-2">
       {photos.map((p, i) => (
         <div
           key={i}
-          className="relative flex aspect-square items-center justify-center overflow-hidden rounded-xl border border-border bg-[repeating-linear-gradient(135deg,var(--muted)_0_10px,var(--background)_10px_20px)]"
+          className="group relative flex aspect-square items-center justify-center overflow-hidden rounded-xl border border-border bg-[repeating-linear-gradient(135deg,var(--muted)_0_10px,var(--background)_10px_20px)]"
         >
           {p.url ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={p.url} alt={p.alt ?? p.caption ?? "Photo"} className="h-full w-full object-cover" />
+            <a href={p.url} target="_blank" rel="noopener noreferrer" className="block h-full w-full">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={p.url} alt={p.alt ?? p.caption ?? "Photo"} className="h-full w-full object-cover" />
+            </a>
           ) : (
             <ImageIcon aria-hidden className="h-5 w-5 text-faint" />
           )}
@@ -216,6 +223,17 @@ export function PhotoGrid({ photos }: { photos: Array<{ url?: string | null; cap
             <span className="absolute bottom-1.5 left-1.5 rounded-md bg-card px-1.5 text-[10.5px] font-semibold leading-4">
               {p.caption}
             </span>
+          ) : null}
+          {p.onRemove ? (
+            <button
+              type="button"
+              aria-label="Remove photo"
+              title="Remove photo"
+              onClick={p.onRemove}
+              className="absolute right-1 top-1 flex h-7 w-7 items-center justify-center rounded-full bg-black/65 text-white hover:bg-rose-600 focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-2 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100"
+            >
+              <X aria-hidden className="h-4 w-4" />
+            </button>
           ) : null}
         </div>
       ))}

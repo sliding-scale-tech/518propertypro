@@ -1,6 +1,6 @@
 import { v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
-import { internalMutation, mutation, query } from "./_generated/server";
+import { mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { writeAudit } from "./audit";
 import { canManageMaintenance, currentOrg, requireOrg, viewFor } from "./authz";
@@ -38,9 +38,18 @@ const requiredOnSubmitValidator = v.object({
 
 const PRIORITY_RANK: Record<Priority, number> = { emergency: 0, urgent: 1, routine: 2 };
 const LIST_CAP = 300;
-const MAX_CHECKLIST = 40;
 const MAX_FILES_PER_WO = 40;
-const FILE_MAX_BYTES = 15 * 1024 * 1024;
+const PHOTO_MAX_BYTES = 15 * 1024 * 1024;
+const VIDEO_MAX_BYTES = 50 * 1024 * 1024;
+const VIDEO_TYPES = new Set([
+  "video/mp4",
+  "video/webm",
+  "video/quicktime",
+  "video/ogg",
+  "video/3gpp",
+  "video/3gpp2",
+  "video/x-m4v",
+]);
 const MAX_EXPENSE_CENTS = 100_000_000; // $1,000,000: a typo guard, not a business rule
 const ALL_STATUSES: Status[] = ["created", "assigned", "in_progress", "completed", "reviewed_closed", "cancelled"];
 const ACTIVE: Status[] = ["created", "assigned", "in_progress"];
@@ -65,120 +74,6 @@ export function assertWorkOrderTransition(from: Status, to: Status): void {
     throw new Error(`A work order that is "${from.replace(/_/g, " ")}" can't be moved to "${to.replace(/_/g, " ")}".`);
   }
 }
-
-// --- Checklist templates --------------------------------------------------------
-
-const DEFAULT_CHECKLISTS: Record<string, string[]> = {
-  electrical: [
-    "Power off at the breaker before starting",
-    "Diagnose and repair the fault",
-    "Test circuit and outlets after repair",
-    "Restore power and confirm with the tenant",
-  ],
-  water_leak: [
-    "Locate the source and shut off water if needed",
-    "Repair or replace the failing part",
-    "Check for hidden moisture or damage",
-    "Test for leaks under pressure",
-    "Clean up the area",
-  ],
-  broken_item: [
-    "Inspect the item and confirm the fault",
-    "Repair or replace the item",
-    "Test that it works",
-    "Clean up the area",
-  ],
-  gas: [
-    "Confirm the gas supply is shut off",
-    "Check for leaks with approved equipment",
-    "Repair, or escalate to the utility",
-    "Re-test after repair before restoring gas",
-  ],
-  fire: [
-    "Confirm the scene is safe and the fire is out",
-    "Document damage with photos",
-    "Make the unit safe (power, water, access)",
-    "Report remaining work to the maintenance lead",
-  ],
-  flooding: [
-    "Stop the water source",
-    "Extract standing water",
-    "Document damage with photos",
-    "Set drying equipment if needed",
-    "Report remaining work to the maintenance lead",
-  ],
-  tenant_responsibility: [
-    "Confirm the cause with the tenant",
-    "Document the finding with photos",
-    "Report back to the maintenance lead",
-  ],
-  other: ["Inspect and diagnose", "Complete the repair", "Test the result", "Clean up the area"],
-};
-
-function defaultItems(issueType: string): string[] {
-  return DEFAULT_CHECKLISTS[issueType] ?? DEFAULT_CHECKLISTS.other;
-}
-
-/** Checklist to prefill the create form: the team's saved template, else the built-in default. */
-export const checklistFor = query({
-  args: { issueType: v.string() },
-  handler: async (ctx, args): Promise<string[]> => {
-    const org = await currentOrg(ctx);
-    if (!org) return [];
-    const view = viewFor(org.isAdmin, org.jobRoles);
-    if (view !== "admin" && view !== "asset_manager") return [];
-    const saved = await ctx.db
-      .query("checklistTemplates")
-      .withIndex("by_org_and_issue_type", (q) => q.eq("orgId", org.orgId).eq("issueType", args.issueType))
-      .first();
-    return saved?.items ?? defaultItems(args.issueType);
-  },
-});
-
-export const saveChecklistTemplate = mutation({
-  args: { issueType: v.string(), items: v.array(v.string()) },
-  handler: async (ctx, args) => {
-    const org = await requireOrg(ctx);
-    if (!canManageMaintenance(org)) throw new Error("You don't have access to that.");
-    const issueType = requireText(args.issueType, "Issue type", 40);
-    const items = args.items.map((i) => i.trim()).filter(Boolean);
-    if (items.length > MAX_CHECKLIST || items.some((i) => i.length > 200)) {
-      throw new Error("Checklists can have at most 40 items of 200 characters.");
-    }
-    const existing = await ctx.db
-      .query("checklistTemplates")
-      .withIndex("by_org_and_issue_type", (q) => q.eq("orgId", org.orgId).eq("issueType", issueType))
-      .first();
-    if (existing) await ctx.db.patch(existing._id, { items });
-    else await ctx.db.insert("checklistTemplates", { orgId: org.orgId, issueType, items });
-    await writeAudit(ctx, {
-      orgId: org.orgId,
-      entity: "config",
-      entityId: issueType,
-      action: "checklist_template_saved",
-      actorUserId: org.user._id,
-    });
-  },
-});
-
-/** Writes the built-in defaults for any issue type the team hasn't customised. Idempotent. */
-export const seedChecklistTemplates = internalMutation({
-  args: { orgId: v.string() },
-  handler: async (ctx, args): Promise<number> => {
-    let added = 0;
-    for (const [issueType, items] of Object.entries(DEFAULT_CHECKLISTS)) {
-      const existing = await ctx.db
-        .query("checklistTemplates")
-        .withIndex("by_org_and_issue_type", (q) => q.eq("orgId", args.orgId).eq("issueType", issueType))
-        .first();
-      if (!existing) {
-        await ctx.db.insert("checklistTemplates", { orgId: args.orgId, issueType, items });
-        added += 1;
-      }
-    }
-    return added;
-  },
-});
 
 /** Issue type -> words a technician's free-text skill is likely to contain. */
 const SKILL_KEYWORDS: Record<string, string[]> = {
@@ -266,16 +161,6 @@ function optText(raw: string | undefined, max: number): string | undefined {
   return out;
 }
 
-function buildChecklist(items: Array<{ label: string; required: boolean }>): Doc<"workOrders">["checklist"] {
-  if (items.length > MAX_CHECKLIST) throw new Error(`At most ${MAX_CHECKLIST} checklist items.`);
-  return items.map((item, i) => ({
-    id: `c${i + 1}`,
-    label: requireText(item.label, "Checklist item", 200),
-    required: item.required,
-    done: false,
-  }));
-}
-
 /** A technician must be on THIS team and hold the technician role (no admin fallback). */
 async function assertTechnician(ctx: QueryCtx | MutationCtx, orgId: string, userId: Id<"users">) {
   const membership = await ctx.db
@@ -291,7 +176,7 @@ async function assertTechnician(ctx: QueryCtx | MutationCtx, orgId: string, user
  * Read scope. Returns the work order plus its unit when `org` may see it, else null.
  * Accountants see only finished work; technicians only their own jobs.
  */
-async function readable(
+export async function readable(
   ctx: QueryCtx | MutationCtx,
   org: OrgContext,
   id: Id<"workOrders">,
@@ -314,14 +199,11 @@ async function readable(
  * May this person change the work order's scope/assignment/cancel it? Pat powers always; an AM
  * only the manual work orders they created on units they manage.
  */
-function canManageWo(org: OrgContext, wo: Doc<"workOrders">, unit: Doc<"units">): boolean {
-  if (canManageMaintenance(org)) return true;
-  return (
-    org.jobRoles.includes("asset_manager") &&
-    unit.assetManagerUserId === org.user._id &&
-    !wo.requestId &&
-    wo.createdBy === org.user._id
-  );
+export function canManageWo(org: OrgContext, wo: Doc<"workOrders">, unit: Doc<"units">): boolean {
+  // Asset managers are read-only on work orders: they raise requests for Pat instead.
+  void wo;
+  void unit;
+  return canManageMaintenance(org);
 }
 
 async function managedWo(ctx: MutationCtx, id: Id<"workOrders">) {
@@ -343,7 +225,7 @@ async function ownJob(ctx: MutationCtx, id: Id<"workOrders">) {
 }
 
 /** Tech or manager may add work to a job: techs only while it is in progress. */
-async function workableJob(ctx: MutationCtx, id: Id<"workOrders">) {
+export async function workableJob(ctx: MutationCtx, id: Id<"workOrders">) {
   const org = await requireOrg(ctx);
   const found = await readable(ctx, org, id);
   if (!found) throw new Error("Work order not found.");
@@ -358,6 +240,115 @@ async function workableJob(ctx: MutationCtx, id: Id<"workOrders">) {
   }
   return { org, ...found };
 }
+
+/**
+ * May this person add photos / videos to the work order? Any admin-view user (team admin,
+ * executive, maintenance lead, Simplr admin) in ANY status. Receipts only while it is active or
+ * completed (closed financial records stay untouched). Technicians keep their own-job flow
+ * (workableJob); AMs, covering or not, stay read-only.
+ */
+export function canAttachWoMedia(org: OrgContext, wo: Doc<"workOrders">, opts?: { receipt?: boolean }): boolean {
+  if (wo.orgId !== org.orgId) return false;
+  if (viewFor(org.isAdmin, org.jobRoles) !== "admin") return false;
+  if (opts?.receipt) return ACTIVE.includes(wo.status) || wo.status === "completed";
+  return true;
+}
+
+/** Like workableJob, but admin-view users may add photos / videos in every status. */
+export async function attachableJob(ctx: MutationCtx, id: Id<"workOrders">, opts?: { receipt?: boolean }) {
+  const org = await requireOrg(ctx);
+  const found = await readable(ctx, org, id);
+  if (!found) throw new Error("Work order not found.");
+  if (viewFor(org.isAdmin, org.jobRoles) === "admin") {
+    if (!canAttachWoMedia(org, found.wo, opts)) throw new Error("This work order is closed.");
+    return { org, ...found };
+  }
+  return await workableJob(ctx, id);
+}
+
+/** Closed = no longer active or awaiting sign-off (reviewed_closed / cancelled). */
+function woClosed(wo: Doc<"workOrders">): boolean {
+  return !ACTIVE.includes(wo.status) && wo.status !== "completed";
+}
+
+/** Receipts and other non-photo/video documents (expense records). */
+export function woFileIsDocument(f: Doc<"workOrderFiles">, contentType: string): boolean {
+  if (f.kind === "receipt") return true;
+  if (f.kind === "completion_photo" || f.kind === "completion_video") return false;
+  return !(contentType.startsWith("image/") || contentType.startsWith("video/"));
+}
+
+/**
+ * May this person delete this work-order file? Single rule behind `canRemove` flags and the remove
+ * mutations. Admin view: any photo/video in any status, receipts / expense documents until the job
+ * is closed. Technician: only their own non-receipt upload on their own job while in progress.
+ * Asset managers (covering or not) and accountants: never.
+ */
+export function canRemoveWoFile(
+  org: OrgContext,
+  wo: Doc<"workOrders">,
+  f: Doc<"workOrderFiles">,
+  isDocument: boolean,
+): boolean {
+  if (f.orgId !== org.orgId || wo.orgId !== org.orgId || f.workOrderId !== wo._id) return false;
+  const view = viewFor(org.isAdmin, org.jobRoles);
+  if (view === "admin") return !(isDocument && woClosed(wo));
+  if (view === "technician") {
+    return (
+      wo.technicianUserId === org.user._id &&
+      wo.status === "in_progress" &&
+      f.uploadedByUserId === org.user._id &&
+      f.kind !== "receipt"
+    );
+  }
+  return false;
+}
+
+/** Deletes the blob only when no media / file row still points at it. */
+export async function deleteStorageIfUnreferenced(ctx: MutationCtx, storageId: Id<"_storage">): Promise<void> {
+  const [a, b] = await Promise.all([
+    ctx.db.query("workOrderFiles").withIndex("by_storage", (q) => q.eq("storageId", storageId)).first(),
+    ctx.db.query("maintenanceMedia").withIndex("by_storage", (q) => q.eq("storageId", storageId)).first(),
+  ]);
+  if (!a && !b) await ctx.storage.delete(storageId);
+}
+
+/** Deletes one work-order file row (+ blob if unreferenced), unlinks it from expenses, writes the audit row. */
+export async function removeWoFileRow(
+  ctx: MutationCtx,
+  org: OrgContext,
+  wo: Doc<"workOrders">,
+  f: Doc<"workOrderFiles">,
+  source: "staff" | "technician",
+): Promise<void> {
+  const linked = await ctx.db.query("workOrderExpenses").withIndex("by_work_order", (q) => q.eq("workOrderId", wo._id)).take(200);
+  for (const e of linked) if (e.receiptFileId === f._id) await ctx.db.patch(e._id, { receiptFileId: undefined });
+  await ctx.db.delete(f._id);
+  await deleteStorageIfUnreferenced(ctx, f.storageId);
+  await writeAudit(ctx, {
+    orgId: org.orgId,
+    entity: "work_order",
+    entityId: wo._id,
+    action: "media_removed",
+    actorUserId: org.user._id,
+    note: `${f._id} (${source})`,
+  });
+}
+
+/** A technician removes a photo / video they uploaded themselves, while the job is in progress. */
+export const removeOwnFile = mutation({
+  args: { workOrderId: v.id("workOrders"), fileId: v.id("workOrderFiles") },
+  handler: async (ctx, args): Promise<{ ok: true }> => {
+    const org = await requireOrg(ctx);
+    const found = await readable(ctx, org, args.workOrderId);
+    const f = await ctx.db.get(args.fileId);
+    if (!found || !f || f.workOrderId !== found.wo._id || f.orgId !== org.orgId) throw new Error("File not found.");
+    if (viewFor(org.isAdmin, org.jobRoles) !== "technician") throw new Error("You don't have access to that.");
+    if (!canRemoveWoFile(org, found.wo, f, false)) throw new Error("You can only remove your own photos while the job is in progress.");
+    await removeWoFileRow(ctx, org, found.wo, f, "technician");
+    return { ok: true };
+  },
+});
 
 async function notifyTech(
   ctx: MutationCtx,
@@ -385,7 +376,6 @@ export const create = mutation({
     title: v.string(),
     scope: v.string(),
     priority: priorityValidator,
-    checklist: v.array(v.object({ label: v.string(), required: v.boolean() })),
     technicianUserId: v.optional(v.id("users")),
     accessNotes: v.optional(v.string()),
     requiredOnSubmit: requiredOnSubmitValidator,
@@ -408,13 +398,18 @@ export const create = mutation({
         .query("workOrders")
         .withIndex("by_request", (q) => q.eq("requestId", request!._id))
         .collect();
-      if (existing.some((w) => w.status !== "cancelled")) {
+      // A reopened request may get a new work order once every earlier one is closed or cancelled.
+      if (existing.some((w) => w.status !== "cancelled" && w.status !== "reviewed_closed")) {
         throw new Error("This request already has a work order.");
       }
     } else {
       const adminView = viewFor(org.isAdmin, org.jobRoles) === "admin";
-      const ownAm = org.jobRoles.includes("asset_manager") && unit.assetManagerUserId === org.user._id;
-      if (!adminView && !ownAm) throw new Error("You don't have access to that.");
+      if (!adminView && !canManageMaintenance(org)) {
+        if (org.jobRoles.includes("asset_manager")) {
+          throw new Error("Asset managers create a request for Pat to review instead.");
+        }
+        throw new Error("You don't have access to that.");
+      }
     }
 
     if (args.technicianUserId) await assertTechnician(ctx, org.orgId, args.technicianUserId);
@@ -431,7 +426,7 @@ export const create = mutation({
       title: requireText(args.title, "Title", 200),
       scope: requireText(args.scope, "Scope", 4000),
       priority: args.priority,
-      checklist: buildChecklist(args.checklist),
+      checklist: [], // deprecated: checklist feature removed; column kept for existing data
       technicianUserId: args.technicianUserId,
       accessNotes: optText(args.accessNotes, 1000),
       requiredOnSubmit: args.requiredOnSubmit,
@@ -579,14 +574,92 @@ export const list = query({
         propertyName: properties.get(w.propertyId),
         technicianName,
         requestNumber: request?.number,
-        checklistDone: w.checklist.filter((c) => c.done).length,
-        checklistTotal: w.checklist.length,
         isOverdue: ACTIVE.includes(w.status) && w.dueDate !== undefined && w.dueDate < Date.now(),
       });
     }
     return out;
   },
 });
+
+/**
+ * Expenses tab data: hours and materials only. Labor dollars are never computed (a labor rate
+ * and owner-report formulas are not confirmed), so there is deliberately no labor amount here.
+ */
+export async function expensesTabFor(
+  ctx: QueryCtx,
+  wo: Doc<"workOrders">,
+  files: Doc<"workOrderFiles">[],
+  time: Doc<"workOrderTime">[],
+  expenses: Doc<"workOrderExpenses">[],
+  notes: Doc<"workOrderNotes">[],
+  org?: OrgContext,
+) {
+  const names = new Map<string, string>();
+  const nameOf = async (id: Id<"users">) => {
+    if (!names.has(id)) {
+      const u = await ctx.db.get(id);
+      names.set(id, [u?.firstName, u?.lastName].filter(Boolean).join(" ").trim() || u?.email || "Unknown");
+    }
+    return names.get(id)!;
+  };
+  const fileById = new Map(files.map((f) => [f._id as string, f]));
+  const documents = [];
+  let n = 0;
+  for (const f of files) {
+    if (f.kind !== "receipt" && f.kind !== "other") continue;
+    n += 1;
+    const meta = await ctx.db.system.get(f.storageId);
+    const contentType = meta?.contentType ?? "";
+    const isPdf = contentType === "application/pdf";
+    documents.push({
+      _id: f._id,
+      name: `${f.kind === "receipt" ? "Receipt" : "Document"} ${n}${isPdf ? ".pdf" : ""}`,
+      type: isPdf ? ("pdf" as const) : ("image" as const),
+      url: await ctx.storage.getUrl(f.storageId),
+      createdAt: f.createdAt,
+      uploadedByUserId: f.uploadedByUserId,
+      canRemove: !!org && canRemoveWoFile(org, wo, f, woFileIsDocument(f, contentType)),
+    });
+  }
+  const photos = [];
+  for (const f of files) {
+    if (f.kind !== "completion_photo" && f.kind !== "completion_video") continue;
+    photos.push({
+      _id: f._id,
+      kind: f.kind === "completion_video" ? ("video" as const) : ("photo" as const),
+      url: await ctx.storage.getUrl(f.storageId),
+      createdAt: f.createdAt,
+      uploadedByUserId: f.uploadedByUserId,
+      canRemove: !!org && canRemoveWoFile(org, wo, f, false),
+    });
+  }
+  // The technician's own latest note (Pat's "Sent back" / "Info requested" notes are excluded).
+  const techNote =
+    notes
+      .filter((x) => x.authorUserId === wo.technicianUserId)
+      .sort((a, b) => b.createdAt - a.createdAt)[0]?.body ?? null;
+  return {
+    hoursSubmitted: time.reduce((sum, t) => sum + t.hours, 0),
+    materialsTotal: expenses.filter((e) => e.kind === "material").reduce((sum, e) => sum + e.amountCents, 0), // cents
+    otherExpensesTotal: expenses.filter((e) => e.kind !== "material").reduce((sum, e) => sum + e.amountCents, 0), // cents
+    expenses: await Promise.all(
+      expenses.map(async (e) => ({
+        _id: e._id,
+        kind: e.kind,
+        description: e.description,
+        amount: e.amountCents, // cents
+        submittedBy: await nameOf(e.technicianUserId),
+        hasReceipt: !!(e.receiptFileId && fileById.has(e.receiptFileId)),
+        createdAt: e.createdAt,
+      })),
+    ),
+    technicianExpenseNote: techNote,
+    documents,
+    photos,
+    laborNote:
+      "Labor amount calculated: Hours are recorded separately. A labor rate and owner-report formulas must be confirmed before financial totals are finalized.",
+  };
+}
 
 export const get = query({
   args: { workOrderId: v.id("workOrders") },
@@ -631,17 +704,23 @@ export const get = query({
           ? { _id: request._id, number: request.number, status: request.status, issueType: request.issueType }
           : null,
       files: await Promise.all(
-        fileRows.map(async (f) => ({
-          _id: f._id,
-          kind: f.kind,
-          createdAt: f.createdAt,
-          uploadedByUserId: f.uploadedByUserId,
-          url: await ctx.storage.getUrl(f.storageId),
-        })),
+        fileRows.map(async (f) => {
+          // Content type matters only for an admin on a closed job (documents are then locked).
+          const type = f.kind === "other" && woClosed(wo) ? ((await ctx.db.system.get(f.storageId))?.contentType ?? "") : "image/";
+          return {
+            _id: f._id,
+            kind: f.kind,
+            createdAt: f.createdAt,
+            uploadedByUserId: f.uploadedByUserId,
+            url: await ctx.storage.getUrl(f.storageId),
+            canRemove: canRemoveWoFile(org, wo, f, woFileIsDocument(f, type)),
+          };
+        }),
       ),
       time,
       expenses,
       notes,
+      expensesTab: view === "technician" ? null : await expensesTabFor(ctx, wo, fileRows, time, expenses, notes, org),
       totals: {
         hours: time.reduce((sum, t) => sum + t.hours, 0),
         expenseCents: expenses.reduce((sum, e) => sum + e.amountCents, 0),
@@ -649,6 +728,7 @@ export const get = query({
       audit,
       viewerCan: {
         manage: canManageWo(org, wo, unit),
+        attach: canAttachWoMedia(org, wo),
         review: canManageMaintenance(org) && wo.status === "completed",
         work:
           wo.technicianUserId === org.user._id &&
@@ -722,7 +802,6 @@ export const editScope = mutation({
     dueDate: v.optional(v.number()),
     clearDueDate: v.optional(v.boolean()),
     window: v.optional(v.string()), // "" clears the appointment window
-    checklist: v.optional(v.array(v.object({ label: v.string(), required: v.boolean() }))),
     requiredOnSubmit: v.optional(requiredOnSubmitValidator),
   },
   handler: async (ctx, args) => {
@@ -762,16 +841,6 @@ export const editScope = mutation({
     if (args.requiredOnSubmit) {
       patch.requiredOnSubmit = args.requiredOnSubmit;
       changed.push("submit requirements");
-    }
-    if (args.checklist) {
-      // Items keep their done state when the label is unchanged, so editing the list
-      // mid-job doesn't wipe the technician's progress.
-      const doneByLabel = new Map(wo.checklist.map((c) => [c.label, c]));
-      patch.checklist = buildChecklist(args.checklist).map((item) => {
-        const prev = doneByLabel.get(item.label);
-        return prev?.done ? { ...item, done: true, doneAt: prev.doneAt, doneBy: prev.doneBy } : item;
-      });
-      changed.push("checklist");
     }
     if (changed.length === 0) return;
 
@@ -869,6 +938,42 @@ export const sendBack = mutation({
   },
 });
 
+/**
+ * Pat asks the technician for more information while the job is still in progress (sendBack only
+ * works on a completed job). Records a note the technician sees on the job and notifies in-app;
+ * the status does not change. Texts stay off (wo_changed is not an SMS-allowed template).
+ */
+export const requestInfo = mutation({
+  args: { workOrderId: v.id("workOrders"), note: v.string() },
+  handler: async (ctx, args) => {
+    const org = await requireOrg(ctx);
+    if (!canManageMaintenance(org)) throw new Error("You don't have access to that.");
+    const found = await readable(ctx, org, args.workOrderId);
+    if (!found) throw new Error("Work order not found.");
+    const { wo, unit } = found;
+    if (!ACTIVE.includes(wo.status)) throw new Error("This work order isn't in progress.");
+    const note = requireText(args.note, "A note for the technician", 1000);
+    const now = Date.now();
+    await ctx.db.patch(wo._id, { updatedAt: now });
+    await ctx.db.insert("workOrderNotes", {
+      orgId: org.orgId,
+      workOrderId: wo._id,
+      authorUserId: org.user._id,
+      body: `Info requested: ${note}`,
+      createdAt: now,
+    });
+    await writeAudit(ctx, {
+      orgId: org.orgId,
+      entity: "work_order",
+      entityId: wo._id,
+      action: "info_requested",
+      actorUserId: org.user._id,
+      note,
+    });
+    await notifyTech(ctx, wo, unit, wo.technicianUserId, "wo_changed", org.user._id);
+  },
+});
+
 // --- Technician --------------------------------------------------------------------
 
 export const start = mutation({
@@ -885,37 +990,6 @@ export const start = mutation({
       actorUserId: org.user._id,
       from: wo.status,
       to: "in_progress",
-    });
-  },
-});
-
-export const toggleChecklistItem = mutation({
-  args: { workOrderId: v.id("workOrders"), itemId: v.string(), done: v.boolean() },
-  handler: async (ctx, args) => {
-    const { org, wo } = await ownJob(ctx, args.workOrderId);
-    if (wo.status !== "in_progress") throw new Error("Start the job before ticking items off.");
-    const item = wo.checklist.find((c) => c.id === args.itemId);
-    if (!item) throw new Error("Checklist item not found.");
-    if (item.done === args.done) return;
-
-    const now = Date.now();
-    await ctx.db.patch(wo._id, {
-      checklist: wo.checklist.map((c) =>
-        c.id === args.itemId
-          ? args.done
-            ? { ...c, done: true, doneAt: now, doneBy: org.user._id }
-            : { id: c.id, label: c.label, required: c.required, done: false }
-          : c,
-      ),
-      updatedAt: now,
-    });
-    await writeAudit(ctx, {
-      orgId: org.orgId,
-      entity: "work_order",
-      entityId: wo._id,
-      action: args.done ? "checklist_checked" : "checklist_unchecked",
-      actorUserId: org.user._id,
-      note: item.label,
     });
   },
 });
@@ -998,22 +1072,30 @@ export const addExpense = mutation({
 
 export const addNote = mutation({
   args: { workOrderId: v.id("workOrders"), body: v.string() },
-  handler: async (ctx, args) => {
-    const { org, wo } = await workableJob(ctx, args.workOrderId);
-    await ctx.db.insert("workOrderNotes", {
-      orgId: org.orgId,
-      workOrderId: wo._id,
-      authorUserId: org.user._id,
-      body: requireText(args.body, "Note", 2000),
-      createdAt: Date.now(),
-    });
-  },
+  handler: async (ctx, args) => addWorkOrderNote(ctx, args.workOrderId, args.body),
 });
+
+/** Shared by workOrders.addNote and board.addComment (which caps the note at 1000). */
+export async function addWorkOrderNote(
+  ctx: MutationCtx,
+  workOrderId: Id<"workOrders">,
+  body: string,
+  max = 2000,
+): Promise<void> {
+  const { org, wo } = await workableJob(ctx, workOrderId);
+  await ctx.db.insert("workOrderNotes", {
+    orgId: org.orgId,
+    workOrderId: wo._id,
+    authorUserId: org.user._id,
+    body: requireText(body, "Note", max),
+    createdAt: Date.now(),
+  });
+}
 
 export const generateUploadUrl = mutation({
   args: { workOrderId: v.id("workOrders") },
   handler: async (ctx, args) => {
-    await workableJob(ctx, args.workOrderId);
+    await attachableJob(ctx, args.workOrderId);
     return await ctx.storage.generateUploadUrl();
   },
 });
@@ -1026,13 +1108,29 @@ export const attachFile = mutation({
   args: {
     workOrderId: v.id("workOrders"),
     storageId: v.id("_storage"),
-    kind: v.union(v.literal("completion_photo"), v.literal("receipt"), v.literal("other")),
+    kind: v.union(
+      v.literal("completion_photo"),
+      v.literal("completion_video"),
+      v.literal("receipt"),
+      v.literal("other"),
+    ),
   },
-  handler: async (
-    ctx,
-    args,
-  ): Promise<{ ok: true; fileId: Id<"workOrderFiles"> } | { ok: false; error: string }> => {
-    const { org, wo } = await workableJob(ctx, args.workOrderId);
+  handler: async (ctx, args) => attachWorkOrderFile(ctx, args.workOrderId, args.storageId, args.kind),
+});
+
+type WoFileKind = Doc<"workOrderFiles">["kind"];
+
+/** Shared by workOrders.attachFile and board.attachMedia. */
+export async function attachWorkOrderFile(
+  ctx: MutationCtx,
+  workOrderId: Id<"workOrders">,
+  storageId: Id<"_storage">,
+  fileKind: WoFileKind,
+): Promise<{ ok: true; fileId: Id<"workOrderFiles"> } | { ok: false; error: string }> {
+  const args = { workOrderId, storageId, kind: fileKind };
+  {
+    const { org, wo } = await attachableJob(ctx, args.workOrderId, { receipt: args.kind === "receipt" });
+    const closedWo = !ACTIVE.includes(wo.status) && wo.status !== "completed";
     // Claimed or not freshly uploaded: refuse WITHOUT deleting (it may be someone else's file).
     const usable = await checkStorageUsable(ctx, org.orgId, args.storageId);
     if (usable) return { ok: false, error: usable };
@@ -1044,13 +1142,20 @@ export const attachFile = mutation({
     if (!meta) return { ok: false, error: "That upload wasn't found." };
     const type = meta.contentType ?? "";
     const isImage = type.startsWith("image/") && type !== "image/svg+xml"; // SVG can carry script
+    const isVideo = VIDEO_TYPES.has(type);
     const isPdf = type === "application/pdf";
-    if (!(isImage || (isPdf && args.kind !== "completion_photo"))) {
-      return await reject(
-        args.kind === "completion_photo" ? "Completion files must be photos." : "Attach a photo or a PDF.",
-      );
+    if (args.kind === "completion_photo" && !isImage) return await reject("Photos must be image files.");
+    if (args.kind === "completion_video" && !isVideo) {
+      return await reject("Videos must be mp4, webm, or mov.");
     }
-    if (meta.size > FILE_MAX_BYTES) return await reject("Files can be at most 15 MB.");
+    if ((args.kind === "receipt" || args.kind === "other") && !(isImage || isPdf)) {
+      return await reject("Attach a photo or a PDF.");
+    }
+    if (closedWo && !isImage && !isVideo) return await reject("Only photos and videos can be added to a closed work order.");
+    const limit = isVideo ? VIDEO_MAX_BYTES : PHOTO_MAX_BYTES;
+    if (meta.size > limit) {
+      return await reject(isVideo ? "Videos can be at most 50 MB." : "Photos can be at most 15 MB.");
+    }
 
     const already = await ctx.db
       .query("workOrderFiles")
@@ -1083,8 +1188,8 @@ export const attachFile = mutation({
       to: args.kind,
     });
     return { ok: true, fileId };
-  },
-});
+  }
+}
 
 /** Technician submits the job. Refuses, listing everything missing, until requirements are met. */
 export const submitCompleted = mutation({
@@ -1099,12 +1204,11 @@ export const submitCompleted = mutation({
       ctx.db.query("workOrderNotes").withIndex("by_work_order", (q) => q.eq("workOrderId", wo._id)).take(200),
     ]);
     const missing: string[] = [];
-    const openRequired = wo.checklist.filter((c) => c.required && !c.done);
-    if (openRequired.length) {
-      missing.push(`${openRequired.length} required checklist item${openRequired.length === 1 ? "" : "s"}`);
-    }
-    if (wo.requiredOnSubmit.photos && !files.some((f) => f.kind === "completion_photo")) {
-      missing.push("a completion photo");
+    if (
+      wo.requiredOnSubmit.photos &&
+      !files.some((f) => f.kind === "completion_photo" || f.kind === "completion_video")
+    ) {
+      missing.push("a completion photo or video");
     }
     if (wo.requiredOnSubmit.hours && time.length === 0) missing.push("hours worked");
     if (wo.requiredOnSubmit.receipts && !files.some((f) => f.kind === "receipt")) missing.push("a receipt");

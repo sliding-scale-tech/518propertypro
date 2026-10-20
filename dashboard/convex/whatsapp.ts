@@ -232,33 +232,10 @@ export const takeOver = mutation({
  */
 export const staffReply = action({
   args: { threadId: v.id("waThreads"), text: v.string() },
-  handler: async (ctx, args): Promise<void> => {
-    const thread = await ctx.runQuery(internal.waBot.threadForBot, { threadId: args.threadId });
-    if (!thread) throw new Error("Thread not found");
-
-    // Same reasoning as the bot path: record the attempt before deciding whether to raise,
-    // so a staff message is never lost just because WAHA was unreachable.
-    let delivered = false;
-    try {
-      delivered = await waha.sendText(thread.chatId, args.text);
-    } catch {
-      delivered = false;
-    }
-    await ctx.runMutation(internal.waBot.recordOutbound, {
-      threadId: args.threadId,
-      sender: "staff",
-      text: args.text,
-      delivered,
-    });
-    if (thread.status === "bot") {
-      await ctx.runMutation(internal.waBot.markEscalated, {
-        threadId: args.threadId,
-        reason: "staff replied",
-      });
-    }
-    if (!delivered) {
-      throw new Error("WhatsApp did not accept the message — check the WAHA session status.");
-    }
+  handler: async (): Promise<void> => {
+    // Texting policy: staff replies are off. Thrown before anything is sent or recorded, so the
+    // thread is not taken off the bot by a reply that cannot go out.
+    throw new Error("Texting is turned off for now except emergency alerts.");
   },
 });
 

@@ -3,6 +3,9 @@ import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import * as twilio from "./twilioApi";
 
+// Texting policy: none of these three has an allowlisted template, so twilio.sendSms (called
+// without a template) drops every one of them with a log line. They are unused today.
+
 export const sendTourConfirmation = internalAction({
   args: { to: v.string(), propertyName: v.string(), slot: v.string() },
   handler: (_ctx, args) =>

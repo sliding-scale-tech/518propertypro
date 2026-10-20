@@ -11,7 +11,6 @@ import { internal } from "./_generated/api";
 import * as twilio from "./twilioApi";
 import { currentOrg, requireAdminView, requireAdminViewId, tenantOrgId, viewFor } from "./authz";
 import type { QueryCtx } from "./_generated/server";
-import type { Id } from "./_generated/dataModel";
 
 /**
  * Inbox access: admin view only (team admin, executive, maintenance lead, simplr_admin) and only
@@ -23,8 +22,6 @@ async function adminOrgOrNull(ctx: QueryCtx) {
   if (!org || viewFor(org.isAdmin, org.jobRoles) !== "admin") return null;
   return org;
 }
-
-const MAX_REPLY_CHARS = 1600;
 
 // --- Reads ----------------------------------------------------------------
 
@@ -171,6 +168,12 @@ export const sendMessage = internalAction({
   handler: async (ctx, args): Promise<void> => {
     const thread = await ctx.runQuery(internal.threads.getInternal, { threadId: args.threadId });
     if (!thread) return;
+    // Texting policy: bot replies and staff replies are not allowlisted. Nothing is sent and
+    // nothing is recorded as sent; the inbound message stays in the inbox.
+    if (!twilio.isSmsAllowed(undefined)) {
+      console.log(`threads.sendMessage: ${args.sender} reply on ${thread.channel} not sent, texting is off`);
+      return;
+    }
     if (thread.channel === "whatsapp") {
       await twilio.sendWhatsApp(thread.customerPhone, args.text);
     } else {
@@ -239,28 +242,15 @@ export const markEscalated = internalMutation({
 });
 
 /**
- * Staff replying from the dashboard always escalates the thread (per product decision): the
- * bot and a human must never both be texting the same thread at once.
+ * Staff replying from the dashboard is off while the texting policy only allows emergency alerts
+ * (twilioApi.SMS_ALLOWED_TEMPLATES). Throws before anything is written, so a reply that cannot go
+ * out never escalates the thread.
  */
 export const staffReply = action({
   args: { threadId: v.id("threads"), text: v.string() },
-  handler: async (ctx, args): Promise<void> => {
-    const org = await requireAdminViewId(ctx);
-    const text = args.text.trim();
-    if (!text || text.length > MAX_REPLY_CHARS) throw new Error("Message is empty or too long.");
-    const thread: Id<"threads"> | null = (
-      await ctx.runQuery(internal.threads.getForOrg, { threadId: args.threadId, orgId: org.orgId })
-    )?._id ?? null;
-    if (!thread) throw new Error("Thread not found.");
-    await ctx.runMutation(internal.threads.markEscalated, {
-      threadId: args.threadId,
-      reason: "Staff replied directly.",
-    });
-    await ctx.runAction(internal.threads.sendMessage, {
-      threadId: args.threadId,
-      sender: "staff",
-      text,
-    });
+  handler: async (ctx): Promise<void> => {
+    await requireAdminViewId(ctx);
+    throw new Error("Texting is turned off for now except emergency alerts.");
   },
 });
 

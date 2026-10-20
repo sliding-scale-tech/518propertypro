@@ -198,6 +198,32 @@ export const matchByPhone = internalQuery({
   handler: async (ctx, args) => await findResidentsByPhone(ctx, args.orgId, args.phone),
 });
 
+/** A unit's label when it belongs to this org, else null. Used to cross-check a caller-ID match. */
+export const unitLabelOf = internalQuery({
+  args: { orgId: v.string(), unitId: v.id("units") },
+  handler: async (ctx, args): Promise<string | null> => {
+    const unit = await ctx.db.get(args.unitId);
+    return unit && unit.orgId === args.orgId ? unit.unitNumber : null;
+  },
+});
+
+/** A spoken unit within an already-matched property: its id, label and the building's name. */
+export const unitInProperty = internalQuery({
+  args: { orgId: v.string(), propertyId: v.id("properties"), unitKey: v.string() },
+  handler: async (ctx, args) => {
+    const property = await ctx.db.get(args.propertyId);
+    if (!property || property.orgId !== args.orgId) return null;
+    const unit = await ctx.db
+      .query("units")
+      .withIndex("by_property_and_unit_key", (q) =>
+        q.eq("propertyId", args.propertyId).eq("unitNumberKey", args.unitKey),
+      )
+      .first();
+    if (!unit || unit.orgId !== args.orgId) return null;
+    return { unitId: unit._id, unitLabel: unit.unitNumber, propertyName: property.name };
+  },
+});
+
 // --- Writes ---------------------------------------------------------------
 
 export const create = mutation({

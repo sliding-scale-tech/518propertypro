@@ -116,8 +116,7 @@ function SignedInShell({ children }: { children: ReactNode }) {
     pathname === "/call" ||
     pathname === "/leads" ||
     pathname === "/docs" ||
-    pathname === "/property" ||
-    pathname === "/tasks";
+    pathname === "/property";
   const { isLoaded, isSignedIn } = useUser();
   const { redirectToSignIn } = useClerk();
   // Technicians get their own mobile-first layout (app/tech/layout.tsx), not the sidebar shell.
@@ -146,7 +145,7 @@ function SignedInShell({ children }: { children: ReactNode }) {
         style={{ background: "radial-gradient(closest-side, var(--glow), transparent)" }}
       />
       <AppSidebar />
-      <main className="relative z-[1] min-h-dvh overflow-x-hidden px-4 py-6 pb-24 sm:px-6 sm:py-8 lg:px-8 lg:py-10 lg:pb-10 lg:pl-[236px]">
+      <main className="relative z-[1] min-h-dvh overflow-x-hidden px-4 py-6 pb-24 sm:px-6 sm:py-8 lg:px-8 lg:py-10 lg:pb-10 lg:pl-64">
         {hasDashboardHeader ? (
           <svg
             viewBox="0 0 400 200"

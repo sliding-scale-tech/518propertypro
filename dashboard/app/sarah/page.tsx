@@ -1,26 +1,45 @@
 "use client";
 
 import { useAction, useMutation, useQuery } from "convex/react";
-import { ArrowDown, ArrowUp, CheckCircle2, Loader2, Lock, Plus, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, CheckCircle2, Loader2, Plus, Trash2 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { api } from "@/convex/_generated/api";
-import { CALL_TYPES, isApprovalRequired, tenantMessagesOf, type TenantMessageKey } from "@/convex/sarahConfigLib";
+import {
+  CALL_TYPES,
+  defaultBehavior,
+  FLOW_DEFS,
+  FLOW_KEYS,
+  flowOf,
+  flowsOf,
+  isApprovalRequired,
+  isFlowKey,
+  tenantMessagesOf,
+  type FlowKey,
+  type MissingItem,
+  type TenantMessageKey,
+} from "@/convex/sarahConfigLib";
 import type { SarahConfig } from "@/convex/sarahConfigLib";
 import { RequireView } from "@/components/require-view";
 import { BuiltInQuestions, ScreeningQuestions } from "@/components/screening-questions";
 import { Modal, btnDanger, btnOutline, btnPrimary, cleanError, formatWhen, inputClass } from "@/components/maintenance/shared";
-import { Btn, Card, CardHead, Field, PageHeader, Pill, Seg } from "@/components/ui";
+import { Btn, Card, CardHead, ConfirmDialog, Field, PageHeader, Pill, Seg } from "@/components/ui";
 import { useToast } from "@/components/toast";
+import { ItemModal } from "@/components/sarah/item-modal";
+import { PilotPanel } from "@/components/sarah/pilot-panel";
+import { QuestionFlowEditor } from "@/components/sarah/question-flow";
+import { PhoneLine } from "@/components/sarah/phone-line";
 
 /**
  * Sarah configuration (build plan P17). Everything here edits a DRAFT; nothing changes on live
- * calls until Publish. The server enforces every rule the buttons show (who may edit, approval
- * locks, phone formats); the disabled states here are explanation, not the boundary.
+ * calls until Publish. The server enforces every rule the buttons show (who may edit, phone formats).
+ * Admins have full power: switching a call type on or saving an edit approves the wording in the same
+ * step (audited). Only a non-admin view keeps the approval gates.
  */
 
 const TABS = [
   { id: "call-types", label: "Call types" },
   { id: "maintenance", label: "Maintenance questions" },
+  { id: "other-calls", label: "Other call types" },
   { id: "severity", label: "Severity" },
   { id: "emergency", label: "Emergency scripts" },
   { id: "escalation", label: "Escalation contacts" },
@@ -28,6 +47,7 @@ const TABS = [
   { id: "leasing", label: "Leasing" },
   { id: "tenant-messages", label: "Tenant messages" },
   { id: "identity", label: "Identity" },
+  { id: "phone-line", label: "Phone line" },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
 
@@ -48,6 +68,16 @@ const TENANT_MESSAGE_FIELDS: ReadonlyArray<{ key: TenantMessageKey; label: strin
   { key: "outOfScope", label: "Out-of-scope notice", hint: "Sent when a request is closed and the team chooses to notify the tenant." },
   { key: "received", label: "Received confirmation", hint: "Sent to confirm we received the maintenance request." },
 ];
+
+const AREA_TAB: Record<MissingItem["area"], TabId> = {
+  "call-types": "call-types",
+  maintenance: "maintenance",
+  emergency: "emergency",
+  escalation: "escalation",
+  routing: "routing",
+  "other-calls": "other-calls",
+  "tenant-messages": "tenant-messages",
+};
 
 const LEVEL_LABEL = { emergency: "Emergency", urgent: "Urgent", routine: "Routine", informational: "Informational" } as const;
 
@@ -99,9 +129,7 @@ function Toggle({
         className={`inline-flex h-5 w-5 transform items-center justify-center rounded-full bg-white shadow transition-transform ${
           checked ? "translate-x-5" : "translate-x-0.5"
         }`}
-      >
-        {locked ? <Lock className="h-3 w-3 text-muted-foreground" /> : null}
-      </span>
+      />
     </button>
   );
 }
@@ -160,14 +188,12 @@ function ApprovalLine({
   by,
   at,
   canApprove,
-  unsaved,
   onApprove,
   busy,
 }: {
   by?: string;
   at?: number;
   canApprove: boolean;
-  unsaved: boolean;
   onApprove: () => void;
   busy: boolean;
 }) {
@@ -179,15 +205,9 @@ function ApprovalLine({
       </Pill>
     );
   }
-  if (!canApprove) return <span className="text-xs text-muted-foreground">Needs approval from the maintenance lead</span>;
+  if (!canApprove) return <span className="text-xs text-muted-foreground">Waiting for an admin to approve</span>;
   return (
-    <Btn
-      sm
-      variant="ok"
-      disabled={unsaved || busy}
-      title={unsaved ? "Save the draft first, so you approve exactly what is saved." : undefined}
-      onClick={onApprove}
-    >
+    <Btn sm variant="ok" disabled={busy} onClick={onApprove}>
       Approve
     </Btn>
   );
@@ -199,9 +219,11 @@ function SarahPageInner() {
   const data = useQuery(api.sarahConfig.get);
   const saveDraft = useMutation(api.sarahConfig.saveDraft);
   const approve = useMutation(api.sarahConfig.approve);
+  const approveAllDrafts = useMutation(api.sarahConfig.approveAllDrafts);
   const previewAction = useAction(api.sarahConfig.preview);
   const publishAction = useAction(api.sarahConfig.publish);
   const rollbackAction = useAction(api.sarahConfig.rollback);
+  const regenerateKb = useAction(api.sarahKb.regenerateNow);
   const toast = useToast();
 
   // ?tab=leasing deep link (the old /screening redirects here). Read from window, like the
@@ -217,6 +239,8 @@ function SarahPageInner() {
   const [previewText, setPreviewText] = useState<string | null>(null);
   const [confirmPublish, setConfirmPublish] = useState(false);
   const [confirmRollback, setConfirmRollback] = useState<number | null>(null);
+  const [openItem, setOpenItem] = useState<string | null>(null);
+  const [confirmApproveAll, setConfirmApproveAll] = useState(false);
 
   const serverDraft = data?.draft ?? null;
   const local = edits ?? serverDraft;
@@ -266,10 +290,23 @@ function SarahPageInner() {
       toast("Draft saved", "success");
     });
 
-  const onApprove = (kind: "callType" | "emergencyScript" | "tenantResponsibility" | "tenantMessage", key: string) =>
+  const onApprove = (kind: "callType" | "emergencyScript" | "tenantResponsibility" | "tenantMessage" | "flow", key: string) =>
     run("approve", async () => {
       await approve({ kind, key });
       toast("Approved", "success");
+    });
+
+  const onApproveAll = () =>
+    run("approveAll", async () => {
+      const r = await approveAllDrafts({});
+      setConfirmApproveAll(false);
+      toast(r.approved > 0 ? `Approved ${r.approved} draft${r.approved === 1 ? "" : "s"}. Publish to make it live.` : "Nothing to approve. Everything is already approved.", "success");
+    });
+
+  const onRegenerateKb = () =>
+    run("kb", async () => {
+      const r = await regenerateKb({});
+      toast(r.changed ? "Policy document rebuilt from the published setup. It will be indexed shortly." : "Policy document is already up to date.", "success");
     });
 
   const onPreview = () =>
@@ -279,16 +316,26 @@ function SarahPageInner() {
 
   const onPublish = () =>
     run("publish", async () => {
-      const version = await publishAction({});
+      const { version, kbResynced } = await publishAction({});
       setConfirmPublish(false);
-      toast(`Published version ${version}. Sarah is updated.`, "success");
+      toast(
+        kbResynced
+          ? `Published version ${version}. Knowledge base was out of date and was re-synced; it will be back in a few seconds.`
+          : `Published version ${version}. Sarah is updated.`,
+        "success",
+      );
     });
 
   const onRollback = (version: number) =>
     run("rollback", async () => {
-      const v = await rollbackAction({ version });
+      const { version: v, kbResynced } = await rollbackAction({ version });
       setConfirmRollback(null);
-      toast(`Rolled back. Published as version ${v}.`, "success");
+      toast(
+        kbResynced
+          ? `Rolled back. Published as version ${v}. Knowledge base was out of date and was re-synced.`
+          : `Rolled back. Published as version ${v}.`,
+        "success",
+      );
     });
 
   const canEdit = data.canEdit;
@@ -307,9 +354,22 @@ function SarahPageInner() {
               ? `Live: version ${data.version}, published ${when(data.publishedAt ?? undefined)}.`
               : "Nothing has been published from here yet, so Sarah is still running her built-in setup."}
             {!canEdit ? " You can view this page but not change it." : ""}
+            <span className="mt-1 block">
+              Texting: texts are sent only for emergencies, to admins. Technician texts are coming later.
+            </span>
           </>
         }
       />
+
+      <PilotPanel items={data.items} progress={data.progress} onOpen={setOpenItem} />
+
+      {canApprove ? (
+        <div className="flex justify-end">
+          <button className={btnOutline} disabled={busy !== null} onClick={() => setConfirmApproveAll(true)}>
+            Approve all drafts
+          </button>
+        </div>
+      ) : null}
 
       <div className="max-w-full overflow-x-auto pb-1">
         <Seg label="Sarah config sections" value={tab} onChange={setTab} options={TABS.map((t) => ({ value: t.id, label: t.label }))} />
@@ -320,33 +380,50 @@ function SarahPageInner() {
         {tab === "call-types" ? (
           <Section
             title="Which calls Sarah handles"
-            hint="Anything switched off is not discussed: Sarah takes a name and number and logs it for staff. Emergency, eviction, neighbor dispute and owner routing stay locked until the maintenance lead approves them."
+            hint="Anything switched off is not discussed: Sarah takes a name and number and logs it for staff. Switch any call type on or off. Turning one on approves its current wording."
           >
             <div className="divide-y divide-border">
               {CALL_TYPES.map((def) => {
                 const t = local.callTypes.find((x) => x.key === def.key)!;
                 const needs = isApprovalRequired(def.key);
+                const flowKey = isFlowKey(def.key) ? def.key : null;
+                const flow = flowKey ? flowOf(local, flowKey) : null;
+                const flowLocked = flow !== null && !flow.approved && !canApprove;
                 return (
                   <div key={def.key} className="flex flex-wrap items-center gap-3 py-3">
                     <Toggle
                       label={def.label}
                       checked={t.enabled}
-                      lockedReason={needs && !t.approvedBy ? "Needs approval first" : undefined}
+                      lockedReason={
+                        needs && !t.approvedBy && !canApprove
+                          ? "An admin must approve this first"
+                          : flowLocked
+                            ? "An admin must approve the wording first"
+                            : undefined
+                      }
                       onChange={(enabled) =>
                         set((c) => ({ ...c, callTypes: c.callTypes.map((x) => (x.key === def.key ? { ...x, enabled } : x)) }))
                       }
                     />
                     <div className="min-w-48 flex-1">
                       <div className="text-sm font-medium">{def.label}</div>
-                      {needs ? (
+                      {needs && (t.approvedBy || !canApprove) ? (
                         <ApprovalLine
                           by={t.approvedBy}
                           at={t.approvedAt}
                           canApprove={canApprove}
-                          unsaved={unsaved}
                           busy={approving}
                           onApprove={() => onApprove("callType", def.key)}
                         />
+                      ) : null}
+                      {flowLocked ? (
+                        <button
+                          type="button"
+                          className="text-xs text-muted-foreground underline"
+                          onClick={() => setTab("other-calls")}
+                        >
+                          Wording waiting for an admin to approve
+                        </button>
                       ) : null}
                     </div>
                     <input
@@ -370,25 +447,19 @@ function SarahPageInner() {
 
         {tab === "maintenance" ? (
           <>
-            {(
-              [
-                ["basic", "Basic questions", "Asked on every maintenance call."],
-                ["electrical", "Electrical", "Only asked when it is safe; Sarah never tells them how to do anything."],
-                ["water_leak", "Water leak", ""],
-                ["broken_item", "Broken item", ""],
-              ] as const
-            ).map(([key, title, hint]) => (
-              <Section key={key} title={title} hint={hint}>
-                <ListEditor
-                  items={local.maintenanceQuestions[key]}
-                  addLabel="Add question"
-                  onChange={(next) => set((c) => ({ ...c, maintenanceQuestions: { ...c.maintenanceQuestions, [key]: next } }))}
-                />
-              </Section>
-            ))}
+            <Section
+              title="Maintenance question flow"
+              hint="The questions Sarah asks on a maintenance call, in order, with follow-ups that only appear when they apply. This is a draft until you publish. Reword freely: nothing here needs approval."
+            >
+              <QuestionFlowEditor
+                group="maintenance"
+                flows={flowsOf(local)}
+                onChange={(questionFlows) => set((c) => ({ ...c, questionFlows }))}
+              />
+            </Section>
             <Section
               title="Tenant-responsibility items"
-              hint="Light bulbs, blinds and the like. Until this wording is approved, Sarah says only that the team will follow up."
+              hint="Light bulbs, blinds and the like. Saving as an admin approves the wording."
             >
               <ListEditor
                 items={local.tenantResponsibility.items}
@@ -414,7 +485,6 @@ function SarahPageInner() {
                 by={local.tenantResponsibility.approved ? local.tenantResponsibility.approvedBy : undefined}
                 at={local.tenantResponsibility.approvedAt}
                 canApprove={canApprove}
-                unsaved={unsaved}
                 busy={approving}
                 onApprove={() => onApprove("tenantResponsibility", "tenant_responsibility")}
               />
@@ -425,10 +495,64 @@ function SarahPageInner() {
           </>
         ) : null}
 
+        {tab === "other-calls" ? (
+          <Section
+            title="Other call types"
+            hint="Sarah uses only these facts, in her own short sentences. Switching a call type on, or saving an edit, approves the wording as it stands."
+          >
+            <div className="space-y-4">
+              {FLOW_DEFS.map((def) => {
+                const flow = flowOf(local, def.key);
+                const t = local.callTypes.find((x) => x.key === def.key);
+                const setWording = (wording: string) =>
+                  set((c) => ({
+                    ...c,
+                    flows: FLOW_KEYS.map((k: FlowKey) => (k === def.key ? { key: k, wording, approved: false } : flowOf(c, k))),
+                    callTypes: canApprove ? c.callTypes : c.callTypes.map((x) => (x.key === def.key ? { ...x, enabled: false } : x)),
+                  }));
+                return (
+                  <div key={def.key} className="space-y-2 rounded-xl border border-border p-3">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <Toggle
+                        label={`${def.label} enabled`}
+                        checked={!!t?.enabled}
+                        lockedReason={flow.approved || canApprove ? undefined : "An admin must approve the wording first"}
+                        onChange={(enabled) =>
+                          set((c) => ({ ...c, callTypes: c.callTypes.map((x) => (x.key === def.key ? { ...x, enabled } : x)) }))
+                        }
+                      />
+                      <div className="min-w-48 flex-1">
+                        <div className="text-sm font-semibold">{def.label}</div>
+                        <div className="text-xs text-muted-foreground">Sarah Configuration section {def.section}</div>
+                      </div>
+                      <ApprovalLine
+                        by={flow.approved ? flow.approvedBy : undefined}
+                        at={flow.approvedAt}
+                        canApprove={canApprove}
+                        busy={approving}
+                        onApprove={() => onApprove("flow", def.key)}
+                      />
+                    </div>
+                    <Field label="Approved wording">
+                      <textarea
+                        className={`${inputClass} min-h-24`}
+                        maxLength={2000}
+                        value={flow.wording}
+                        onChange={(e) => setWording(e.target.value)}
+                      />
+                    </Field>
+                    {!canApprove ? <p className="text-xs text-amber-700 dark:text-amber-400">Needs Pat: {def.confirm}</p> : null}
+                  </div>
+                );
+              })}
+            </div>
+          </Section>
+        ) : null}
+
         {tab === "severity" ? (
           <Section
             title="Severity levels"
-            hint="Sarah picks one of these for each maintenance request. Pre-filled from the current rubric: needs Pat's approval before you rely on it."
+            hint="Sarah picks one of these for each maintenance request. Pre-filled from the current rubric. Saving as an admin approves your edit."
           >
             <p className="rounded-xl bg-accent px-3 py-2 text-[12.5px] text-accent-foreground">
               Sarah also gives each request a 1–10 severity score using these levels. The named level stays the
@@ -462,7 +586,7 @@ function SarahPageInner() {
         {tab === "emergency" ? (
           <Section
             title="Emergency scripts"
-            hint="Sarah reads an approved script word for word and gives phone numbers only from here. A script that is not approved (or while the Emergency call type is off) falls back to: leave the building and call 911, and the team is escalated. Editing an approved script removes its approval."
+            hint="Sarah reads an approved script word for word and gives phone numbers only from here. Saving as an admin approves your edit. While the Emergency call type is off, she says: leave the area and call 911."
           >
             <div className="space-y-4">
               {local.emergencyScripts.map((s) => {
@@ -496,10 +620,14 @@ function SarahPageInner() {
                       by={s.approvedBy}
                       at={s.approvedAt}
                       canApprove={canApprove}
-                      unsaved={unsaved}
                       busy={approving}
                       onApprove={() => onApprove("emergencyScript", s.incident)}
                     />
+                    {!s.approvedBy && !canApprove ? (
+                      <p className="text-xs text-amber-700 dark:text-amber-400">
+                        Until an admin approves it, Sarah says only &quot;leave the area and call 911&quot;.
+                      </p>
+                    ) : null}
                   </div>
                 );
               })}
@@ -510,7 +638,7 @@ function SarahPageInner() {
         {tab === "escalation" ? (
           <Section
             title="Escalation contacts"
-            hint="Told by text when a request is Emergency or Urgent, in addition to the assigned asset manager and the maintenance lead."
+            hint="Texted when a request is Emergency, in addition to all admins. Urgent requests are not texted for now."
           >
             <div className="space-y-4">
               {(["emergency", "urgent"] as const).map((level) => {
@@ -632,6 +760,19 @@ function SarahPageInner() {
         ) : null}
 
         {tab === "leasing" ? (
+          <Section
+            title="Leasing question flow"
+            hint="What Sarah asks a renter, in order, and the tour request. Optional questions come after the required ones. Which core questions are switched on for a property is set further down and saves on its own."
+          >
+            <QuestionFlowEditor
+              group="leasing"
+              flows={flowsOf(local)}
+              onChange={(questionFlows) => set((c) => ({ ...c, questionFlows }))}
+            />
+          </Section>
+        ) : null}
+
+        {tab === "leasing" ? (
           <Section title="Tours and capture" hint="Used when Sarah offers and books tour times. Takes effect when you publish.">
             <div className="grid gap-3 sm:grid-cols-2">
               {(
@@ -669,8 +810,11 @@ function SarahPageInner() {
         {tab === "tenant-messages" ? (
           <Section
             title="Tenant messages"
-            hint="Texts sent to a tenant about their maintenance request. Nothing is texted until the wording is approved by the maintenance lead and published. Editing the wording removes its approval."
+            hint="Wording for texts to a tenant about their maintenance request. Saving as an admin approves your edit."
           >
+            <p className="rounded-xl border border-border bg-muted px-3 py-2 text-sm">
+              Texts to tenants are off for now. Nothing here is sent, even when approved.
+            </p>
             <div className="space-y-4">
               {TENANT_MESSAGE_FIELDS.map(({ key, label, hint }) => {
                 const m = tenantMessagesOf(local)[key];
@@ -697,7 +841,6 @@ function SarahPageInner() {
                       by={m.approved ? m.approvedBy : undefined}
                       at={m.approvedAt}
                       canApprove={canApprove}
-                      unsaved={unsaved}
                       busy={approving}
                       onApprove={() => onApprove("tenantMessage", key)}
                     />
@@ -718,6 +861,26 @@ function SarahPageInner() {
                 onChange={(e) => set((c) => ({ ...c, identity: { ...c.identity, companyName: e.target.value } }))}
               />
             </Field>
+            <Field label="When information is missing" hint="What Sarah does if the caller cannot or will not give something.">
+              <textarea
+                className={`${inputClass} min-h-16`}
+                maxLength={2000}
+                value={(local.behavior ?? defaultBehavior()).missingInfo}
+                onChange={(e) =>
+                  set((c) => ({ ...c, behavior: { ...(c.behavior ?? defaultBehavior()), missingInfo: e.target.value } }))
+                }
+              />
+            </Field>
+            <Field label="When a lookup fails" hint="What Sarah does if a tool errors or finds nothing.">
+              <textarea
+                className={`${inputClass} min-h-16`}
+                maxLength={2000}
+                value={(local.behavior ?? defaultBehavior()).lookupFailure}
+                onChange={(e) =>
+                  set((c) => ({ ...c, behavior: { ...(c.behavior ?? defaultBehavior()), lookupFailure: e.target.value } }))
+                }
+              />
+            </Field>
             <Field label="First message" hint="The first thing the caller hears.">
               <textarea
                 className={`${inputClass} min-h-24`}
@@ -730,6 +893,9 @@ function SarahPageInner() {
         ) : null}
       </fieldset>
 
+      {/* Saves immediately and is not part of the draft/publish flow (not prompt behaviour). */}
+      {tab === "phone-line" ? <PhoneLine /> : null}
+
       {/* The leasing screening questions save on their own, outside the draft/publish flow. */}
       {tab === "leasing" ? (
         <div className="space-y-5">
@@ -739,6 +905,19 @@ function SarahPageInner() {
           <BuiltInQuestions />
           <ScreeningQuestions />
         </div>
+      ) : null}
+
+      {tab === "identity" ? (
+        <Section
+          title="Knowledge base: policies document"
+          hint="The document Sarah can search for policy facts. It is rebuilt automatically on every publish from approved, switched-on wording only. Use this to rebuild it from the currently published setup."
+        >
+          <div>
+            <button className={btnOutline} disabled={!canEdit || busy !== null} onClick={onRegenerateKb}>
+              {busy === "kb" ? "Rebuilding…" : "Rebuild policies document"}
+            </button>
+          </div>
+        </Section>
       ) : null}
 
       {tab === "identity" ? (
@@ -766,7 +945,7 @@ function SarahPageInner() {
         </Section>
       ) : null}
 
-      <div className="fixed inset-x-0 bottom-[4.25rem] z-30 border-t border-border bg-card/95 px-4 py-3 backdrop-blur lg:bottom-0 lg:left-[236px]">
+      <div className="fixed inset-x-0 bottom-[4.25rem] z-30 border-t border-border bg-card/95 px-4 py-3 backdrop-blur lg:bottom-0 lg:left-64">
         <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-2">
           <span className="mr-auto text-sm text-muted-foreground">
             {unsaved ? "Unsaved changes" : data.dirty ? "Draft saved, not published" : "Draft matches what is live"}
@@ -792,6 +971,26 @@ function SarahPageInner() {
           </button>
         </div>
       </div>
+
+      {openItem !== null ? (
+        <ItemModal
+          key={openItem}
+          itemId={openItem}
+          onClose={() => setOpenItem(null)}
+          onGoToTab={(area) => setTab(AREA_TAB[area])}
+          onOpenItem={setOpenItem}
+        />
+      ) : null}
+
+      <ConfirmDialog
+        open={confirmApproveAll}
+        title="Approve all drafts?"
+        message="This approves the emergency scripts, severity levels, tenant-responsibility wording and the resident call-type wording as they stand. Nothing is switched on or published."
+        confirmLabel="Approve all"
+        busy={busy === "approveAll"}
+        onCancel={() => setConfirmApproveAll(false)}
+        onConfirm={onApproveAll}
+      />
 
       {previewText !== null ? (
         <Modal title="Prompt preview (from the saved draft)" onClose={() => setPreviewText(null)}>

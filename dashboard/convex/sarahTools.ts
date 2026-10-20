@@ -2,7 +2,8 @@ import { v } from "convex/values";
 import type { QueryCtx } from "./_generated/server";
 import { internalMutation, internalQuery } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { scheduleNotify, staffRecipientIds } from "./notify";
+import { tenantOrgId } from "./authz";
+import { scheduleEmergencyAlert, scheduleNotify } from "./notify";
 import { findResidentsByPhone } from "./residents";
 import { normalizeUnitKey } from "./units";
 
@@ -156,13 +157,14 @@ export const lookupCaller = internalQuery({
 // --- notifications -----------------------------------------------------------
 
 /**
- * Re-enables the escalation alert that used to be a commented-out SMS in /tools/escalate, now
- * through the notification service so every send is logged and a Twilio failure can't fail the
- * call.
+ * The escalate tool. Texting policy: the only text is an emergency alert to admins, so only a
+ * life-safety escalation (a resident issue, reason urgent_tenant_issue) alerts anyone. It is
+ * deduped per request and per call, so it never doubles up with the alert log_maintenance_request
+ * already raised for the same call.
  *
- * Skipped when this call already produced an emergency or urgent maintenance request: that
- * request's own routing texted the same staff, and a second text for the same call is noise at
- * the worst possible moment. `alreadyNotified` tells the caller so.
+ * `notified` is true only when admins have actually been alerted (now or earlier); callers and
+ * Sarah must never claim staff were told otherwise. `alreadyNotified` keeps its old meaning: this
+ * call already produced an emergency or urgent request, which is the record.
  */
 export const notifyEscalation = internalMutation({
   args: {
@@ -173,31 +175,49 @@ export const notifyEscalation = internalMutation({
     residentIssue: v.boolean(),
   },
   handler: async (ctx, args): Promise<{ notified: boolean; alreadyNotified: boolean }> => {
-    const requests = await ctx.db
-      .query("maintenanceRequests")
-      .withIndex("by_conversation", (q) =>
-        q.eq("elevenLabsConversationId", args.elevenLabsConversationId),
-      )
-      .collect();
-    const covered = requests.some(
-      (r) => r.orgId === args.orgId && (r.severity === "emergency" || r.severity === "urgent"),
-    );
-    if (covered) return { notified: true, alreadyNotified: true };
+    const requests = (
+      await ctx.db
+        .query("maintenanceRequests")
+        .withIndex("by_conversation", (q) =>
+          q.eq("elevenLabsConversationId", args.elevenLabsConversationId),
+        )
+        .collect()
+    ).filter((r) => r.orgId === args.orgId);
+    const covered = requests.some((r) => r.severity === "emergency" || r.severity === "urgent");
+    if (!args.residentIssue) return { notified: false, alreadyNotified: covered };
 
-    const userIds = await staffRecipientIds(ctx, args.orgId);
-    if (userIds.length === 0) return { notified: false, alreadyNotified: false };
-    await scheduleNotify(ctx, {
+    const req = requests.find((r) => r.severity === "emergency") ?? requests[0];
+    const unit = req?.unitId ? await ctx.db.get(req.unitId) : null;
+    const alerted = await scheduleEmergencyAlert(ctx, {
       orgId: args.orgId,
-      userIds,
-      template: "request_emergency",
-      data: {
-        firstName: args.callerName?.trim().split(/\s+/)[0],
-        unit: args.unit,
-        severity: "escalated",
-        path: args.residentIssue ? "/tenants" : "/leads",
-      },
+      keys: [
+        ...(req ? [{ entity: "request" as const, id: req._id }] : []),
+        { entity: "conversation" as const, id: args.elevenLabsConversationId },
+      ],
+      number: req?.number,
+      unit: unit?.unitNumber ?? args.unit,
+      path: req ? `/maintenance/${req._id}` : "/tenants",
     });
-    return { notified: true, alreadyNotified: false };
+    return { notified: alerted, alreadyNotified: covered };
+  },
+});
+
+/**
+ * Emergency on a call whose team could not be resolved by the HTTP layer (no conversations row
+ * and no known agent id yet). This deployment has one team, so alert it rather than say nothing.
+ * Deduped per call. Returns true only if admins were alerted.
+ */
+export const alertEmergencyUnresolvedOrg = internalMutation({
+  args: { elevenLabsConversationId: v.string(), unit: v.optional(v.string()) },
+  handler: async (ctx, args): Promise<boolean> => {
+    const orgId = await tenantOrgId(ctx);
+    if (!orgId) return false;
+    return await scheduleEmergencyAlert(ctx, {
+      orgId,
+      keys: [{ entity: "conversation", id: args.elevenLabsConversationId }],
+      unit: args.unit,
+      path: "/tenants",
+    });
   },
 });
 

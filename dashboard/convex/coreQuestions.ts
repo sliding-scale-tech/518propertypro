@@ -98,14 +98,15 @@ export function enabledCoreQuestions(disabled: string[]): CoreQuestion[] {
  * who switched pets off would still get pet questions on every call.
  */
 export function coreBlock(disabled: string[]): string {
-  const lines = enabledCoreQuestions(disabled).map((q) => `- ${q.promptLine}`);
+  const lines = enabledCoreQuestions(disabled).map((q, i) => `${i + 1}. ${q.promptLine}`);
 
-  return `WHAT TO ASK EVERY LEASING CALLER:
+  return `WHAT TO COLLECT FROM EVERY LEASING CALLER (this is what to find out, not a script to read out):
 ${lines.join("\n")}
 
-Ask for these conversationally, one or two at a time, not as an interrogation. If they
-already told you one in passing, don't ask again. This list is exhaustive: if something is
-not on it and not under EXTRA SCREENING QUESTIONS, this property has deliberately chosen not
-to collect it — do not ask about it, do not bring it up, and do not send it to
+Collect these ONE per turn, following the LEASING QUESTION FLOW in the LEASING CALLS section, and
+never list them or ask two in one turn. If they already told you one in passing, don't ask again.
+Besides these, ask only the questions in LEASING QUESTIONS WE ONLY RECORD, the LEASING QUESTION FLOW
+and EXTRA SCREENING QUESTIONS: if something is not in any of them, this property has deliberately
+chosen not to collect it. Do not ask about it, do not bring it up, and do not send it to
 check_qualification even if the caller volunteers it.`;
 }

@@ -124,9 +124,10 @@ function conversationConfigBody(input: AgentConfig) {
         // reasoning_effort left over from a different (auto-routed) model can otherwise
         // persist and 400 against gemini-2.0-flash, which doesn't support that field.
         reasoning_effort: null,
-        // Voice replies should be a sentence or two; uncapped generation is a real
-        // source of response latency.
-        max_tokens: 250,
+        // Voice replies are one acknowledgement plus ONE question (25 words at most, see the HARD
+        // RULES in the prompt); a lower cap backs that up and keeps latency down. Tool-call
+        // arguments still fit: the largest, log_maintenance_request, is well under this.
+        max_tokens: 160,
         knowledge_base: input.knowledgeBase,
         tool_ids: input.toolIds,
         // We pay to RAG-index every synced doc (see computeRagIndex); leaving this off
@@ -287,6 +288,37 @@ export function createKbDocFromText(text: string, name: string) {
     method: "POST",
     body: { text, name },
   });
+}
+
+/** True if the knowledge-base document still exists in ElevenLabs; false only on a 404. */
+export async function kbDocExists(docId: string): Promise<boolean> {
+  try {
+    await request<unknown>(`/convai/knowledge-base/${docId}`);
+    return true;
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("ElevenLabs 404")) return false;
+    throw err;
+  }
+}
+
+/**
+ * Pulls the missing knowledge-base document id out of a PATCH-agent 404
+ * (`document_not_found`, "Document with id X not found."), or null for any other error.
+ */
+export function missingKbDocId(err: unknown): string | null {
+  if (!(err instanceof Error)) return null;
+  if (!err.message.startsWith("ElevenLabs 404")) return null;
+  if (!err.message.includes("document_not_found")) return null;
+  const m = /Document with id ([A-Za-z0-9_-]+) not found/.exec(err.message);
+  return m ? m[1] : null;
+}
+
+/** Read-only: the knowledge-base ids the live agent currently references. */
+export async function getAgentKbIds(agentId: string): Promise<string[]> {
+  const a = await request<{
+    conversation_config?: { agent?: { prompt?: { knowledge_base?: Array<{ id: string }> } } };
+  }>(`/convai/agents/${agentId}`);
+  return (a.conversation_config?.agent?.prompt?.knowledge_base ?? []).map((k) => k.id);
 }
 
 export function computeRagIndex(docId: string) {

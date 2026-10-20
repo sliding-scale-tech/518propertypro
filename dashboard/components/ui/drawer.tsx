@@ -20,6 +20,7 @@ export function Drawer({
   eyebrow,
   headerTop,
   width = 560,
+  hideHeader = false,
   children,
 }: {
   open: boolean;
@@ -28,7 +29,9 @@ export function Drawer({
   /** Small line above the title (id, severity chip, stage pill ...). */
   eyebrow?: ReactNode;
   headerTop?: ReactNode;
-  width?: 560 | 720;
+  width?: number;
+  /** Caller draws the header. The title is still the dialog name for assistive tech. */
+  hideHeader?: boolean;
   children: ReactNode;
 }) {
   const titleId = useId();
@@ -105,7 +108,7 @@ export function Drawer({
             style={{ width: `min(${width}px, 100%)` }}
             className="fixed inset-y-0 right-0 z-[51] flex flex-col overflow-y-auto bg-card text-card-foreground shadow-[-12px_0_40px_rgba(15,23,42,0.18)] outline-none"
           >
-            <div className="sticky top-0 z-[2] flex items-start gap-3 border-b border-border bg-card px-[22px] py-4">
+            <div className={hideHeader ? "sr-only" : "sticky top-0 z-[2] flex items-start gap-3 border-b border-border bg-card px-[22px] py-4"}>
               <div className="min-w-0 flex-1">
                 {eyebrow || headerTop ? (
                   <div className="mb-1 flex flex-wrap items-center gap-2 text-[11.5px] text-muted-foreground">
@@ -126,7 +129,7 @@ export function Drawer({
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <div className="flex flex-col gap-[18px] px-[22px] pb-10 pt-[18px]">{children}</div>
+            <div className={hideHeader ? "flex min-h-full flex-col" : "flex flex-col gap-[18px] px-[22px] pb-10 pt-[18px]"}>{children}</div>
           </motion.div>
         </>
       ) : null}
@@ -167,12 +170,15 @@ export function ActBox({
   icon,
   children,
   note,
+  bare = false,
 }: {
   lead: ReactNode;
   icon?: ReactNode;
   children?: ReactNode;
   note?: ReactNode;
+  bare?: boolean;
 }) {
+  if (bare) return <div className="flex flex-col gap-2">{children}</div>;
   return (
     <div className="flex flex-col gap-3 rounded-2xl border border-accent-line bg-accent p-3.5">
       <div className="flex items-center gap-1.5 text-[13.5px] font-semibold [&_svg]:h-4 [&_svg]:w-4">
@@ -186,8 +192,8 @@ export function ActBox({
 }
 
 /** Row of action buttons inside an ActBox. */
-export function ActButtons({ children }: { children: ReactNode }) {
-  return <div className="flex flex-wrap gap-2">{children}</div>;
+export function ActButtons({ children, stack = false }: { children: ReactNode; stack?: boolean }) {
+  return <div className={stack ? "flex flex-col gap-2" : "flex flex-wrap gap-2"}>{children}</div>;
 }
 
 /** Dashed "nothing for you to do, here is why" note. */

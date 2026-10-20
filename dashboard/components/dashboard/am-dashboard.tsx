@@ -1,7 +1,7 @@
 "use client";
 
 import { useUser } from "@clerk/nextjs";
-import { useMutation, useQuery } from "convex/react";
+import { useQuery } from "convex/react";
 import { Building2, CalendarDays, ClipboardList, Eye, MapPin, Siren, Users, Wrench } from "lucide-react";
 import Link from "next/link";
 import { api } from "@/convex/_generated/api";
@@ -19,14 +19,8 @@ import {
   Pill,
   SevChip,
 } from "@/components/ui";
-import type { Tone } from "@/components/ui";
+import { AmLeadCards } from "@/components/dashboard/lead-cards";
 import { browserTimeZone, relativeDay } from "@/components/dashboard/format";
-
-const PRIORITY_TONE: Record<string, { label: string; tone: Tone }> = {
-  high: { label: "High", tone: "bad" },
-  medium: { label: "Medium", tone: "warn" },
-  low: { label: "Low", tone: "acc" },
-};
 
 function hourWord(at: Date) {
   const h = at.getHours();
@@ -62,14 +56,8 @@ const where = (property: string | null | undefined, unit: string | null | undefi
 export function AmDashboard() {
   const { user } = useUser();
   const data = useQuery(api.dashboard.amOverview, { fallbackTimeZone: browserTimeZone() });
-  const tasks = useQuery(api.tasks.list, { mine: true });
-  const toggleTask = useMutation(api.tasks.toggleComplete);
 
   const firstName = data?.firstName || user?.firstName?.trim() || "there";
-  const myTasks = (tasks ?? [])
-    .filter((t) => t.status !== "completed")
-    .sort((a, b) => (a.dueDate ?? Infinity) - (b.dueDate ?? Infinity))
-    .slice(0, 4);
 
   return (
     <div className="space-y-5 pb-10">
@@ -116,6 +104,8 @@ export function AmDashboard() {
           sub="Booked by Sarah on your calendar"
         />
       </KpiRow>
+
+      <AmLeadCards />
 
       <Grid2>
         <Card>
@@ -289,43 +279,6 @@ export function AmDashboard() {
           </div>
         </Card>
       ) : null}
-
-      <Card>
-        <CardHead
-          title="My tasks"
-          right={
-            <Link href="/tasks" className="font-medium text-primary hover:underline">
-              View all →
-            </Link>
-          }
-        />
-        {tasks && myTasks.length === 0 ? (
-          <Empty>Nothing on your list. Enjoy it.</Empty>
-        ) : (
-          <div>
-            {myTasks.map((task, i) => {
-              const priority = PRIORITY_TONE[task.priority] ?? PRIORITY_TONE.medium;
-              return (
-                <ListRow
-                  key={task._id}
-                  first={i === 0}
-                  icon={
-                    <button
-                      type="button"
-                      onClick={() => void toggleTask({ taskId: task._id })}
-                      aria-label={`Mark "${task.title}" as done`}
-                      className="h-[18px] w-[18px] shrink-0 rounded-md border-[1.5px] border-border-strong transition-colors hover:border-primary"
-                    />
-                  }
-                  title={task.title}
-                  sub={task.dueDate ? relativeDay(task.dueDate) : undefined}
-                  right={<Pill tone={priority.tone}>{priority.label}</Pill>}
-                />
-              );
-            })}
-          </div>
-        )}
-      </Card>
     </div>
   );
 }

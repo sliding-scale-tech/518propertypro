@@ -5,11 +5,12 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense } from "react";
 import { api } from "@/convex/_generated/api";
 import { RequireView } from "@/components/require-view";
+import { CallbacksList } from "@/components/residents/callbacks-list";
 import { ResidentCalls } from "@/components/residents/resident-calls";
 import { ResidentsList } from "@/components/residents/residents-list";
 import { PageHeader, Seg } from "@/components/ui";
 
-type Tab = "calls" | "residents";
+type Tab = "calls" | "callbacks" | "residents";
 
 function TenantsInner() {
   const router = useRouter();
@@ -18,7 +19,7 @@ function TenantsInner() {
   // Resident-call detail: admin and (scoped) asset manager; the server returns nothing for other views.
   const canSeeCalls = access?.view === "admin" || access?.view === "asset_manager";
   const requested = params.get("tab");
-  const tab: Tab = canSeeCalls && requested !== "residents" ? "calls" : "residents";
+  const tab: Tab = canSeeCalls ? (requested === "residents" ? "residents" : requested === "callbacks" ? "callbacks" : "calls") : "residents";
 
   return (
     <div className="space-y-5 pb-10">
@@ -26,8 +27,10 @@ function TenantsInner() {
         title="Tenants"
         subtitle={
           tab === "calls"
-            ? "Non-maintenance resident calls. Maintenance is under Work orders."
-            : "Tenant directory used to recognise callers."
+            ? "Every resident call, including maintenance requests raised from calls."
+            : tab === "callbacks"
+              ? "Callers Sarah could not match to a unit, waiting for a callback."
+              : "Tenant directory used to recognise callers."
         }
         actions={
           canSeeCalls ? (
@@ -36,14 +39,15 @@ function TenantsInner() {
               value={tab}
               options={[
                 { value: "calls", label: "Resident calls" },
+                { value: "callbacks", label: "Callbacks" },
                 { value: "residents", label: "Residents" },
               ]}
-              onChange={(next) => router.replace(next === "calls" ? "/tenants?tab=calls" : "/tenants?tab=residents", { scroll: false })}
+              onChange={(next) => router.replace(`/tenants?tab=${next}`, { scroll: false })}
             />
           ) : undefined
         }
       />
-      {tab === "calls" ? <ResidentCalls /> : <ResidentsList />}
+      {tab === "calls" ? <ResidentCalls /> : tab === "callbacks" ? <CallbacksList /> : <ResidentsList />}
     </div>
   );
 }

@@ -10,8 +10,9 @@ import { Btn, Drawer, Field, Select, Textarea } from "@/components/ui";
 import { ISSUE_TYPES, SEVERITY_CHOICES, issueLabel, mrId, type Severity } from "./shared";
 
 /**
- * Manual entry (A8). Calls maintenance.createManual with autoForward, so a request typed in by
- * Pat or by the unit's own asset manager skips AM review. The server enforces who may do it.
+ * Manual entry (A8). Calls maintenance.createManual with autoForward. Executive/admin/Pat may enter
+ * for any unit; an asset manager only for units they manage, and the server always sends an AM's
+ * request to Pat's review (Waiting on Pat), never to a technician. The server enforces all of it.
  */
 export function NewWorkOrderDrawer({
   open,
@@ -84,10 +85,10 @@ export function NewWorkOrderDrawer({
   return (
     <Drawer open={open} onClose={onClose} eyebrow="Manual entry" title="New work order">
       <p className="text-[13px] text-muted-foreground">
-        For issues reported in person or spotted on a walkthrough.{" "}
+        {isAdmin ? "For issues reported in person or spotted on a walkthrough." : "For issues reported in person or on a walkthrough."}{" "}
         {isAdmin
-          ? "It skips asset-manager review and lands in your queue."
-          : `It goes straight to ${leadName}, since you've already validated it.`}
+          ? `It skips asset-manager review and lands in ${leadName}'s queue.`
+          : `It goes to ${leadName} for review.`}
       </p>
       <Field label="Property" htmlFor="nwo-property">
         <Select

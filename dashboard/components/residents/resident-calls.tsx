@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery } from "convex/react";
 import { AlertTriangle, CheckCircle2, ClipboardList, Gauge } from "lucide-react";
+import Link from "next/link";
 import { useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -38,23 +39,39 @@ const SEVERITY_LABELS: Record<SeverityBand, string> = {
 };
 
 type IssueRow = {
-  _id: Id<"tenantIssues">;
+  kind: "request" | "issue";
+  key: string;
+  issueId?: Id<"tenantIssues">;
+  requestId?: string;
+  workOrderId?: string;
+  mrNumber?: string;
+  woNumber?: string;
   conversationId?: Id<"conversations">;
   callerName?: string;
   unit?: string;
   callerNumber?: string;
   callbackNumber?: string;
   reason: string;
+  description?: string;
   category?: string;
   severity: number;
+  severityLevel?: string;
   severityReason?: string;
   originalSeverity?: number;
   status: "open" | "resolved";
+  statusLabel: string;
   createdAt: number;
   channel?: string | null;
   durationSec?: number | null;
   callType?: string;
 };
+
+/** Deep link into the work-orders board for the request, or its work order once one exists. */
+function workOrderHref(i: IssueRow) {
+  if (i.workOrderId) return `/work-orders?open=work_order:${encodeURIComponent(i.workOrderId)}`;
+  if (i.requestId) return `/work-orders?open=request:${encodeURIComponent(i.requestId)}`;
+  return null;
+}
 
 function callTypeOf(issue: { callType?: string; category?: string }) {
   return issue.callType ?? issue.category ?? "";
@@ -98,7 +115,7 @@ export function ResidentCalls() {
   const [severityFilter, setSeverityFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("open");
-  const [selected, setSelected] = useState<Id<"tenantIssues"> | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
 
   const filtered = useMemo(() => {
     if (!issues) return undefined;
@@ -115,7 +132,7 @@ export function ResidentCalls() {
     [issues],
   );
 
-  const current = issues?.find((i) => i._id === selected) ?? null;
+  const current = issues?.find((i) => i.key === selected) ?? null;
 
   const columns: Column<IssueRow>[] = [
     { key: "when", header: "When", className: "whitespace-nowrap text-muted-foreground", render: (i) => formatWhen(i.createdAt) },
@@ -145,14 +162,32 @@ export function ResidentCalls() {
     {
       key: "status",
       header: "Status",
-      render: (i) => <Pill tone={i.status === "open" ? "warn" : "ok"}>{i.status === "open" ? "Open" : "Resolved"}</Pill>,
+      render: (i) => <Pill tone={i.status === "open" ? "warn" : "ok"}>{i.statusLabel}</Pill>,
+    },
+    {
+      key: "link",
+      header: "Request",
+      className: "whitespace-nowrap",
+      render: (i) => {
+        const href = workOrderHref(i);
+        if (!href) return "—";
+        return (
+          <Link
+            href={href}
+            onClick={(e) => e.stopPropagation()}
+            className="text-[12.5px] font-medium text-primary underline-offset-2 hover:underline"
+          >
+            {i.woNumber ?? i.mrNumber}
+          </Link>
+        );
+      },
     },
   ];
 
   return (
     <div className="space-y-5">
       <p className="text-[12.5px] text-muted-foreground">
-        Non-maintenance resident calls. Names and units are recorded as the caller gave them and are not verified.
+        Every resident call: maintenance requests raised from calls (open them under Work orders) and other resident calls. Names and units are recorded as the caller gave them and are not verified.
         Severity is Sarah&apos;s judgment; you can change it and the original is kept.
       </p>
 
@@ -195,8 +230,8 @@ export function ResidentCalls() {
             caption="Resident calls"
             columns={columns}
             rows={filtered}
-            rowKey={(i) => i._id}
-            onRowClick={(i) => setSelected(i._id)}
+            rowKey={(i) => i.key}
+            onRowClick={(i) => setSelected(i.key)}
             empty={
               issues?.length === 0
                 ? "No resident calls logged yet. Sarah adds them here as they call in."
@@ -235,13 +270,14 @@ export function ResidentCalls() {
       >
         {current ? (
           <IssueDetail
-            key={current._id + current.status + current.severity}
+            key={current.key + current.status + current.severity}
             issue={current}
-            canDelete={isAdmin}
-            canEdit={canEdit}
+            canDelete={isAdmin && current.kind === "issue"}
+            canEdit={canEdit && current.kind === "issue"}
             onSave={async (patch) => {
               try {
-                await updateIssue({ issueId: current._id, ...patch });
+                if (!current.issueId) return;
+                await updateIssue({ issueId: current.issueId, ...patch });
                 toast("Issue updated");
               } catch (err) {
                 toast(cleanError(err), "error");
@@ -249,7 +285,8 @@ export function ResidentCalls() {
             }}
             onDelete={async () => {
               try {
-                await removeIssue({ issueId: current._id });
+                if (!current.issueId) return;
+                await removeIssue({ issueId: current.issueId });
                 setSelected(null);
                 toast("Issue deleted");
               } catch (err) {
@@ -296,6 +333,10 @@ function IssueDetail({
   };
 
   const info = [
+    { label: "Request", value: issue.mrNumber },
+    { label: "Work order", value: issue.woNumber },
+    { label: "Status", value: issue.kind === "request" ? issue.statusLabel : undefined },
+    { label: "Severity level", value: issue.severityLevel ? labelize(issue.severityLevel) : undefined },
     { label: "Call type", value: issue.callType ? labelize(issue.callType) : undefined },
     { label: "Category", value: issue.category },
     { label: "Channel", value: issue.channel ?? undefined },
@@ -365,8 +406,19 @@ function IssueDetail({
         </div>
       </ActBox>
       ) : (
-        <DrawerSection title="Reason for calling">
-          <p className="text-sm">{issue.reason}</p>
+        <DrawerSection title={issue.kind === "request" ? "Issue" : "Reason for calling"}>
+          <p className="text-sm font-medium">{issue.reason}</p>
+          {issue.kind === "request" && issue.description && issue.description !== issue.reason ? (
+            <p className="mt-1 text-sm text-muted-foreground">{issue.description}</p>
+          ) : null}
+          {issue.severityReason ? (
+            <p className="mt-2 text-xs text-muted-foreground">Sarah&apos;s reasoning: {issue.severityReason}</p>
+          ) : null}
+          {workOrderHref(issue) ? (
+            <Link href={workOrderHref(issue)!} className="mt-3 inline-block text-sm font-medium text-primary hover:underline">
+              Open {issue.woNumber ?? issue.mrNumber} in Work orders
+            </Link>
+          ) : null}
         </DrawerSection>
       )}
 

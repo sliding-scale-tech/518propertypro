@@ -5,8 +5,9 @@ import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { appBaseUrl } from "./appUrl";
 import { toE164 } from "./phone";
-import { sendSms } from "./twilioApi";
+import { isSmsAllowed, sendSms } from "./twilioApi";
 import { publishedConfig } from "./sarahConfigRead";
+import { writeAudit } from "./audit";
 
 /**
  * Notification service (F7). One internal action, `send`, resolves recipients, sends SMS and
@@ -19,9 +20,15 @@ import { publishedConfig } from "./sarahConfigRead";
  *
  * SMS bodies carry no PII beyond a first name and unit label; everything else sits behind the
  * login link (PRD section 9).
+ *
+ * TEXTING POLICY: only templates in SMS_ALLOWED_TEMPLATES (twilioApi.ts) may produce a text:
+ * "emergency_alert" to admins, plus the technician templates when SMS_TECHNICIAN_ENABLED is
+ * true. Every other template is dropped in scheduleNotify and again in send. Callers and their
+ * in-app records are untouched; only the outbound SMS is suppressed.
  */
 
 export const TEMPLATES = [
+  "emergency_alert",
   "request_emergency",
   "request_exception",
   "am_unavailable",
@@ -37,10 +44,17 @@ export const TEMPLATES = [
   "request_note",
   "request_sent_back",
   "request_reassigned",
+  "request_new",
+  "lead_assigned",
+  "tour_booked",
+  "unmatched_caller",
+  "task_new",
+  "photo_request",
 ] as const;
 export type NotifyTemplate = (typeof TEMPLATES)[number];
 
 const templateValidator = v.union(
+  v.literal("emergency_alert"),
   v.literal("request_emergency"),
   v.literal("request_exception"),
   v.literal("am_unavailable"),
@@ -56,6 +70,12 @@ const templateValidator = v.union(
   v.literal("request_note"),
   v.literal("request_sent_back"),
   v.literal("request_reassigned"),
+  v.literal("request_new"),
+  v.literal("lead_assigned"),
+  v.literal("tour_booked"),
+  v.literal("unmatched_caller"),
+  v.literal("task_new"),
+  v.literal("photo_request"),
 );
 
 /** Deliberately narrow: nothing free-form from a tenant can reach an SMS body. */
@@ -68,6 +88,12 @@ export const notifyDataValidator = v.object({
   // tenant_message only: the Sarah-config wording, already approved (sarahConfigRead.tenantMessage).
   // Never populated from anything a tenant typed.
   text: v.optional(v.string()),
+  // lead_assigned / tour_booked / unmatched_caller: the caller's phone (digits, + - ( ) only).
+  phone: v.optional(v.string()),
+  // tour_booked: spoken tour time, e.g. "Tuesday, October 20 at 3:00 PM".
+  when: v.optional(v.string()),
+  // lead_assigned / tour_booked: first name of the asset manager the lead is assigned to.
+  assignee: v.optional(v.string()),
 });
 
 export type NotifyArgs = {
@@ -82,6 +108,9 @@ export type NotifyArgs = {
     severity?: string;
     path?: string;
     text?: string;
+    phone?: string;
+    when?: string;
+    assignee?: string;
   };
 };
 
@@ -90,6 +119,16 @@ const MAX_RECIPIENTS = 25;
 /** Letters, digits, space, dash and apostrophe only, short: safe to drop into a text message. */
 function clean(s: string | undefined, max: number): string {
   return (s ?? "").replace(/[^\p{L}\p{N} '\-#]/gu, "").trim().slice(0, max);
+}
+
+/** A phone number for a staff text: digits and + - ( ) space only. */
+function cleanPhone(s: string | undefined): string {
+  return (s ?? "").replace(/[^0-9+() -]/g, "").trim().slice(0, 20);
+}
+
+/** A spoken time for a staff text: letters, digits, space and , : . - only. */
+function cleanWhen(s: string | undefined): string {
+  return (s ?? "").replace(/[^\p{L}\p{N} ,:.-]/gu, "").trim().slice(0, 60);
 }
 
 function safePath(path: string | undefined): string {
@@ -106,6 +145,9 @@ function bodyFor(template: NotifyTemplate, data: NotifyArgs["data"]): string {
   const mr = data.number !== undefined ? `MR-${data.number}` : "A request";
   const wo = data.number !== undefined ? `WO-${data.number}` : "A work order";
   switch (template) {
+    case "emergency_alert":
+      // Fixed wording: nothing a caller said can reach this text.
+      return `EMERGENCY: ${data.number !== undefined ? `MR-${data.number}` : "Phone call"}${at}. Open the request.`;
     case "request_emergency":
       return `${clean(data.severity, 12).toUpperCase() || "URGENT"}: ${mr}${at}${who}.`;
     case "request_exception":
@@ -134,6 +176,28 @@ function bodyFor(template: NotifyTemplate, data: NotifyArgs["data"]): string {
       return `${mr}${at} was sent back to the asset manager.`;
     case "request_reassigned":
       return `${mr}${at} is now yours (unit reassigned to you).`;
+    case "request_new":
+      return `${mr}${at}${who} is ready for your review.`;
+    case "lead_assigned": {
+      const phone = cleanPhone(data.phone);
+      const assignee = clean(data.assignee, 30);
+      return `New lead${name ? `: ${name}` : ""}${phone ? `, ${phone}` : ""}.${assignee ? ` Assigned to ${assignee}.` : " Not assigned yet."}`;
+    }
+    case "tour_booked": {
+      const phone = cleanPhone(data.phone);
+      const when = cleanWhen(data.when);
+      const assignee = clean(data.assignee, 30);
+      return `Tour booked${name ? `: ${name}` : ""}${phone ? `, ${phone}` : ""}${when ? `, ${when}` : ""}${assignee ? ` with ${assignee}` : ""}.`;
+    }
+    case "unmatched_caller": {
+      const phone = cleanPhone(data.phone);
+      return `Caller we could not match to a unit needs a callback${name ? `: ${name}` : ""}${phone ? `, ${phone}` : ""}.`;
+    }
+    case "task_new":
+      return `New task${at}${who} from a resident call.`;
+    case "photo_request":
+      // Fixed wording, no free text: what the caller said stays behind the login link.
+      return `${mr}${at}: caller wants to send photos. Open the request.`;
     case "tenant_message":
       // Approved wording only; control characters stripped, one SMS-sized chunk.
       return (data.text ?? "").replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 320);
@@ -141,17 +205,15 @@ function bodyFor(template: NotifyTemplate, data: NotifyArgs["data"]): string {
 }
 
 /**
- * Sarah configuration (P17): for an emergency or urgent alert, adds the escalation contacts
- * configured for that level (published config only) to whoever the caller already chose. The
- * caller's list is the fallback and is never replaced, so an assigned AM and the staff from
- * staffRecipientIds are still told; configuring contacts can only add recipients. Any failure
- * here leaves the original recipients untouched.
+ * Sarah configuration (P17): for an emergency alert, adds the escalation contacts configured
+ * for the emergency level (published config only) to whoever the caller already chose. The
+ * caller's list is the fallback and is never replaced; configuring contacts can only add
+ * recipients. Any failure here leaves the original recipients untouched.
  */
 async function withEscalationContacts(ctx: MutationCtx, args: NotifyArgs): Promise<NotifyArgs> {
-  if (args.template !== "request_emergency") return args;
+  if (args.template !== "emergency_alert") return args;
   try {
-    // "escalated" is what the escalate tool sends when no severity level is known: urgent.
-    const sev = args.data.severity === "emergency" ? "emergency" : "urgent";
+    const sev = "emergency";
     const config = await publishedConfig(ctx, args.orgId);
     const entry = config?.escalationContacts.find((e) => e.level === sev);
     if (!entry || (entry.userIds.length === 0 && entry.externalPhones.length === 0)) return args;
@@ -172,19 +234,27 @@ async function withEscalationContacts(ctx: MutationCtx, args: NotifyArgs): Promi
 
 /**
  * Enqueues a send. Never throws: an enqueue failure is logged and swallowed so the calling
- * mutation (which already did the real work) still commits.
+ * mutation (which already did the real work) still commits. Returns true only when a send was
+ * actually scheduled (allowed template and at least one recipient).
  */
-export async function scheduleNotify(ctx: MutationCtx, args: NotifyArgs): Promise<void> {
+export async function scheduleNotify(ctx: MutationCtx, args: NotifyArgs): Promise<boolean> {
+  // Texting policy choke point: anything not allowlisted is dropped here and never scheduled.
+  if (!isSmsAllowed(args.template)) {
+    console.log(`notify: ${args.template} not sent, texting is off except emergency alerts`);
+    return false;
+  }
   args = await withEscalationContacts(ctx, args);
-  if ((args.userIds?.length ?? 0) === 0 && (args.phones?.length ?? 0) === 0) return;
+  if ((args.userIds?.length ?? 0) === 0 && (args.phones?.length ?? 0) === 0) return false;
   try {
     await ctx.scheduler.runAfter(0, internal.notify.send, args);
+    return true;
   } catch (err) {
     console.error("notify: could not schedule", err);
+    return false;
   }
 }
 
-/** Team admins plus maintenance leads (Pat) and simplr_admins: who gets the "needs a decision" texts. */
+/** Every Admin (team admin flag, executive, maintenance lead, simplr_admin): who gets the "needs a decision" texts. */
 export async function staffRecipientIds(ctx: QueryCtx, orgId: string): Promise<Id<"users">[]> {
   const members = await ctx.db
     .query("memberships")
@@ -194,10 +264,81 @@ export async function staffRecipientIds(ctx: QueryCtx, orgId: string): Promise<I
     .filter(
       (m) =>
         m.role === "admin" ||
+        (m.jobRoles ?? []).includes("executive") ||
         (m.jobRoles ?? []).includes("maintenance_lead") ||
         (m.jobRoles ?? []).includes("simplr_admin"),
     )
     .map((m) => m.userId);
+}
+
+/** Everyone who sees the admin view: team admins, executives, maintenance leads, simplr_admins. */
+async function adminViewRecipientIds(ctx: QueryCtx, orgId: string): Promise<Id<"users">[]> {
+  const members = await ctx.db
+    .query("memberships")
+    .withIndex("by_org", (q) => q.eq("orgId", orgId as Id<"organizations">))
+    .collect();
+  return members
+    .filter((m) => {
+      const roles = m.jobRoles ?? [];
+      return (
+        m.role === "admin" ||
+        roles.includes("maintenance_lead") ||
+        roles.includes("executive") ||
+        roles.includes("simplr_admin")
+      );
+    })
+    .map((m) => m.userId);
+}
+
+/**
+ * The one way an emergency text is raised. At most one per request AND per call: each key
+ * (the request, and the phone conversation when there is one) gets an audit row when the alert is
+ * queued, and any key that already has one means "already alerted". Goes to every admin-view
+ * person regardless of out-of-office or channel preference, plus the emergency escalation contacts
+ * from the published Sarah config. The text is fixed wording built from the MR number and unit label.
+ *
+ * Returns true when admins have been alerted for this emergency (now or earlier), false when no
+ * alert exists (no recipients, or scheduling failed). Callers use it to decide what Sarah may say.
+ */
+export async function scheduleEmergencyAlert(
+  ctx: MutationCtx,
+  args: {
+    orgId: string;
+    keys: Array<{ entity: "request" | "conversation"; id: string }>;
+    number?: number;
+    unit?: string;
+    path: string;
+  },
+): Promise<boolean> {
+  try {
+    for (const k of args.keys) {
+      const prior = await ctx.db
+        .query("auditEvents")
+        .withIndex("by_entity", (q) => q.eq("entity", k.entity).eq("entityId", k.id))
+        .collect();
+      if (prior.some((e) => e.action === "emergency_alert_sent")) return true;
+    }
+    const scheduled = await scheduleNotify(ctx, {
+      orgId: args.orgId,
+      userIds: await adminViewRecipientIds(ctx, args.orgId),
+      template: "emergency_alert",
+      data: { number: args.number, unit: args.unit, path: args.path },
+    });
+    if (!scheduled) return false;
+    for (const k of args.keys) {
+      await writeAudit(ctx, {
+        orgId: args.orgId,
+        entity: k.entity,
+        entityId: k.id,
+        action: "emergency_alert_sent",
+        note: "Emergency text queued for admins",
+      });
+    }
+    return true;
+  } catch (err) {
+    console.error("notify: could not raise emergency alert", err);
+    return false;
+  }
 }
 
 /** Phone + preferences for each requested user, restricted to members of `orgId`. */
@@ -255,6 +396,12 @@ export const send = internalAction({
     data: notifyDataValidator,
   },
   handler: async (ctx, args): Promise<void> => {
+    // Defense in depth: a job scheduled before the policy, or by a stray caller, still stops here.
+    if (!isSmsAllowed(args.template)) {
+      console.log(`notify.send: ${args.template} not sent, texting is off except emergency alerts`);
+      return;
+    }
+    const isEmergency = args.template === "emergency_alert";
     const log = (entry: {
       userId?: Id<"users">;
       phone?: string;
@@ -296,7 +443,8 @@ export const send = internalAction({
           await log({ userId: t.userId, status: "skipped", error: "no phone on file" });
           continue;
         }
-        if (!t.wantsSms) {
+        // An emergency goes out whatever the person's channel preference says.
+        if (!t.wantsSms && !isEmergency) {
           await log({ userId: t.userId, phone: t.phone, status: "skipped", error: "sms not enabled" });
           continue;
         }
@@ -305,7 +453,7 @@ export const send = internalAction({
         let ok = false;
         for (let attempt = 0; attempt < 2 && !ok; attempt++) {
           try {
-            await sendSms(t.phone, `${body}${link}`);
+            await sendSms(t.phone, `${body}${link}`, args.template);
             ok = true;
           } catch (err) {
             lastError = err instanceof Error ? err.message : String(err);

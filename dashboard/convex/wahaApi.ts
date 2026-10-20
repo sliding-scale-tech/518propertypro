@@ -6,6 +6,7 @@
  * device rather than a cloud API. The quirks that follow from that are documented at each
  * call site and collected in infra/waha/README.md.
  */
+import { isSmsAllowed } from "./twilioApi";
 
 /** One number for the whole property; this app is deliberately single-tenant. */
 export const SESSION_NAME = "leaseline";
@@ -133,7 +134,20 @@ export function toJid(chatId: string): string {
   return chatId.includes("@") ? chatId : `${chatId}@c.us`;
 }
 
+/**
+ * Texting policy: outbound WhatsApp to people (bot replies, staff replies, typing indicators) is
+ * off, because only emergency alerts to admins may be sent (twilioApi.SMS_ALLOWED_TEMPLATES).
+ * Inbound capture is unaffected.
+ */
+export function outboundAllowed(): boolean {
+  return isSmsAllowed(undefined);
+}
+
 export async function sendText(chatId: string, text: string): Promise<boolean> {
+  if (!outboundAllowed()) {
+    console.log("waha: outbound message dropped, texting is off except emergency alerts");
+    return false;
+  }
   const res = await request("/api/sendText", {
     method: "POST",
     body: { session: SESSION_NAME, chatId: toJid(chatId), text },
@@ -143,6 +157,7 @@ export async function sendText(chatId: string, text: string): Promise<boolean> {
 
 /** Shows the typing indicator, so a considered reply doesn't look like a dead chat. */
 export async function startTyping(chatId: string): Promise<void> {
+  if (!outboundAllowed()) return;
   await request("/api/startTyping", {
     method: "POST",
     body: { session: SESSION_NAME, chatId: toJid(chatId) },

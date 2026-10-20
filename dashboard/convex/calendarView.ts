@@ -3,7 +3,7 @@ import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { action, internalQuery } from "./_generated/server";
 import type { ActionCtx } from "./_generated/server";
-import { requireOrgId } from "./authz";
+import { isAdminView, requireOrgId } from "./authz";
 import * as google from "./googleApi";
 import { accessTokenFor } from "./googleCalendar";
 import * as sched from "./tourSchedule";
@@ -61,7 +61,7 @@ async function loadRange(
   const isSelf = userId === me.userId;
   // Checked here, server-side. The page only offers the member picker to admins, but that is
   // a courtesy — this is the boundary that stops a member reading a teammate's calendar.
-  if (!isSelf && !me.isAdmin) throw new Error("Only a team admin can view a teammate's calendar.");
+  if (!isSelf && !isAdminView(me)) throw new Error("You don't have access to that.");
   if (!sched.isDateKey(args.rangeStart)) throw new Error("rangeStart must be a YYYY-MM-DD date.");
 
   const target = await ctx.runQuery(internal.calendarView.target, { orgId: me.orgId, userId });

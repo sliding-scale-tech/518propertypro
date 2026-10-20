@@ -1,22 +1,21 @@
 "use client";
 
 import Link from "next/link";
-import { CheckSquare, MapPin, PawPrint } from "lucide-react";
-import { Pill } from "@/components/ui";
+import { MapPin, PawPrint } from "lucide-react";
+import { Pill, SevChip } from "@/components/ui";
 import { PRIORITY_BAR, STATUS_LABEL, formatDate, mapsUrl } from "./lib";
 
 export type TechJob = {
   _id: string;
+  number: number;
   title: string;
-  priority: string;
+  priority: "emergency" | "urgent" | "routine";
   status: string;
   accessNotes?: string;
   dueDate?: number;
   window?: string;
   unitNumber?: string;
   propertyName?: string;
-  checklistDone: number;
-  checklistTotal: number;
   isOverdue: boolean;
 };
 
@@ -41,6 +40,10 @@ export function JobCard({ job }: { job: TechJob }) {
         </a>
       </div>
       <Link href={`/tech/jobs/${job._id}`} className="block min-h-11 py-2 pb-4 pl-5 pr-4">
+        <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
+          <span className="font-mono">WO-{job.number}</span>
+          <SevChip level={job.priority} />
+        </div>
         <p className="text-base font-semibold leading-snug">{job.title}</p>
         {job.accessNotes && (
           <p
@@ -59,12 +62,6 @@ export function JobCard({ job }: { job: TechJob }) {
             <span className={job.isOverdue ? "font-semibold text-danger-ink" : ""}>
               Due {formatDate(job.dueDate)}
               {job.isOverdue ? " (overdue)" : ""}
-            </span>
-          )}
-          {job.checklistTotal > 0 && (
-            <span className="inline-flex items-center gap-1">
-              <CheckSquare className="h-3.5 w-3.5" />
-              {job.checklistDone}/{job.checklistTotal}
             </span>
           )}
         </div>

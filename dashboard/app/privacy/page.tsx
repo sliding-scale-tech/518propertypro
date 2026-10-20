@@ -40,7 +40,7 @@ export default function PrivacyPolicyPage() {
         <li>Your name, email address and profile image, and whether you sign in with a password or with Google.</li>
         <li>The team you belong to, your role (admin or member), and invitations sent to or by you.</li>
         <li>
-          Your tour availability settings: whether you take tours (which you or a team admin can switch), your
+          Your tour availability settings: whether you take tours (which you or an Admin can switch), your
           working hours and the days you turn off.
         </li>
       </ul>

@@ -1,19 +1,21 @@
 "use client";
 
-import { useMutation, useQuery } from "convex/react";
+import { useAction, useMutation, useQuery } from "convex/react";
 import { motion } from "framer-motion";
-import { Globe, Mail, Shield, Trash2, Users, X } from "lucide-react";
+import { AlertTriangle, Globe, Mail, RefreshCw, Shield, Trash2, Users, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import { useToast } from "@/components/toast";
 import { MemberDetails, APP_ROLE_OPTIONS, AppRoleBadge } from "@/components/team/member-details";
+import { LeadRouting } from "@/components/team/lead-routing";
 import { AuditTab } from "@/components/team/audit-tab";
-import { Avatar, Btn, Card, CardHead, Chips, Input, PageHeader, Seg, Select, Toggle } from "@/components/ui";
+import { Avatar, Btn, Card, CardHead, Chips, Input, PageHeader, Pill, Seg, Select, Toggle } from "@/components/ui";
 import {
   InvitePanel,
   ROLE_FILTERS,
   inviteTypeLabel,
   matchesRoleFilter,
+  parseRoleFilter,
   type RoleFilter,
 } from "@/components/team/invite-panel";
 
@@ -34,6 +36,7 @@ export default function TeamPage() {
   // of it this page needs.
   const availability = useQuery(api.tours.availabilitySettings);
   const revokeInvite = useMutation(api.team.revokeInvite);
+  const resendInvite = useAction(api.team.invite);
   const removeMember = useMutation(api.team.removeMember);
   const rename = useMutation(api.team.rename);
   const setTakingTours = useMutation(api.tours.setTakingTours);
@@ -41,7 +44,11 @@ export default function TeamPage() {
 
   const [name, setName] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [roleFilter, setRoleFilter] = useState<RoleFilter>("all");
+  const [now] = useState(() => Date.now());
+  const [roleFilter, setRoleFilter] = useState<RoleFilter>(() => {
+    if (typeof window === "undefined") return "all";
+    return parseRoleFilter(new URLSearchParams(window.location.search).get("role"));
+  });
   // ?tab=audit deep link (the old /audit redirects here). Read from window to avoid a Suspense boundary.
   const [tab, setTabState] = useState<"members" | "audit">(() => {
     if (typeof window === "undefined") return "members";
@@ -133,11 +140,13 @@ export default function TeamPage() {
               ) : null}
             </div>
             {!data.isAdmin ? (
-              <p className="mt-2 text-xs text-muted-foreground">Only an admin can rename the team.</p>
+              <p className="mt-2 text-xs text-muted-foreground">Only an Admin can rename the team.</p>
             ) : null}
           </Card>
 
           <TimeZoneSection isAdmin={data.isAdmin} timeZone={availability?.timeZone ?? null} />
+
+          {data.isAdmin ? <LeadRouting members={data.members} /> : null}
 
           <InvitePanel />
 
@@ -150,7 +159,7 @@ export default function TeamPage() {
               }
               icon={<Shield />}
               hint={`The Tours switch decides whether Sarah books tours for someone. ${
-                data.isAdmin ? "You can switch anyone's." : "You can switch your own; an admin can switch anyone's."
+                data.isAdmin ? "You can switch anyone's." : "You can switch your own; an Admin can switch anyone's."
               }`}
             />
 
@@ -158,12 +167,27 @@ export default function TeamPage() {
               <Chips
                 label="Filter by role"
                 value={roleFilter}
-                onChange={setRoleFilter}
-                options={ROLE_FILTERS.map((f) => ({ value: f.value, label: f.label }))}
+                onChange={(next) => {
+                  setRoleFilter(next);
+                  const params = new URLSearchParams(window.location.search);
+                  if (next === "all") params.delete("role");
+                  else params.set("role", next);
+                  const qs = params.toString();
+                  window.history.replaceState(null, "", qs ? `/team?${qs}` : "/team");
+                }}
+                options={ROLE_FILTERS.map((f) => ({
+                  value: f.value,
+                  label: `${f.label} (${data.members.filter((m) => matchesRoleFilter(f.value, m)).length})`,
+                })).filter((o) => o.value !== "none" || roleFilter === "none" || data.members.some((m) => m.appRole === null))}
               />
             </div>
 
             <div className="space-y-2">
+              {data.members.filter((m) => matchesRoleFilter(roleFilter, m)).length === 0 ? (
+                <p className="rounded-2xl border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
+                  No one with this role yet.
+                </p>
+              ) : null}
               {data.members
                 .filter((m) => matchesRoleFilter(roleFilter, m))
                 .map((member) => {
@@ -199,6 +223,19 @@ export default function TeamPage() {
                         </p>
                         <p className="truncate text-[12.5px] text-muted-foreground">{description}</p>
                         <p className="truncate text-xs text-muted-foreground">{member.email}</p>
+                        {member.appRole === "technician" && !member.phone && (data.isAdmin || member.isSelf) ? (
+                          <p className="mt-1">
+                            <Pill tone="warn">
+                              <AlertTriangle className="h-3 w-3" />
+                              Add a phone number so they can get job texts later
+                            </Pill>
+                          </p>
+                        ) : null}
+                        {member.unavailableUntil !== null && member.unavailableUntil > now ? (
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            Out of office until {new Date(member.unavailableUntil).toLocaleDateString()}
+                          </p>
+                        ) : null}
                         <p className={`mt-1 flex items-center gap-1.5 text-xs ${status.text}`}>
                           <span className={`h-1.5 w-1.5 rounded-full ${status.dot}`} />
                           {status.label}
@@ -206,7 +243,7 @@ export default function TeamPage() {
                       </div>
                       <div
                         className="flex shrink-0 items-center gap-2"
-                        title={canSwitch ? undefined : "Only an admin can change a teammate's tours"}
+                        title={canSwitch ? undefined : "Only an Admin can change a teammate's tours"}
                       >
                         <span className="text-xs font-medium text-muted-foreground">Tours</span>
                         <Toggle
@@ -276,7 +313,7 @@ export default function TeamPage() {
                   {data.invitations.map((invitation) => (
                     <div
                       key={invitation.id}
-                      className="flex items-center gap-4 rounded-2xl border border-border px-4 py-3.5"
+                      className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-border px-4 py-3.5"
                     >
                       <span className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-full bg-warning-soft text-warning-ink">
                         <Mail className="h-4 w-4" />
@@ -285,11 +322,32 @@ export default function TeamPage() {
                         <p className="truncate text-sm font-medium">{invitation.email}</p>
                         <p className="text-xs text-muted-foreground">
                           Invited {new Date(invitation.createdAt).toLocaleDateString()} ·{" "}
-                          {inviteTypeLabel(invitation)}
+                          {inviteTypeLabel(invitation)} · expires {new Date(invitation.expiresAt).toLocaleDateString()}
                         </p>
                       </div>
                       <Btn
                         sm
+                        aria-label={`Resend invite to ${invitation.email}`}
+                        disabled={busy || invitation.appRole === null}
+                        onClick={() =>
+                          void run(
+                            () =>
+                              resendInvite({
+                                email: invitation.email,
+                                appRole: invitation.appRole ?? undefined,
+                                phone: invitation.phone ?? undefined,
+                                fullName: invitation.fullName ?? undefined,
+                              }),
+                            `Invite re-sent to ${invitation.email}`,
+                          )
+                        }
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        Resend
+                      </Btn>
+                      <Btn
+                        sm
+                        aria-label={`Revoke invite for ${invitation.email}`}
                         onClick={() => void run(() => revokeInvite({ inviteId: invitation.id }), "Invite revoked")}
                         disabled={busy}
                       >
@@ -347,7 +405,7 @@ function TimeZoneSection({ isAdmin, timeZone }: { isAdmin: boolean; timeZone: st
           <span>
             Not set yet, so Sarah cannot book tours — she takes down a preferred time for the team to confirm
             instead.
-            {isAdmin ? "" : " Ask a team admin to set it."}
+            {isAdmin ? "" : " Ask an Admin to set it."}
           </span>
         </p>
       ) : null}
@@ -371,7 +429,7 @@ function TimeZoneSection({ isAdmin, timeZone }: { isAdmin: boolean; timeZone: st
 
       <p className="mt-3 text-xs text-muted-foreground">
         Where the property is. Everyone&apos;s tour hours and every booked tour use this zone.
-        {isAdmin ? "" : " Only an admin can change it."}
+        {isAdmin ? "" : " Only an Admin can change it."}
       </p>
     </Card>
   );
@@ -386,8 +444,8 @@ function Header({ isAdmin }: { isAdmin?: boolean }) {
           Everyone here shares one dashboard — the same agent, property, knowledge base, screening questions and
           leads.{" "}
           {isAdmin === false
-            ? "You can see who is on the team; only an admin can invite or remove people."
-            : "Inviting and removing people is admin-only."}
+            ? "You can see who is on the team; only an Admin can invite or remove people."
+            : "Inviting and removing people is Admin-only."}
         </>
       }
     />
