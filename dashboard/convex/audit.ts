@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import { query } from "./_generated/server";
 import type { MutationCtx } from "./_generated/server";
@@ -68,7 +68,7 @@ export const forEntity = query({
   },
   handler: async (ctx, args) => {
     const org = await currentOrg(ctx);
-    if (!org || !isAdminView(org)) throw new Error("You don't have access to that.");
+    if (!org || !isAdminView(org)) throw new ConvexError("You don't have access to that.");
 
     const rows = await ctx.db
       .query("auditEvents")

@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import {
   action,
   internalAction,
@@ -10,6 +10,7 @@ import {
 import { internal } from "./_generated/api";
 import * as el from "./elevenLabsApi";
 import { currentOrg, requireAdminView, requireAdminViewId } from "./authz";
+import { cityOfProperty, naturalCompare } from "./unitMatch";
 
 // Shared with cloneDefaultsForOrg below, so the two never drift into disagreeing on which
 // title marks a doc as generated rather than authored content worth cloning verbatim.
@@ -168,7 +169,7 @@ export const save = mutation({
     if (docId) {
       const existing = await ctx.db.get(docId);
       // A docId for another team's doc, or one that's gone — either way, not this write's to make.
-      if (!existing || existing.orgId !== orgId) throw new Error("Doc not found.");
+      if (!existing || existing.orgId !== orgId) throw new ConvexError("Doc not found.");
       await ctx.db.patch(docId, {
         title: args.title,
         body: args.body,
@@ -322,27 +323,54 @@ export const syncPropertyDoc = internalMutation({
       .collect();
 
     const title = PROPERTY_DOC_TITLE;
-    const blocks: string[] = [];
-    for (const p of properties) {
-      const lines = [`Property: ${p.name}`];
+    // Grouped by city, and every building states its own city, so "what do you have in Troy?"
+    // gets the same answer here as from check_availability with city. Cities come from the data.
+    const NO_CITY = "City not recorded";
+    const cityName = (p: (typeof properties)[number]) => cityOfProperty(p) ?? NO_CITY;
+    const openIn = (p: (typeof properties)[number]) => units.filter((u) => u.propertyId === p._id && u.available).length;
+    const byCity = new Map<string, typeof properties>();
+    for (const p of properties) byCity.set(cityName(p), [...(byCity.get(cityName(p)) ?? []), p]);
+    const cityOrder = [...byCity.keys()].sort((a, b) => (a === NO_CITY ? 1 : b === NO_CITY ? -1 : a.localeCompare(b)));
+    const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+    const summary = cityOrder.map((c) => {
+      const ps = byCity.get(c)!;
+      const open = ps.reduce((n, p) => n + openIn(p), 0);
+      return `- ${c}: ${plural(ps.length, "building", "buildings")}, ${open ? plural(open, "available unit", "available units") : "no available units"}`;
+    });
+    const blocks: string[] = [
+      `Cities (for "what do you have in <city>?"; check_availability with that city is always the live answer):\n${summary.join("\n")}`,
+    ];
+    const ordered = cityOrder.flatMap((c) =>
+      [...byCity.get(c)!].sort((a, b) => naturalCompare(a.address?.formatted ?? a.name, b.address?.formatted ?? b.name)),
+    );
+    let lastCity: string | null = null;
+    for (const p of ordered) {
+      const city = cityName(p);
+      if (city !== lastCity) {
+        blocks.push(`== ${city} ==`);
+        lastCity = city;
+      }
+      const lines = [`Property: ${p.name}`, `City: ${city}`];
       if (p.address) lines.push(`Address: ${p.address.formatted}`);
-      lines.push(`Pets: ${p.petsAllowed ? "allowed" : "not allowed"}`);
+      // Only a policy someone entered; imported buildings have none, and none is invented.
+      if (p.petsAllowed !== undefined) lines.push(`Pets: ${p.petsAllowed ? "allowed" : "not allowed"}`);
       const open = units.filter((u) => u.propertyId === p._id && u.available);
       if (open.length === 0) {
         lines.push("Available units: none listed. Do not offer a unit; say the team will follow up.");
       } else {
         lines.push("Available units:");
         for (const u of open) {
-          const parts = [`${u.bedrooms}`, `unit ${u.unitNumber}`];
+          const parts = [u.rentedAs === "room" ? "room in a shared apartment" : `${u.bedrooms}`, `unit ${u.unitNumber}`];
           if (u.rent !== undefined) parts.push(`rent $${u.rent}/mo`);
           else parts.push("rent not entered, do not quote one");
           if (u.availableFrom) parts.push(`available from ${u.availableFrom}`);
+          if (u.leasingFacts) parts.push(`describe it as: ${u.leasingFacts}`);
           lines.push(`- ${parts.join(", ")}`);
         }
       }
       blocks.push(lines.join("\n"));
     }
-    const body = blocks.length
+    const body = properties.length
       ? blocks.join("\n\n")
       : "No property or unit data has been entered yet. Do not state rents or availability; say the team will follow up.";
 

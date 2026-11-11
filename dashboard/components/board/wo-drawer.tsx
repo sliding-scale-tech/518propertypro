@@ -9,14 +9,15 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { ConfirmDialog, Drawer, Textarea, Timeline, WaitNote, cx } from "@/components/ui";
 import { errorMessage, toast } from "@/components/ui/toast";
+import { browserTimeZone } from "@/components/dashboard/format";
 import { CallDetails } from "@/components/work-orders/format";
+import { TenantPreferredTime, WindowPicker, type WindowValue } from "@/components/work-orders/window-picker";
 import type { ItemRef } from "./board";
 import { StatusPill } from "./chips";
 import { DesignSelect } from "./design-select";
 import { RejectPanel } from "./reject-panel";
 import {
   PRIORITY_LEVELS,
-  WINDOW_PRESETS,
   auditText,
   fmtCreated,
   fmtDateTime,
@@ -346,7 +347,7 @@ function DrawerBody({
   const [tab, setTab] = useState<"overview" | "expenses">("overview");
   const [step, setStep] = useState<Step>("view");
   const [comment, setComment] = useState("");
-  const [windowDraft, setWindowDraft] = useState("");
+  const [windowDraft, setWindowDraft] = useState<WindowValue | null>(null);
   const [techDraft, setTechDraft] = useState<string | null>(null);
 
   const overrideSeverity = useMutation(api.maintenance.overrideSeverity);
@@ -391,12 +392,10 @@ function DrawerBody({
   const windowEditable = isRequest ? canCreate : f.canChangeWindow;
   const techEditable = isRequest ? canCreate : f.canReassign;
 
-  const windowValue = (isRequest ? windowDraft : (d.window ?? "")).replace(/–/g, "-");
-  const windowOptions = [
-    { value: "", label: "No window set" },
-    ...(windowValue && !WINDOW_PRESETS.includes(windowValue) ? [{ value: windowValue, label: windowValue }] : []),
-    ...WINDOW_PRESETS.map((p) => ({ value: p, label: p })),
-  ];
+  const savedWindow: WindowValue | null =
+    d.windowStart !== null && d.windowEnd !== null ? { start: d.windowStart, end: d.windowEnd } : null;
+  const windowValue = isRequest ? windowDraft : savedWindow;
+  const legacyWindow = !isRequest && !savedWindow ? d.window : null;
   const techValue = isRequest ? (techDraft ?? suggest?.userId ?? "") : (d.technician?.userId ?? "");
   const techOptions = [
     ...(isRequest ? [{ value: "", label: "Unassigned" }] : []),
@@ -425,12 +424,19 @@ function DrawerBody({
       }
     }, "Priority updated.");
 
-  const onWindow = (value: string) => {
+  const onWindow = (value: WindowValue | null) => {
     if (isRequest) {
       setWindowDraft(value);
       return;
     }
-    void run(() => editScope({ workOrderId: d.id as Id<"workOrders">, window: value }), "Time window updated.");
+    const workOrderId = d.id as Id<"workOrders">;
+    void run(
+      () =>
+        value
+          ? editScope({ workOrderId, windowStart: value.start, windowEnd: value.end, fallbackTimeZone: browserTimeZone() })
+          : editScope({ workOrderId, clearWindow: true }),
+      value ? "Time window updated." : "Time window cleared.",
+    );
   };
 
   const onTech = (value: string) => {
@@ -460,20 +466,34 @@ function DrawerBody({
           for (const file of list) {
             try {
               const kind = uploadType(file);
-              if (!kind) throw new Error("Choose a photo or an mp4, webm or mov video.");
+              const reject = (why: string) => toast.error(`${file.name}: ${why}`);
+              if (!kind) {
+                reject("Choose a photo or an mp4, webm or mov video.");
+                continue;
+              }
               if (file.size > (kind.media === "video" ? MAX_VIDEO : MAX_PHOTO)) {
-                throw new Error(kind.media === "video" ? "Videos can be at most 50 MB." : "Photos can be at most 10 MB.");
+                reject(kind.media === "video" ? "Videos can be at most 50 MB." : "Photos can be at most 10 MB.");
+                continue;
               }
               const postUrl = await genUrl({ kind: d.kind, id: d.id });
               const res = await fetch(postUrl, { method: "POST", headers: { "Content-Type": kind.type }, body: file });
-              if (!res.ok) throw new Error("Upload failed.");
+              if (!res.ok) {
+                reject("Upload failed.");
+                continue;
+              }
               const json = (await res.json()) as { storageId?: string };
-              if (!json.storageId) throw new Error("Upload failed.");
+              if (!json.storageId) {
+                reject("Upload failed.");
+                continue;
+              }
               const result = await attachMedia({ kind: d.kind, id: d.id, storageId: json.storageId as Id<"_storage"> });
-              if (!result.ok) throw new Error(result.error);
+              if (!result.ok) {
+                reject(result.error);
+                continue;
+              }
               saved += 1;
             } catch (e) {
-              toast.error(`${file.name}: ${errorMessage(e)}`);
+              toast.error(`${file.name}: ${errorMessage(e, "Upload failed.")}`);
             }
           }
           if (saved > 0) toast.success(saved === 1 ? "Saved." : `${saved} files saved.`);
@@ -498,19 +518,35 @@ function DrawerBody({
                 const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
                 const isPdf = file.type === "application/pdf" || ext === "pdf";
                 const img = uploadType(file);
-                if (!isPdf && img?.media !== "photo") throw new Error("Choose a PDF or a photo.");
-                if (file.size > MAX_PHOTO) throw new Error("Receipts can be at most 10 MB.");
+                const reject = (why: string) => toast.error(`${file.name}: ${why}`);
+                if (!isPdf && img?.media !== "photo") {
+                  reject("Choose a PDF or a photo.");
+                  continue;
+                }
+                if (file.size > MAX_PHOTO) {
+                  reject("Receipts can be at most 10 MB.");
+                  continue;
+                }
                 const type = isPdf ? "application/pdf" : img!.type;
                 const postUrl = await genUrl({ kind: d.kind, id: d.id, receipt: true });
                 const res = await fetch(postUrl, { method: "POST", headers: { "Content-Type": type }, body: file });
-                if (!res.ok) throw new Error("Upload failed.");
+                if (!res.ok) {
+                  reject("Upload failed.");
+                  continue;
+                }
                 const json = (await res.json()) as { storageId?: string };
-                if (!json.storageId) throw new Error("Upload failed.");
+                if (!json.storageId) {
+                  reject("Upload failed.");
+                  continue;
+                }
                 const result = await attachMedia({ kind: d.kind, id: d.id, storageId: json.storageId as Id<"_storage">, receipt: true });
-                if (!result.ok) throw new Error(result.error);
+                if (!result.ok) {
+                  reject(result.error);
+                  continue;
+                }
                 saved += 1;
               } catch (e) {
-                toast.error(`${file.name}: ${errorMessage(e)}`);
+                toast.error(`${file.name}: ${errorMessage(e, "Upload failed.")}`);
               }
             }
             if (saved > 0) toast.success(saved === 1 ? "Receipt saved." : `${saved} receipts saved.`);
@@ -528,10 +564,7 @@ function DrawerBody({
     const ok = await run(async () => {
       if (comment.trim()) await addComment({ kind: "request", id: d.id, note: comment.trim() });
       const scope = [r.description, ...r.answers.map((a) => `${a.question}: ${a.value}`)].join("\n").slice(0, 4000);
-      const access = [r.pets ? `Pets: ${r.pets}` : "", r.preferredAccessTimes ? `Preferred times: ${r.preferredAccessTimes}` : ""]
-        .filter(Boolean)
-        .join("\n")
-        .slice(0, 1000);
+      const access = r.pets ? `Pets: ${r.pets}`.slice(0, 1000) : "";
       const id = await createWo({
         requestId: d.id as Id<"maintenanceRequests">,
         unitId: d.unitId as Id<"units">,
@@ -541,7 +574,7 @@ function DrawerBody({
         technicianUserId: techValue ? (techValue as Id<"users">) : undefined,
         accessNotes: access || undefined,
         requiredOnSubmit: { photos: true, hours: true, receipts: false, notes: false },
-        window: windowValue.trim() || undefined,
+        ...(windowDraft ? { windowStart: windowDraft.start, windowEnd: windowDraft.end, fallbackTimeZone: browserTimeZone() } : {}),
       });
       setComment("");
       onSwitch({ kind: "work_order", id });
@@ -583,12 +616,8 @@ function DrawerBody({
           />
         </Labeled>
         <Labeled label="Time Window">
-          <DesignSelect
-            ariaLabel="Time window"
-            value={windowValue}
-            onChange={windowEditable && !busy ? onWindow : undefined}
-            options={windowOptions}
-          />
+          <WindowPicker value={windowValue} legacyLabel={legacyWindow} onChange={windowEditable && !busy ? onWindow : undefined} />
+          <TenantPreferredTime value={d.tenantPreferredTime} />
         </Labeled>
         <Labeled label="Assigned to">
           <DesignSelect
@@ -1154,7 +1183,8 @@ function DrawerBody({
               <DesignSelect ariaLabel="Technician" value={techValue} placeholder="Unassigned" onChange={setTechDraft} options={techOptions} />
             </Labeled>
             <Labeled label="Time Window">
-              <DesignSelect ariaLabel="Time window" value={windowValue} onChange={setWindowDraft} options={windowOptions} />
+              <WindowPicker value={windowDraft} onChange={setWindowDraft} />
+              <TenantPreferredTime value={d.tenantPreferredTime} />
             </Labeled>
           </div>
           <Labeled label="Comment (optional)">

@@ -4,7 +4,7 @@ import { useMutation } from "convex/react";
 import Link from "next/link";
 import { useState } from "react";
 import { api } from "@/convex/_generated/api";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import type { DayHours } from "@/convex/tourSchedule";
 
 // Monday first, the way a working week reads. `day` matches Date.getUTCDay().
@@ -62,7 +62,7 @@ export function TourHoursEditor({
       toast("Tour hours saved");
       onSaved?.();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Could not save your hours.", "error");
+      toast(errorMessage(err, "Could not save your hours."), "error");
     } finally {
       setBusy(false);
     }

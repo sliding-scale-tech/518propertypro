@@ -6,6 +6,7 @@
  * device rather than a cloud API. The quirks that follow from that are documented at each
  * call site and collected in infra/waha/README.md.
  */
+import { ConvexError } from "convex/values";
 import { isSmsAllowed } from "./twilioApi";
 
 /** One number for the whole property; this app is deliberately single-tenant. */
@@ -78,7 +79,8 @@ export async function startSession(webhookUrl: string): Promise<void> {
 
     const restart = await request(`/api/sessions/${SESSION_NAME}/restart`, { method: "POST" });
     if (!restart.ok) {
-      throw new Error(`WAHA could not restart the session: ${await restart.text()}`);
+      console.error(`[waha] could not restart the session: ${restart.status} ${(await restart.text()).slice(0, 300)}`);
+      throw new ConvexError("WhatsApp didn't respond. Try connecting again in a moment.");
     }
     return;
   }
@@ -103,7 +105,8 @@ export async function startSession(webhookUrl: string): Promise<void> {
 
   // 422 means the session already exists and is running. Not an error.
   if (!res.ok && res.status !== 422) {
-    throw new Error(`WAHA could not start the session: ${await res.text()}`);
+    console.error(`[waha] could not start the session: ${res.status} ${(await res.text()).slice(0, 300)}`);
+    throw new ConvexError("WhatsApp didn't respond. Try connecting again in a moment.");
   }
 }
 

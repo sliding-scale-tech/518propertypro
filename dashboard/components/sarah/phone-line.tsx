@@ -5,8 +5,7 @@ import { Check, Copy, TriangleAlert } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { api } from "@/convex/_generated/api";
 import { Btn, Card, CardHead, Field, Input, Pill, Select } from "@/components/ui";
-import { useToast } from "@/components/toast";
-import { cleanError } from "@/components/maintenance/shared";
+import { errorMessage, useToast } from "@/components/toast";
 
 /**
  * "Business line forwarding (optional)". The admin enters their existing office number; THEY set
@@ -133,7 +132,7 @@ export function PhoneLine() {
     try {
       await fn();
     } catch (e) {
-      toast(cleanError(e), "error");
+      toast(errorMessage(e), "error");
     } finally {
       setBusy(null);
     }

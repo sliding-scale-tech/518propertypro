@@ -13,4 +13,13 @@ crons.interval(
   {},
 );
 
+// Owner verification rows (verify_owner, B36) are only needed during and just after a call; the
+// audit trail keeps the history. Drops rows older than ownerVerifyLib.VERIFICATION_RETENTION_MS.
+crons.daily(
+  "purge old owner verifications",
+  { hourUTC: 8, minuteUTC: 15 },
+  internal.ownerRouting.purgeOldVerifications,
+  {},
+);
+
 export default crons;

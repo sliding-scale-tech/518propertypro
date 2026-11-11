@@ -1,6 +1,6 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { internal } from "./_generated/api";
-import type { Id } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 import {
   action,
   internalAction,
@@ -56,14 +56,14 @@ const E164 = /^\+[1-9]\d{7,14}$/;
 export function assertE164(phone: string): string {
   const trimmed = phone.trim();
   if (!E164.test(trimmed)) {
-    throw new Error("Enter the phone number in international format, like +15185550123.");
+    throw new ConvexError("Enter the phone number in international format, like +15185550123.");
   }
   return trimmed;
 }
 
 /** Same sentence everywhere a member is blocked or removed while they still own units. */
-function ownsUnitsError(count: number): Error {
-  return new Error(`Reassign their ${count} unit${count === 1 ? "" : "s"} first.`);
+function ownsUnitsError(count: number): ConvexError<string> {
+  return new ConvexError(`Reassign their ${count} unit${count === 1 ? "" : "s"} first.`);
 }
 
 // --- Reads ----------------------------------------------------------------
@@ -202,8 +202,8 @@ export const rename = mutation({
   handler: async (ctx, args) => {
     const org = await requireOrgAdmin(ctx);
     const name = args.name.trim();
-    if (!name) throw new Error("Give the team a name.");
-    if (name.length > 60) throw new Error("That name is too long.");
+    if (!name) throw new ConvexError("Give the team a name.");
+    if (name.length > 60) throw new ConvexError("Team name is too long (max 60 characters).");
     await ctx.db.patch(org.orgId, { name, updatedAt: Date.now() });
   },
 });
@@ -213,12 +213,12 @@ export const removeMember = mutation({
   handler: async (ctx, args) => {
     const org = await requireOrgAdmin(ctx);
     const membership = await ctx.db.get(args.membershipId);
-    if (!membership || membership.orgId !== org.orgId) throw new Error("Member not found.");
+    if (!membership || membership.orgId !== org.orgId) throw new ConvexError("Member not found.");
 
     // Removing yourself would leave a team nobody can administer, and there is no ownership
     // transfer yet, so the only safe answer is to refuse.
     if (membership.userId === org.user._id) {
-      throw new Error("You cannot remove yourself from your own team.");
+      throw new ConvexError("You cannot remove yourself from your own team.");
     }
 
     // Units must always have an asset manager, so someone who still owns units can't leave.
@@ -249,7 +249,7 @@ export const setJobRoles = mutation({
       .query("memberships")
       .withIndex("by_user", (q) => q.eq("userId", args.userId))
       .first();
-    if (!membership || membership.orgId !== org.orgId) throw new Error("Member not found.");
+    if (!membership || membership.orgId !== org.orgId) throw new ConvexError("Member not found.");
 
     const next = [...new Set(args.jobRoles)];
     const before = membership.jobRoles ?? [];
@@ -264,13 +264,13 @@ export const setJobRoles = mutation({
     // Same last-Admin and self-demotion protection as setAppRole.
     const isAdminFlag = membership.role === "admin";
     if (isAdminView({ isAdmin: isAdminFlag, jobRoles: before }) && !isAdminView({ isAdmin: isAdminFlag, jobRoles: next })) {
-      if (membership.userId === org.user._id) throw new Error("Ask another Admin to change your role.");
+      if (membership.userId === org.user._id) throw new ConvexError("Ask another Admin to change your role.");
       const members = await ctx.db
         .query("memberships")
         .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
         .collect();
       if (!members.some((m) => m._id !== membership._id && isAdminView({ isAdmin: m.role === "admin", jobRoles: m.jobRoles ?? [] }))) {
-        throw new Error("The team needs at least one Admin.");
+        throw new ConvexError("The team needs at least one Admin.");
       }
     }
 
@@ -299,7 +299,7 @@ export const setAppRole = mutation({
       .query("memberships")
       .withIndex("by_user", (q) => q.eq("userId", args.userId))
       .first();
-    if (!membership || membership.orgId !== org.orgId) throw new Error("Member not found.");
+    if (!membership || membership.orgId !== org.orgId) throw new ConvexError("Member not found.");
 
     const before = membership.jobRoles ?? [];
     const next = jobRolesFor(args.appRole);
@@ -308,14 +308,14 @@ export const setAppRole = mutation({
     if (wasAdmin && next.role !== "admin") {
       // Locking yourself out is the easy mistake; another admin can make the change instead.
       if (membership.userId === org.user._id) {
-        throw new Error("Ask another Admin to change your role.");
+        throw new ConvexError("Ask another Admin to change your role.");
       }
       const members = await ctx.db
         .query("memberships")
         .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
         .collect();
       if (!members.some((m) => m._id !== membership._id && isAdminView({ isAdmin: m.role === "admin", jobRoles: m.jobRoles ?? [] }))) {
-        throw new Error("The team needs at least one Admin.");
+        throw new ConvexError("The team needs at least one Admin.");
       }
     }
 
@@ -352,13 +352,13 @@ export const setContact = mutation({
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
     if (!isAdminView(org) && args.userId !== org.user._id) {
-      throw new Error("You don't have access to that.");
+      throw new ConvexError("You don't have access to that.");
     }
     const membership = await ctx.db
       .query("memberships")
       .withIndex("by_user", (q) => q.eq("userId", args.userId))
       .first();
-    if (!membership || membership.orgId !== org.orgId) throw new Error("Member not found.");
+    if (!membership || membership.orgId !== org.orgId) throw new ConvexError("Member not found.");
 
     // Fields are picked one by one — never spread args into the row.
     const patch: { phone?: string; notifyBy?: Array<"sms" | "email" | "push">; skill?: string } = {};
@@ -368,7 +368,7 @@ export const setContact = mutation({
     if (args.notifyBy !== undefined) patch.notifyBy = [...new Set(args.notifyBy)];
     if (args.skill !== undefined) {
       const skill = args.skill.trim();
-      if (skill.length > 80) throw new Error("Skill is too long.");
+      if (skill.length > 80) throw new ConvexError("Skill is too long (max 80 characters).");
       patch.skill = skill === "" ? undefined : skill;
     }
     if (!("phone" in patch) && !("notifyBy" in patch) && !("skill" in patch)) return;
@@ -401,33 +401,33 @@ export const setUnavailable = mutation({
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
     if (args.userId !== org.user._id && !isAdminView(org)) {
-      throw new Error("You don't have access to that.");
+      throw new ConvexError("You don't have access to that.");
     }
     const membership = await ctx.db
       .query("memberships")
       .withIndex("by_user", (q) => q.eq("userId", args.userId))
       .first();
-    if (!membership || membership.orgId !== org.orgId) throw new Error("Member not found.");
+    if (!membership || membership.orgId !== org.orgId) throw new ConvexError("Member not found.");
 
     const now = Date.now();
     if (args.until !== undefined) {
       // A past or absurdly distant date is a typo, and a far-future one silently parks a
       // person's work forever.
       if (!Number.isFinite(args.until) || args.until <= now) {
-        throw new Error("Pick a time in the future.");
+        throw new ConvexError("Pick a time in the future.");
       }
-      if (args.until > now + MAX_UNAVAILABLE_MS) throw new Error("That is too far ahead.");
+      if (args.until > now + MAX_UNAVAILABLE_MS) throw new ConvexError("Pick an end time within the next year.");
     }
 
     let coveringUserId: Id<"users"> | undefined;
     if (args.until !== undefined && args.coveringUserId !== undefined) {
-      if (args.coveringUserId === args.userId) throw new Error("Pick someone else to cover.");
+      if (args.coveringUserId === args.userId) throw new ConvexError("Pick someone else to cover.");
       const cover = await ctx.db
         .query("memberships")
         .withIndex("by_user", (q) => q.eq("userId", args.coveringUserId!))
         .first();
       if (!cover || cover.orgId !== org.orgId || !(cover.jobRoles ?? []).includes("asset_manager")) {
-        throw new Error("Pick an asset manager on this team to cover.");
+        throw new ConvexError("Pick an asset manager on this team to cover.");
       }
       coveringUserId = cover.userId;
     }
@@ -458,9 +458,9 @@ async function setAssigneeFlag(
     .query("memberships")
     .withIndex("by_user", (q) => q.eq("userId", userId))
     .first();
-  if (!membership || membership.orgId !== org.orgId) throw new Error("Member not found.");
+  if (!membership || membership.orgId !== org.orgId) throw new ConvexError("Member not found.");
   if (value && !(membership.jobRoles ?? []).includes("asset_manager")) {
-    throw new Error("Only an asset manager can be chosen for this.");
+    throw new ConvexError("Only an asset manager can be chosen for this.");
   }
   if (Boolean(membership[field]) === value) return false;
   await ctx.db.patch(membership._id, { [field]: value });
@@ -579,24 +579,24 @@ export async function createAndSendInvite(
   },
 ): Promise<{ email: string; resent: boolean }> {
   const inviter = await requireOrgId(ctx);
-  if (!isAdminView(inviter)) throw new Error("You don't have access to that.");
+  if (!isAdminView(inviter)) throw new ConvexError("Only admins can invite people.");
   const { orgId, userId } = inviter;
   const phone = args.phone?.trim() ? assertE164(args.phone) : undefined;
 
   const derived = args.appRole ? jobRolesFor(args.appRole) : null;
   const jobRoles = derived ? derived.jobRoles : [...new Set(args.jobRoles ?? [])];
-  if (jobRoles.length === 0) throw new Error("Pick a role for this person.");
+  if (jobRoles.length === 0) throw new ConvexError("Pick a role for this person.");
   // An admin invite must carry an admin-flavoured job role, so they land in the admin view.
   const role = derived ? derived.role : (args.role ?? "member");
   if (
     role === "admin" &&
     !jobRoles.some((r) => r === "executive" || r === "maintenance_lead" || r === "simplr_admin")
   ) {
-    throw new Error("Pick a role for this person.");
+    throw new ConvexError("Pick a role for this person.");
   }
 
   const email = args.email.trim().toLowerCase();
-  if (!email.includes("@") || email.length < 3) throw new Error("Enter a valid email address.");
+  if (!email.includes("@") || email.length < 3) throw new ConvexError("Enter a valid email address.");
 
   const token = randomToken();
   const created: { orgName: string; resent: boolean } = await ctx.runMutation(internal.team.recordInvite, {
@@ -635,7 +635,7 @@ export const acceptInvite = action({
   args: { token: v.string() },
   handler: async (ctx, args): Promise<{ orgName: string }> => {
     const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error("Sign in first, then open the invitation link again.");
+    if (!identity) throw new ConvexError("Sign in first, then open the invitation link again.");
 
     return await ctx.runMutation(internal.team.redeemInvite, {
       clerkId: identity.subject,
@@ -658,7 +658,7 @@ export const recordInvite = internalMutation({
   },
   handler: async (ctx, args): Promise<{ orgName: string; resent: boolean }> => {
     const org = await ctx.db.get(args.orgId);
-    if (!org) throw new Error("Team not found.");
+    if (!org) throw new ConvexError("Team not found.");
 
     const existingUser = await ctx.db
       .query("users")
@@ -669,8 +669,12 @@ export const recordInvite = internalMutation({
         .query("memberships")
         .withIndex("by_user", (q) => q.eq("userId", existingUser._id))
         .first();
-      if (membership?.orgId === args.orgId) throw new Error("They are already on this team.");
-      if (membership) throw new Error("That person already belongs to another team.");
+      // A role-less membership ("Waiting for access") may be re-invited; redeeming applies the roles.
+      const roleless = membership?.role !== "admin" && (membership?.jobRoles ?? []).length === 0;
+      if (membership?.orgId === args.orgId && !roleless) throw new ConvexError("They are already on this team.");
+      if (membership && membership.orgId !== args.orgId) {
+        throw new ConvexError("That person already belongs to another team.");
+      }
     }
 
     // Supersede any live invite for the same address rather than stacking them, so revoking
@@ -682,12 +686,12 @@ export const recordInvite = internalMutation({
     // Anti email-bombing: at most 3 invites per address and 100 per team in a rolling 24h.
     const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
     if (previous.filter((p) => p.createdAt >= dayAgo).length >= 3) {
-      throw new Error("Too many invitations were sent to that address today. Try again tomorrow.");
+      throw new ConvexError("Too many invitations were sent to that address today. Try again tomorrow.");
     }
     let teamToday = 0;
     for await (const row of ctx.db.query("invites").withIndex("by_org", (q) => q.eq("orgId", args.orgId)).order("desc")) {
       if (row.createdAt < dayAgo) break;
-      if (++teamToday >= 100) throw new Error("Your team reached today's invitation limit. Try again tomorrow.");
+      if (++teamToday >= 100) throw new ConvexError("Your team reached today's invitation limit. Try again tomorrow.");
     }
     let resent = false;
     for (const old of previous) {
@@ -721,17 +725,17 @@ export const redeemInvite = internalMutation({
     // One message for every "this link is no good" case on purpose — distinguishing them tells
     // whoever is holding the link which guess got closer.
     const dead = "That invitation link is no longer valid. Ask for a new one.";
-    if (!invite) throw new Error(dead);
-    if (invite.acceptedAt || invite.revokedAt || invite.expiresAt < Date.now()) throw new Error(dead);
+    if (!invite) throw new ConvexError(dead);
+    if (invite.acceptedAt || invite.revokedAt || invite.expiresAt < Date.now()) throw new ConvexError(dead);
 
     const user = await ctx.db
       .query("users")
       .withIndex("by_clerk_id", (q) => q.eq("clerkId", args.clerkId))
       .unique();
-    if (!user) throw new Error("Your account is still being set up. Try again in a moment.");
+    if (!user) throw new ConvexError("Your account is still being set up. Try again in a moment.");
 
     if ((user.email ?? "").toLowerCase() !== invite.email) {
-      throw new Error(
+      throw new ConvexError(
         `This invitation was sent to ${invite.email}. Sign in with that address to accept it.`,
       );
     }
@@ -742,11 +746,12 @@ export const redeemInvite = internalMutation({
       .first();
     if (existing) {
       if (existing.orgId === invite.orgId) {
+        await applyInviteToMembership(ctx, existing, invite);
         await ctx.db.patch(invite._id, { acceptedAt: Date.now() });
         const org = await ctx.db.get(invite.orgId);
         return { orgName: org?.name ?? "your team" };
       }
-      throw new Error("You already belong to a team. Leave it before joining another.");
+      throw new ConvexError("You already belong to a team. Leave it before joining another.");
     }
 
     await ctx.db.insert("memberships", {
@@ -763,6 +768,34 @@ export const redeemInvite = internalMutation({
     return { orgName: org?.name ?? "your team" };
   },
 });
+
+/**
+ * Applies an invite to a membership the person already has in the inviting team — typically the
+ * bare one sign-up created before the invite was redeemed. Only ever adds: job roles are merged,
+ * an admin is never demoted, and a phone already on the membership is kept.
+ */
+async function applyInviteToMembership(
+  ctx: MutationCtx,
+  membership: Doc<"memberships">,
+  invite: Doc<"invites">,
+) {
+  const before = membership.jobRoles ?? [];
+  const jobRoles = [...new Set([...before, ...(invite.jobRoles ?? [])])];
+  const role = membership.role === "admin" || invite.role === "admin" ? "admin" : "member";
+  const phone = membership.phone ?? invite.phone;
+
+  await ctx.db.patch(membership._id, { role, jobRoles, phone });
+  await writeAudit(ctx, {
+    orgId: membership.orgId,
+    entity: "membership",
+    entityId: membership._id,
+    action: "invite_accepted",
+    actorUserId: membership.userId,
+    from: `${membership.role}:${before.join(",")}`,
+    to: `${role}:${jobRoles.join(",")}`,
+    note: `invite=${invite._id}`,
+  });
+}
 
 /**
  * Single-tenant: puts a brand-new account into the one shared team as a member. Only on a fresh
@@ -791,18 +824,21 @@ export const ensureTeamForUser = internalMutation({
     const user = await ctx.db.get(args.userId);
     if (!user) return;
 
+    // Clerk can send session.created before user.created, and only the latter carries the email.
+    // Without it the invite check below can't run, so wait: user.created calls this again.
+    const email = user.email?.toLowerCase();
+    if (!email) return;
+
     // An unaccepted invitation means this sign-up is on its way into someone else's team.
     // Creating a team here would make that impossible, since a person may only be on one.
-    if (user.email) {
-      const pending = await ctx.db
-        .query("invites")
-        .withIndex("by_email", (q) => q.eq("email", user.email!.toLowerCase()))
-        .collect();
-      const live = pending.find(
-        (i) => !i.acceptedAt && !i.revokedAt && i.expiresAt > Date.now(),
-      );
-      if (live) return;
-    }
+    const pending = await ctx.db
+      .query("invites")
+      .withIndex("by_email", (q) => q.eq("email", email))
+      .collect();
+    const live = pending.find(
+      (i) => !i.acceptedAt && !i.revokedAt && i.expiresAt > Date.now(),
+    );
+    if (live) return;
 
     // Single-tenant: once the team exists, every new account joins it as a member. Only the
     // very first account (fresh install) falls through to create the team and become its admin.
@@ -1507,13 +1543,12 @@ export const acceptPendingInvite = mutation({
   handler: async (ctx): Promise<{ orgName: string }> => {
     const user = await requireUser(ctx);
     const email = user.email?.toLowerCase();
-    if (!email) throw new Error("Your account has no email address to match an invite to.");
+    if (!email) throw new ConvexError("Your account has no email address to match an invite to.");
 
     const existing = await ctx.db
       .query("memberships")
       .withIndex("by_user", (q) => q.eq("userId", user._id))
       .first();
-    if (existing) throw new Error("You already belong to a team.");
 
     const invite = (
       await ctx.db
@@ -1521,16 +1556,21 @@ export const acceptPendingInvite = mutation({
         .withIndex("by_email", (q) => q.eq("email", email))
         .collect()
     ).find((i) => !i.acceptedAt && !i.revokedAt && i.expiresAt > Date.now());
-    if (!invite) throw new Error("There is no invitation waiting for this account.");
+    if (existing && existing.orgId !== invite?.orgId) throw new ConvexError("You already belong to a team.");
+    if (!invite) throw new ConvexError("There is no invitation waiting for this account.");
 
-    await ctx.db.insert("memberships", {
-      orgId: invite.orgId,
-      userId: user._id,
-      role: invite.role,
-      jobRoles: invite.jobRoles,
-      phone: invite.phone,
-      createdAt: Date.now(),
-    });
+    if (existing) {
+      await applyInviteToMembership(ctx, existing, invite);
+    } else {
+      await ctx.db.insert("memberships", {
+        orgId: invite.orgId,
+        userId: user._id,
+        role: invite.role,
+        jobRoles: invite.jobRoles,
+        phone: invite.phone,
+        createdAt: Date.now(),
+      });
+    }
     await ctx.db.patch(invite._id, { acceptedAt: Date.now() });
 
     const org = await ctx.db.get(invite.orgId);

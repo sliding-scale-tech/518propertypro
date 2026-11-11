@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { mutation } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { realValue } from "./sanitize";
@@ -20,7 +20,7 @@ export const submit = mutation({
   },
   handler: async (ctx, args) => {
     if (!Number.isInteger(args.rating) || args.rating < 1 || args.rating > 5) {
-      throw new Error("rating must be a whole number from 1 to 5");
+      throw new ConvexError("Rating must be a whole number from 1 to 5.");
     }
     return ctx.db.insert("callRatings", {
       sessionId: args.sessionId,

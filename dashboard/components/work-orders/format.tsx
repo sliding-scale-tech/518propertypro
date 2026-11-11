@@ -8,6 +8,7 @@ import { api } from "@/convex/_generated/api";
 import { ConversationTranscript } from "@/components/transcript";
 import { errorMessage, useToast } from "@/components/ui/toast";
 import type { Id } from "@/convex/_generated/dataModel";
+import { tenantPreferredTimeText } from "@/convex/workOrderWindow";
 import {
   Btn,
   ConfirmDialog,
@@ -252,8 +253,8 @@ function DraftEditor({ d, onDone }: { d: ReqDetail; onDone: () => void }) {
       <Field label="First noticed">
         <Input value={firstNoticed} maxLength={200} onChange={(e) => setFirstNoticed(e.target.value)} aria-label="First noticed" />
       </Field>
-      <Field label="Preferred access times">
-        <Input value={access} maxLength={300} onChange={(e) => setAccess(e.target.value)} aria-label="Preferred access times" />
+      <Field label="Tenant's preferred time">
+        <Input value={access} maxLength={300} onChange={(e) => setAccess(e.target.value)} aria-label="Tenant's preferred time" />
       </Field>
       {r.answers.map((a) => (
         <Field key={a.key} label={a.question}>
@@ -356,14 +357,16 @@ export function WorkOrderFormat({
   );
   if (w?.technicianName) kv.push({ label: "Technician", value: w.technicianName });
   if (w?.workOrder.window) kv.push({ label: "Window", value: w.workOrder.window });
+  // On a work order the page header shows this beside the time window.
+  const preferredTime = w ? undefined : tenantPreferredTimeText(request?.preferredAccessTimes);
+  if (preferredTime) kv.push({ label: "Tenant's preferred time", value: preferredTime });
   kv.push({ label: "Created", value: fmtDateTime(w ? w.workOrder.createdAt : (request?.createdAt ?? 0)) });
 
-  // Structured answers as labelled rows (pets, first noticed, access, plus every Sarah question).
+  // Structured answers as labelled rows (pets, first noticed, plus every Sarah question).
   const answerRows: Array<{ label: ReactNode; value: ReactNode }> = [];
   if (request) {
     if (request.firstNoticed) answerRows.push({ label: "First noticed", value: request.firstNoticed });
     if (request.pets) answerRows.push({ label: "Pets", value: request.pets });
-    if (request.preferredAccessTimes) answerRows.push({ label: "Preferred access", value: request.preferredAccessTimes });
     for (const a of request.answers) answerRows.push({ label: a.question, value: a.value });
     if (request.severityReason) {
       answerRows.push({
@@ -546,7 +549,6 @@ export function CallDetails({ r }: { r: ReqDetail }) {
   const rows: Array<{ label: ReactNode; value: ReactNode }> = [];
   if (request.firstNoticed) rows.push({ label: "First noticed", value: request.firstNoticed });
   if (request.pets) rows.push({ label: "Pets", value: request.pets });
-  if (request.preferredAccessTimes) rows.push({ label: "Preferred access", value: request.preferredAccessTimes });
   for (const a of request.answers) rows.push({ label: a.question, value: a.value });
   if (request.severityReason) {
     rows.push({

@@ -1,5 +1,7 @@
 /** Shared helpers for the technician pages. Pure, no server access. */
 
+import { ConvexError } from "convex/values";
+
 export function mapsUrl(destination: string): string {
   return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(destination)}`;
 }
@@ -42,13 +44,6 @@ export function todayLocalIso(): string {
   return `${d.getFullYear()}-${mm}-${dd}`;
 }
 
-export function errorMessage(e: unknown): string {
-  const raw = e instanceof Error ? e.message : String(e);
-  // Convex wraps server errors: "[CONVEX M(...)] ... Uncaught Error: <message> at handler (...)"
-  const m = raw.match(/Uncaught Error:\s*([\s\S]*?)(?:\n|\s+at\s|$)/);
-  return (m?.[1] ?? raw).trim() || "Something went wrong.";
-}
-
 /** Downscale to max 1600px long edge and re-encode as JPEG 0.8. Falls back to the original file. */
 export async function compressImage(file: File): Promise<Blob> {
   if (!file.type.startsWith("image/")) return file;
@@ -71,7 +66,7 @@ export async function compressImage(file: File): Promise<Blob> {
   }
 }
 
-/** POST a blob to a Convex upload URL with progress. Resolves to the storageId. */
+/** POST a blob to a Convex upload URL with progress. Resolves to the storageId. Rejects with a ConvexError so errorMessage() shows its text. */
 export function uploadBlob(url: string, blob: Blob, onProgress: (pct: number) => void): Promise<string> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -89,9 +84,9 @@ export function uploadBlob(url: string, blob: Blob, onProgress: (pct: number) =>
           /* fall through */
         }
       }
-      reject(new Error("Upload failed."));
+      reject(new ConvexError("The upload failed. Please try again."));
     };
-    xhr.onerror = () => reject(new Error("Upload failed. Check your connection."));
+    xhr.onerror = () => reject(new ConvexError("The upload failed. Check your connection and try again."));
     xhr.send(blob);
   });
 }

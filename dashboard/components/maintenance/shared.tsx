@@ -102,13 +102,6 @@ export function formatWhen(ms: number) {
   });
 }
 
-/** Convex wraps server errors ("[CONVEX M(...)] Uncaught Error: msg"); show only the message. */
-export function cleanError(e: unknown): string {
-  const raw = e instanceof Error ? e.message : String(e);
-  const after = raw.includes("Uncaught Error:") ? raw.split("Uncaught Error:").pop()! : raw;
-  return after.split("\n")[0].replace(/\s+at handler.*$/, "").trim() || "Something went wrong.";
-}
-
 export function Modal({
   title,
   onClose,

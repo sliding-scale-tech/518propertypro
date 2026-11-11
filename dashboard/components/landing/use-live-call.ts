@@ -5,6 +5,7 @@ import { useAction, useMutation, useQuery } from "convex/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { errorMessage } from "@/components/ui/toast";
 
 /**
  * The landing page's "Try yourself" call. A port of app/call/page.tsx, on purpose: same
@@ -106,7 +107,10 @@ export function useLiveCall(onCallEnded?: (conversationId: Id<"conversations">) 
     conversationIdRef.current = null;
     try {
       const { token } = await mintToken();
-      if (!agent) throw new Error("Agent is still being created — try again in a moment.");
+      if (!agent) {
+        setError("Agent is still being created — try again in a moment.");
+        return;
+      }
 
       const id = await startConversation({ agentId: agent._id });
       setConversationId(id);
@@ -114,11 +118,7 @@ export function useLiveCall(onCallEnded?: (conversationId: Id<"conversations">) 
 
       startSession({ conversationToken: token, connectionType: "webrtc" });
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Could not start the call. Check the microphone permission.",
-      );
+      setError(errorMessage(err, "Could not start the call. Check the microphone permission."));
       setConversationId(null);
       conversationIdRef.current = null;
     } finally {

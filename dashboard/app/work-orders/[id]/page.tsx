@@ -9,10 +9,12 @@ import { useRef, useState, type ReactNode } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { RequireView } from "@/components/require-view";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import { WorkOrderFormat, woStage } from "@/components/work-orders/format";
 import type { WoPriority } from "@/components/work-orders/shared";
-import { WindowField } from "@/components/work-orders/window-field";
+import { TenantPreferredTime, WindowPicker, type WindowValue } from "@/components/work-orders/window-picker";
+import { tenantPreferredTimeText } from "@/convex/workOrderWindow";
+import { browserTimeZone } from "@/components/dashboard/format";
 import { Btn, Card, CardHead, DatePicker, DrawerSection, Pill, Select, SevChip, Modal as UiModal } from "@/components/ui";
 
 type Detail = NonNullable<FunctionReturnType<typeof api.workOrders.get>>;
@@ -20,12 +22,6 @@ type Detail = NonNullable<FunctionReturnType<typeof api.workOrders.get>>;
 const inputClass =
   "w-full rounded-xl border border-input bg-card px-[11px] py-2 text-[13.5px] text-foreground outline-none transition-colors placeholder:text-faint focus:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:opacity-60";
 const areaClass = `${inputClass} leading-[1.45]`;
-
-function errorText(err: unknown): string {
-  if (err && typeof err === "object" && "data" in err && typeof err.data === "string") return err.data;
-  if (err instanceof Error) return (err.message.match(/Uncaught Error: (.*?)(?:\n|$)/)?.[1] ?? err.message).slice(0, 200);
-  return "Something went wrong. Try again.";
-}
 
 const fmtDate = (ms: number) => new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 const dateInput = (ms?: number) => {
@@ -51,19 +47,30 @@ function AddMedia({ workOrderId }: { workOrderId: Id<"workOrders"> }) {
         try {
           const isImage = file.type.startsWith("image/") && file.type !== "image/svg+xml";
           const isVideo = ["video/mp4", "video/webm", "video/quicktime"].includes(file.type);
-          if (!isImage && !isVideo) throw new Error("Choose a photo or an mp4, webm or mov video.");
+          const reject = (why: string) => toast(`${file.name}: ${why}`, "error");
+          if (!isImage && !isVideo) {
+            reject("Choose a photo or an mp4, webm or mov video.");
+            continue;
+          }
           if (file.size > (isVideo ? 50 : 10) * 1024 * 1024) {
-            throw new Error(isVideo ? "Videos can be at most 50 MB." : "Photos can be at most 10 MB.");
+            reject(isVideo ? "Videos can be at most 50 MB." : "Photos can be at most 10 MB.");
+            continue;
           }
           const url = await genUrl({ workOrderId });
           const res = await fetch(url, { method: "POST", headers: { "Content-Type": file.type }, body: file });
-          if (!res.ok) throw new Error("Upload failed.");
+          if (!res.ok) {
+            reject("Upload failed.");
+            continue;
+          }
           const { storageId } = (await res.json()) as { storageId: Id<"_storage"> };
           const result = await attach({ workOrderId, storageId, kind: isVideo ? "completion_video" : "completion_photo" });
-          if (!result.ok) throw new Error(result.error);
+          if (!result.ok) {
+            reject(result.error);
+            continue;
+          }
           saved += 1;
         } catch (e) {
-          toast(`${file.name}: ${errorText(e)}`, "error");
+          toast(`${file.name}: ${errorMessage(e, "Upload failed.")}`, "error");
         }
       }
       if (saved > 0) toast(saved === 1 ? "File added." : `${saved} files added.`);
@@ -170,6 +177,8 @@ function View({
   const active = wo.status === "created" || wo.status === "assigned" || wo.status === "in_progress";
   const stage = woStage(wo);
   const req = useQuery(api.maintenance.get, data.request ? { requestId: data.request._id } : "skip");
+  // The work order's own copy; a work order older than that field reads its request.
+  const preferredTime = tenantPreferredTimeText(wo.tenantPreferredTime ?? req?.request.preferredAccessTimes);
   const canNote = (viewerCan.manage && (active || wo.status === "completed")) || viewerCan.review;
 
   const run = async (fn: () => Promise<unknown>, ok: string) => {
@@ -179,7 +188,7 @@ function View({
       toast(ok);
       return true;
     } catch (err) {
-      toast(errorText(err), "error");
+      toast(errorMessage(err), "error");
       return false;
     } finally {
       setBusy(false);
@@ -225,6 +234,7 @@ function View({
         <dl className="grid gap-x-8 gap-y-3 text-sm sm:grid-cols-3">
           <Meta label="Due">{wo.dueDate ? fmtDate(wo.dueDate) : "None"}</Meta>
           <Meta label="Time window">{wo.window ? <Pill tone="acc">{wo.window}</Pill> : "Not set"}</Meta>
+          {preferredTime ? <Meta label="Tenant's preferred time">{preferredTime}</Meta> : null}
           <Meta label="Request">
             {data.request ? (
               <Link href={`/maintenance/${data.request._id}`} className="text-primary hover:underline">
@@ -288,7 +298,7 @@ function View({
       ) : null}
 
 
-      {modal === "edit" ? <EditScopeModal data={data} onClose={() => setModal(null)} /> : null}
+      {modal === "edit" ? <EditScopeModal data={data} preferredTime={preferredTime} onClose={() => setModal(null)} /> : null}
       {modal === "reassign" ? <ReassignModal data={data} technicians={technicians} onClose={() => setModal(null)} /> : null}
       {modal === "cancel" ? <ReasonModal wo={wo._id} mode="cancel" onClose={() => setModal(null)} /> : null}
       {modal === "sendback" ? <ReasonModal wo={wo._id} mode="sendback" onClose={() => setModal(null)} /> : null}
@@ -321,7 +331,7 @@ function ReasonModal({ wo, mode, onClose }: { wo: Id<"workOrders">; mode: "cance
       toast(isCancel ? "Work order cancelled" : "Sent back to the technician");
       onClose();
     } catch (err) {
-      toast(errorText(err), "error");
+      toast(errorMessage(err), "error");
       setBusy(false);
     }
   };
@@ -363,7 +373,7 @@ function ReassignModal({
       toast("Technician updated");
       onClose();
     } catch (err) {
-      toast(errorText(err), "error");
+      toast(errorMessage(err), "error");
       setBusy(false);
     }
   };
@@ -388,7 +398,7 @@ function ReassignModal({
   );
 }
 
-function EditScopeModal({ data, onClose }: { data: Detail; onClose: () => void }) {
+function EditScopeModal({ data, preferredTime, onClose }: { data: Detail; preferredTime?: string; onClose: () => void }) {
   const wo = data.workOrder;
   const toast = useToast();
   const editScope = useMutation(api.workOrders.editScope);
@@ -397,7 +407,10 @@ function EditScopeModal({ data, onClose }: { data: Detail; onClose: () => void }
   const [priority, setPriority] = useState<WoPriority>(wo.priority);
   const [accessNotes, setAccessNotes] = useState(wo.accessNotes ?? "");
   const [due, setDue] = useState(dateInput(wo.dueDate));
-  const [windowText, setWindowText] = useState(wo.window ?? "");
+  const savedWindow: WindowValue | null =
+    wo.windowStart !== undefined && wo.windowEnd !== undefined ? { start: wo.windowStart, end: wo.windowEnd } : null;
+  const [windowValue, setWindowValue] = useState<WindowValue | null>(savedWindow);
+  const [windowCleared, setWindowCleared] = useState(false);
   const [req, setReq] = useState(wo.requiredOnSubmit);
   const [busy, setBusy] = useState(false);
 
@@ -412,8 +425,14 @@ function EditScopeModal({ data, onClose }: { data: Detail; onClose: () => void }
         priority,
         accessNotes,
         requiredOnSubmit: req,
-        // "" clears the window; only sent when it changed so the audit trail stays clean.
-        ...(windowText.trim() !== (wo.window ?? "") ? { window: windowText.trim() } : {}),
+        // Only sent when it changed so the audit trail stays clean.
+        ...(windowValue
+          ? windowValue.start !== savedWindow?.start || windowValue.end !== savedWindow?.end
+            ? { windowStart: windowValue.start, windowEnd: windowValue.end, fallbackTimeZone: browserTimeZone() }
+            : {}
+          : windowCleared
+            ? { clearWindow: true }
+            : {}),
         ...(due !== originalDue
           ? due
             ? { dueDate: new Date(`${due}T12:00:00`).getTime() }
@@ -423,7 +442,7 @@ function EditScopeModal({ data, onClose }: { data: Detail; onClose: () => void }
       toast("Scope updated");
       onClose();
     } catch (err) {
-      toast(errorText(err), "error");
+      toast(errorMessage(err), "error");
       setBusy(false);
     }
   };
@@ -463,7 +482,16 @@ function EditScopeModal({ data, onClose }: { data: Detail; onClose: () => void }
       </div>
       <div className="space-y-1.5">
         <span className="text-sm font-medium">Time window</span>
-        <WindowField value={windowText} onChange={setWindowText} />
+        <WindowPicker
+          variant="input"
+          value={windowValue}
+          legacyLabel={windowCleared ? null : wo.window}
+          onChange={(next) => {
+            setWindowValue(next);
+            setWindowCleared(next === null);
+          }}
+        />
+        <TenantPreferredTime value={preferredTime} />
       </div>
       <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
         {(["photos", "hours", "receipts", "notes"] as const).map((k) => (

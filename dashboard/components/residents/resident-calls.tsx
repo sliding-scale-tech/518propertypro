@@ -6,8 +6,7 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { cleanError } from "@/components/maintenance/shared";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import { ConversationTranscript } from "@/components/transcript";
 import {
   ActBox,
@@ -280,7 +279,7 @@ export function ResidentCalls() {
                 await updateIssue({ issueId: current.issueId, ...patch });
                 toast("Issue updated");
               } catch (err) {
-                toast(cleanError(err), "error");
+                toast(errorMessage(err), "error");
               }
             }}
             onDelete={async () => {
@@ -290,7 +289,7 @@ export function ResidentCalls() {
                 setSelected(null);
                 toast("Issue deleted");
               } catch (err) {
-                toast(cleanError(err), "error");
+                toast(errorMessage(err), "error");
               }
             }}
           />

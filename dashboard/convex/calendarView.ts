@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { action, internalQuery } from "./_generated/server";
@@ -61,11 +61,11 @@ async function loadRange(
   const isSelf = userId === me.userId;
   // Checked here, server-side. The page only offers the member picker to admins, but that is
   // a courtesy — this is the boundary that stops a member reading a teammate's calendar.
-  if (!isSelf && !isAdminView(me)) throw new Error("You don't have access to that.");
-  if (!sched.isDateKey(args.rangeStart)) throw new Error("rangeStart must be a YYYY-MM-DD date.");
+  if (!isSelf && !isAdminView(me)) throw new ConvexError("You don't have access to that.");
+  if (!sched.isDateKey(args.rangeStart)) throw new ConvexError("Pick a valid start date for the calendar.");
 
   const target = await ctx.runQuery(internal.calendarView.target, { orgId: me.orgId, userId });
-  if (!target) throw new Error("That person is not on your team.");
+  if (!target) throw new ConvexError("That person is not on your team.");
 
   const timeZone = target.timeZone ?? (sched.isValidTimeZone(args.fallbackTimeZone) ? args.fallbackTimeZone : "UTC");
   const from = sched.startOfLocalDay(args.rangeStart, timeZone);
@@ -145,7 +145,7 @@ export const month = action({
     fallbackTimeZone: v.string(),
   },
   handler: (ctx, args): Promise<WeekView> => {
-    if (!/^\d{4}-\d{2}$/.test(args.month)) throw new Error("month must be YYYY-MM.");
+    if (!/^\d{4}-\d{2}$/.test(args.month)) throw new ConvexError("Pick a valid month.");
     const { start, days } = sched.monthGridRange(args.month);
     return loadRange(ctx, { rangeStart: start, rangeDays: days, userId: args.userId, fallbackTimeZone: args.fallbackTimeZone });
   },

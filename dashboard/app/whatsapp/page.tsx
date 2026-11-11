@@ -26,7 +26,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import QRCode from "react-qr-code";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import { Btn, Modal } from "@/components/ui";
 import { severityBand, type SeverityBand } from "@/convex/severity";
 import { RequireView } from "@/components/require-view";
@@ -105,7 +105,7 @@ function WhatsAppPageInner() {
       if (r.status === "WORKING") setShowQr(false);
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not reach WhatsApp.");
+      setError(errorMessage(err, "Could not reach WhatsApp."));
     }
   }, [statusAndQr]);
 
@@ -133,7 +133,7 @@ function WhatsAppPageInner() {
       setShowQr(true);
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not start the session.");
+      setError(errorMessage(err, "Could not start the session."));
     } finally {
       setBusy(false);
     }

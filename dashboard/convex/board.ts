@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import { mutation, query } from "./_generated/server";
 import type { QueryCtx } from "./_generated/server";
@@ -34,6 +34,7 @@ import {
 } from "./workOrders";
 import { writeAudit } from "./audit";
 import { addMonths, localDateKey, monthKeyOf, startOfLocalDay } from "./tourSchedule";
+import { tenantPreferredTimeText } from "./workOrderWindow";
 
 /**
  * The unified Work orders board: one board, two records. A maintenance request and a work order
@@ -1034,11 +1035,14 @@ export const detail = query({
         firstNoticed: req.firstNoticed ?? null,
         pets: req.pets ?? null,
         preferredAccessTimes: req.preferredAccessTimes ?? null,
+        tenantPreferredTime: tenantPreferredTimeText(req.preferredAccessTimes) ?? null,
         answers: req.answers,
         nameMatchesResident: req.nameMatchesResident ?? null,
         conversationId: req.conversationId ?? null,
         inExceptionQueue: req.inExceptionQueue,
         window: null as string | null,
+        windowStart: null as number | null,
+        windowEnd: null as number | null,
         dueDate: null as number | null,
         technician: null as { userId: Id<"users">; name: string } | null,
         assetManager: await person(req.assignedAssetManagerUserId),
@@ -1167,6 +1171,10 @@ export const detail = query({
       severityScore: linked?.severityScore ?? null,
       priorityReason: linked?.severityReason ?? null,
       window: wo.window ?? null,
+      windowStart: wo.windowStart ?? null,
+      windowEnd: wo.windowEnd ?? null,
+      // The work order's own copy; a work order older than that field reads its request.
+      tenantPreferredTime: tenantPreferredTimeText(wo.tenantPreferredTime ?? linked?.preferredAccessTimes) ?? null,
       dueDate: wo.dueDate ?? null,
       technician: await person(wo.technicianUserId),
       assetManager: await person(unit.assetManagerUserId),
@@ -1212,14 +1220,14 @@ export const addComment = mutation({
   args: { kind: kindValidator, id: v.string(), note: v.string() },
   handler: async (ctx, args): Promise<void> => {
     const org = await requireOrg(ctx);
-    if (!boardViewOf(org)) throw new Error("You don't have access to that.");
+    if (!boardViewOf(org)) throw new ConvexError("You don't have access to that.");
     if (args.kind === "request") {
       const id = ctx.db.normalizeId("maintenanceRequests", args.id);
-      if (!id) throw new Error("Request not found.");
+      if (!id) throw new ConvexError("Request not found.");
       await addRequestNote(ctx, id, args.note, MAX_BOARD_NOTE);
     } else {
       const id = ctx.db.normalizeId("workOrders", args.id);
-      if (!id) throw new Error("Work order not found.");
+      if (!id) throw new ConvexError("Work order not found.");
       await addWorkOrderNote(ctx, id, args.note, MAX_BOARD_NOTE);
     }
   },
@@ -1230,14 +1238,14 @@ export const generateUploadUrl = mutation({
   args: { kind: kindValidator, id: v.string(), receipt: v.optional(v.boolean()) },
   handler: async (ctx, args): Promise<string> => {
     const org = await requireOrg(ctx);
-    if (!boardViewOf(org)) throw new Error("You don't have access to that.");
+    if (!boardViewOf(org)) throw new ConvexError("You don't have access to that.");
     if (args.kind === "request") {
       const id = ctx.db.normalizeId("maintenanceRequests", args.id);
-      if (!id) throw new Error("Request not found.");
+      if (!id) throw new ConvexError("Request not found.");
       await attachableRequest(ctx, id);
     } else {
       const id = ctx.db.normalizeId("workOrders", args.id);
-      if (!id) throw new Error("Work order not found.");
+      if (!id) throw new ConvexError("Work order not found.");
       await attachableJob(ctx, id, { receipt: args.receipt === true });
     }
     return await ctx.storage.generateUploadUrl();
@@ -1254,10 +1262,10 @@ export const attachMedia = mutation({
   args: { kind: kindValidator, id: v.string(), storageId: v.id("_storage"), receipt: v.optional(v.boolean()) },
   handler: async (ctx, args): Promise<{ ok: true; id: string } | { ok: false; error: string }> => {
     const org = await requireOrg(ctx);
-    if (!boardViewOf(org)) throw new Error("You don't have access to that.");
+    if (!boardViewOf(org)) throw new ConvexError("You don't have access to that.");
     if (args.kind === "request") {
       const id = ctx.db.normalizeId("maintenanceRequests", args.id);
-      if (!id) throw new Error("Request not found.");
+      if (!id) throw new ConvexError("Request not found.");
       const res = await attachRequestMedia(ctx, id, args.storageId);
       if (!res.ok) return res;
       // Remember who uploaded it so the unit's AM can later remove their own mistake.
@@ -1265,7 +1273,7 @@ export const attachMedia = mutation({
       return { ok: true, id: res.mediaId };
     }
     const id = ctx.db.normalizeId("workOrders", args.id);
-    if (!id) throw new Error("Work order not found.");
+    if (!id) throw new ConvexError("Work order not found.");
     // Authorize before touching storage metadata so an out-of-scope caller learns nothing about the file.
     await attachableJob(ctx, id, { receipt: args.receipt === true });
     const meta = await ctx.storage.getMetadata(args.storageId);
@@ -1288,9 +1296,9 @@ export const removeMedia = mutation({
   args: { kind: kindValidator, id: v.string(), mediaId: v.string() },
   handler: async (ctx, args): Promise<{ ok: true }> => {
     const org = await requireOrg(ctx);
-    if (!boardViewOf(org)) throw new Error("You don't have access to that.");
-    const notFound = () => new Error("Photo not found.");
-    const denied = () => new Error("You can't remove this photo.");
+    if (!boardViewOf(org)) throw new ConvexError("You don't have access to that.");
+    const notFound = () => new ConvexError("Photo not found.");
+    const denied = () => new ConvexError("You can't remove this photo.");
 
     const removeRequestMedia = async (req: Doc<"maintenanceRequests">, m: Doc<"maintenanceMedia">, scope: AmScope) => {
       if (m.requestId !== req._id || m.orgId !== org.orgId) throw notFound();
@@ -1319,9 +1327,9 @@ export const removeMedia = mutation({
     }
 
     const id = ctx.db.normalizeId("workOrders", args.id);
-    if (!id) throw new Error("Work order not found.");
+    if (!id) throw new ConvexError("Work order not found.");
     const found = await readableWorkOrder(ctx, org, id);
-    if (!found) throw new Error("Work order not found.");
+    if (!found) throw new ConvexError("Work order not found.");
     const { wo } = found;
     const fileId = ctx.db.normalizeId("workOrderFiles", args.mediaId);
     if (fileId) {

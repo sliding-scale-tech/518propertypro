@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { paginationOptsValidator } from "convex/server";
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
@@ -10,6 +10,8 @@ import { amScope, canSeeUnit } from "./amScope";
 import type { QueryCtx, MutationCtx } from "./_generated/server";
 import type { Doc } from "./_generated/dataModel";
 import { writeAudit } from "./audit";
+import { stripAudioTags } from "./sanitize";
+import { flagUnverifiedTransfer } from "./ownerRouting";
 
 // Disabled: the 15-min/month free-tier cap no longer applies now that ElevenLabs is upgraded.
 // Usage is still tracked below (secondsUsed) for visibility; it just isn't enforced as a limit
@@ -251,10 +253,15 @@ export const transcript = query({
     const conv = await ctx.db.get(args.conversationId);
     if (!conv) return [];
     if (!(await canReadConversation(ctx, conv))) return [];
-    return ctx.db
+    const lines = await ctx.db
       .query("messages")
       .withIndex("by_conversation", (q) => q.eq("conversationId", args.conversationId))
       .collect();
+    // Every transcript view reads this, and rows from before tags were stripped on write still have them.
+    return lines.flatMap((line) => {
+      const text = line.role === "agent" ? stripAudioTags(line.text) : line.text;
+      return text ? [{ ...line, text }] : [];
+    });
   },
 });
 
@@ -366,7 +373,7 @@ export const attachElevenLabsId = mutation({
   },
   handler: async (ctx, args) => {
     const conv = await ctx.db.get(args.conversationId);
-    if (!conv || !(await canWriteConversation(ctx, conv))) throw new Error("Call not found.");
+    if (!conv || !(await canWriteConversation(ctx, conv))) throw new ConvexError("Call not found.");
     // Set once: a later call must not re-point a conversation at another ElevenLabs id.
     if (conv.elevenLabsConversationId) return;
     await ctx.db.patch(args.conversationId, {
@@ -389,7 +396,9 @@ export const appendMessage = mutation({
   },
   handler: async (ctx, args) => {
     const conv = await ctx.db.get(args.conversationId);
-    if (!conv || !(await canWriteConversation(ctx, conv))) throw new Error("Call not found.");
+    if (!conv || !(await canWriteConversation(ctx, conv))) throw new ConvexError("Call not found.");
+    const text = args.role === "agent" ? stripAudioTags(args.text) : args.text;
+    if (!text) return null;
     const existing = await ctx.db
       .query("messages")
       .withIndex("by_conversation", (q) => q.eq("conversationId", args.conversationId))
@@ -397,14 +406,14 @@ export const appendMessage = mutation({
 
     const lastOfRole = [...existing].reverse().find((m) => m.role === args.role);
     if (lastOfRole && !lastOfRole.isFinal) {
-      await ctx.db.patch(lastOfRole._id, { text: args.text, isFinal: args.isFinal });
+      await ctx.db.patch(lastOfRole._id, { text, isFinal: args.isFinal });
       return lastOfRole._id;
     }
 
     return ctx.db.insert("messages", {
       conversationId: args.conversationId,
       role: args.role,
-      text: args.text,
+      text,
       isFinal: args.isFinal,
       at: Date.now(),
     });
@@ -703,11 +712,12 @@ export const ingestFromWebhook = internalMutation({
         .collect();
       if (existingMessages.length === 0) {
         for (const line of transcript) {
-          if (!line.message) continue;
+          const text = line.role === "user" ? line.message : stripAudioTags(line.message ?? "");
+          if (!text) continue;
           await ctx.db.insert("messages", {
             conversationId: conv._id,
             role: line.role === "user" ? "user" : "agent",
-            text: line.message,
+            text,
             isFinal: true,
             at: startedAt + (line.time_in_call_secs ?? 0) * 1000,
           });
@@ -762,6 +772,25 @@ export const ingestFromWebhook = internalMutation({
       if (request.conversationId) continue;
       if (conv.orgId && request.orgId !== conv.orgId) continue;
       await ctx.db.patch(request._id, { conversationId: conv._id, updatedAt: Date.now() });
+    }
+
+    // Owner call menu safety net: a transfer to a staff phone on a call with no verified owner. The
+    // transfer destination is only ever set for a verified owner, so this should never fire; if it
+    // does, admins see it on the call's audit trail and the team's callback list.
+    const transcriptTools = Array.isArray(data?.transcript)
+      ? (data.transcript as Array<{ tool_calls?: Array<{ tool_name?: string; name?: string }> }>).flatMap((t) => t?.tool_calls ?? [])
+      : [];
+    const transferred =
+      !!otlp?.transferred ||
+      /transfer/i.test(String(otlp?.terminationReason ?? data?.metadata?.termination_reason ?? "")) ||
+      transcriptTools.some((c) => c?.tool_name === "transfer_to_number" || c?.name === "transfer_to_number");
+    if (transferred && conv.orgId) {
+      await flagUnverifiedTransfer(ctx, {
+        orgId: conv.orgId,
+        elevenLabsConversationId: conversationId,
+        conversationId: conv._id,
+        callerNumber,
+      });
     }
 
     // Only set intent/outcome/summary if a tool call during the call didn't already set them
@@ -912,7 +941,7 @@ export const markFollowedUp = mutation({
     const org = await requireAdminView(ctx);
     const conversation = await ctx.db.get(args.conversationId);
     // Same answer for missing and another team's call.
-    if (!conversation || conversation.orgId !== org.orgId) throw new Error("Call not found.");
+    if (!conversation || conversation.orgId !== org.orgId) throw new ConvexError("Call not found.");
     if (conversation.followedUpAt) return;
     await ctx.db.patch(conversation._id, { followedUpAt: Date.now(), followedUpBy: org.user._id });
     await writeAudit(ctx, {

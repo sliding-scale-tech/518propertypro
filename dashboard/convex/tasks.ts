@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { mutation, query } from "./_generated/server";
@@ -61,7 +61,7 @@ async function canWriteTask(ctx: TaskCtx, org: OrgContext, scope: AmScope, task:
 
 async function ownedTask(ctx: MutationCtx, taskId: Id<"tasks">, org: OrgContext): Promise<Doc<"tasks">> {
   const task = await ctx.db.get(taskId);
-  if (!task || !(await canWriteTask(ctx, org, await scopeOf(ctx, org), task))) throw new Error("Task not found.");
+  if (!task || !(await canWriteTask(ctx, org, await scopeOf(ctx, org), task))) throw new ConvexError("Task not found.");
   return task;
 }
 
@@ -84,7 +84,7 @@ async function checkLinks(
       .query("memberships")
       .withIndex("by_user", (q) => q.eq("userId", links.assigneeUserId!))
       .first();
-    if (!membership || membership.orgId !== org.orgId) throw new Error("Assignee not found.");
+    if (!membership || membership.orgId !== org.orgId) throw new ConvexError("Assignee not found.");
   }
   // Admin view may link anything in the team; everyone else only records in their own scope.
   const admin = viewFor(org.isAdmin, org.jobRoles) === "admin";
@@ -92,7 +92,7 @@ async function checkLinks(
   if (links.unitId) {
     const unit = await ctx.db.get(links.unitId);
     if (!unit || unit.orgId !== org.orgId || (!admin && !canSeeUnit(scope, unit._id))) {
-      throw new Error("Unit not found.");
+      throw new ConvexError("Unit not found.");
     }
   }
   if (links.requestId) {
@@ -102,7 +102,7 @@ async function checkLinks(
       request.orgId !== org.orgId ||
       (!admin && request.assignedAssetManagerUserId !== org.user._id && !canSeeUnit(scope, request.unitId))
     ) {
-      throw new Error("Request not found.");
+      throw new ConvexError("Request not found.");
     }
   }
   if (links.workOrderId) {
@@ -112,7 +112,7 @@ async function checkLinks(
       wo.orgId !== org.orgId ||
       (!admin && wo.technicianUserId !== org.user._id && !canSeeUnit(scope, wo.unitId))
     ) {
-      throw new Error("Work order not found.");
+      throw new ConvexError("Work order not found.");
     }
   }
 }
@@ -128,7 +128,7 @@ function isAdminView(org: OrgContext): boolean {
 function checkAssigneeRule(org: OrgContext, assigneeUserId: Id<"users"> | undefined): void {
   if (isAdminView(org)) return;
   if (assigneeUserId !== undefined && assigneeUserId !== org.user._id) {
-    throw new Error("You can only assign tasks to yourself.");
+    throw new ConvexError("You can only assign tasks to yourself.");
   }
 }
 
@@ -186,7 +186,7 @@ export const create = mutation({
     checkAssigneeRule(org, args.assigneeUserId);
     await checkLinks(ctx, org, args);
     const title = args.title.trim();
-    if (!title) throw new Error("Task title is required.");
+    if (!title) throw new ConvexError("Task title is required.");
 
     const now = Date.now();
     const taskId = await ctx.db.insert("tasks", {
@@ -275,7 +275,7 @@ export const update = mutation({
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
     if (args.title !== undefined) {
       const title = args.title.trim();
-      if (!title) throw new Error("Task title is required.");
+      if (!title) throw new ConvexError("Task title is required.");
       patch.title = title;
     }
     if (args.description !== undefined) patch.description = args.description.trim() || undefined;
@@ -286,7 +286,7 @@ export const update = mutation({
     else if (args.dueDate !== undefined) patch.dueDate = args.dueDate;
     // Non-admins can't unassign either: that would reassign away from themselves.
     if (args.clearAssignee) {
-      if (!isAdminView(org)) throw new Error("Only an admin can change who a task is assigned to.");
+      if (!isAdminView(org)) throw new ConvexError("Only an admin can change who a task is assigned to.");
       patch.assigneeUserId = undefined;
     }
     else if (args.assigneeUserId !== undefined) patch.assigneeUserId = args.assigneeUserId;
@@ -333,7 +333,7 @@ export const attach = mutation({
     if (args.taskId) await ownedTask(ctx, args.taskId, org);
     // Must be a fresh, unclaimed upload; never delete or adopt a file another record owns.
     const unusable = await checkStorageUsable(ctx, orgId, args.storageId);
-    if (unusable) throw new Error(unusable);
+    if (unusable) throw new ConvexError(unusable);
 
     return ctx.db.insert("taskAttachments", {
       taskId: args.taskId,
@@ -381,12 +381,12 @@ export const removeAttachment = mutation({
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
     const attachment = await ctx.db.get(args.attachmentId);
-    if (!attachment || attachment.orgId !== org.orgId) throw new Error("Attachment not found.");
+    if (!attachment || attachment.orgId !== org.orgId) throw new ConvexError("Attachment not found.");
     // Uploader, or anyone who may write the parent task.
     if (attachment.uploadedByUserId !== org.user._id) {
       const task = attachment.taskId ? await ctx.db.get(attachment.taskId) : null;
       if (!task || !(await canWriteTask(ctx, org, await scopeOf(ctx, org), task))) {
-        throw new Error("Attachment not found.");
+        throw new ConvexError("Attachment not found.");
       }
     }
 

@@ -95,8 +95,8 @@ function PropertyPageInner() {
     if (!property || hydrated) return;
     setName(property.name);
     setUnits(property.units);
-    setPetsAllowed(property.petsAllowed);
-    setMoveInWindowDays(property.moveInWindowDays);
+    setPetsAllowed(property.petsAllowed ?? false);
+    setMoveInWindowDays(property.moveInWindowDays ?? 60);
     setAddress(savedAddress(property));
     setHydrated(true);
   }, [property, hydrated]);
@@ -106,8 +106,8 @@ function PropertyPageInner() {
     if (!property) return;
     setName(property.name);
     setUnits(property.units);
-    setPetsAllowed(property.petsAllowed);
-    setMoveInWindowDays(property.moveInWindowDays);
+    setPetsAllowed(property.petsAllowed ?? false);
+    setMoveInWindowDays(property.moveInWindowDays ?? 60);
     setAddress(savedAddress(property));
   };
 

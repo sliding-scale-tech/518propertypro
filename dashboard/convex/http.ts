@@ -13,12 +13,26 @@ import {
 } from "./qualifyRules";
 import * as waha from "./wahaApi";
 import { isOtlpPayload, parseOtlp } from "./otlp";
-import { realPhone, realValue } from "./sanitize";
+import { isVagueIssue, realPhone, realValue, stripAudioTags } from "./sanitize";
+import { PHOTO_SAY, WAIT_FOR_CALLER, maintenanceLogLines } from "./sarahReplies";
 import { handleClerkWebhook } from "./clerkWebhook";
 import { handleOAuthCallback as handleGoogleOAuthCallback } from "./googleCalendar";
 import type { FunctionReturnType } from "convex/server";
 import { bookTour, cancelTourNow, findTourTimes, rescheduleTour, type IgnoredTour } from "./tours";
 import { formatLocalDateTime, phoneKey, spokenLabel } from "./tourSchedule";
+import { matchCities } from "./unitMatch";
+import { ROOM_SAY } from "./sarahTools";
+import {
+  CALL_SID_RE,
+  OWNER_TRANSFER_DELAY_MS,
+  TRANSFER_MECHANISM,
+  dialAnswered,
+  hangupTwiml,
+  ownerTransferFallbackTwiml,
+  ownerVoicemailThanksTwiml,
+  spokenStaffName,
+  transferAssignmentValues,
+} from "./ownerRoutingLib";
 
 const http = httpRouter();
 
@@ -154,12 +168,19 @@ async function findCallerTour(
 /** One unit type Sarah may offer, summed over the available units of that type. */
 type OfferedUnitType = {
   community: string | null;
+  /** The building's address and city, so Sarah can say where it is (roster import, B3). */
+  address: string | null;
+  city: string | null;
   bedrooms: string;
   rentMin: number | null;
   rentMax: number | null;
   /** Null when we only have the property's per-type summary, which carries no count. */
   count: number | null;
   availableFrom: string | null;
+  /** How the unit must be described (e.g. a room in a shared apartment). Null when none. */
+  leasingFacts: string | null;
+  /** "room" for one room of a shared apartment, null for a whole unit. */
+  rentedAs: "room" | null;
 };
 
 /**
@@ -167,24 +188,44 @@ type OfferedUnitType = {
  * rows in the units table is answered from those; otherwise from the older per-property bedroom
  * summary. A team that has units but none free gets an empty list, never the stale summary.
  */
+type LeasingProperty = {
+  name: string;
+  units: Array<{ bedrooms: string; rentMin: number; rentMax: number; available: boolean }>;
+};
+
 async function offeredUnitTypes(
   ctx: GenericActionCtx<DataModel>,
   orgId: string | undefined,
-  property: { name: string; units: Array<{ bedrooms: string; rentMin: number; rentMax: number; available: boolean }> },
+  property: LeasingProperty,
 ): Promise<OfferedUnitType[]> {
+  return (await offeredWithCities(ctx, orgId, property)).offered;
+}
+
+/** offeredUnitTypes, plus every city the team has a building in (from the data, never a fixed list). */
+async function offeredWithCities(
+  ctx: GenericActionCtx<DataModel>,
+  orgId: string | undefined,
+  property: LeasingProperty,
+): Promise<{ offered: OfferedUnitType[]; cities: string[] }> {
   if (orgId) {
     const fromUnits = await ctx.runQuery(internal.sarahTools.availableUnits, { orgId });
     if (fromUnits.hasUnits) {
       const groups = new Map<string, OfferedUnitType>();
       for (const u of fromUnits.available) {
-        const key = `${u.community ?? ""}|${u.bedrooms}`;
+        // Units with their own leasing facts, or rented as a room, are never merged into a plain
+        // bedroom group, so the facts always reach Sarah with the right rent.
+        const key = `${u.community ?? ""}|${u.bedrooms}|${u.leasingFacts ?? ""}|${u.rentedAs ?? ""}`;
         const g = groups.get(key) ?? {
           community: u.community,
+          address: u.address,
+          city: u.city,
           bedrooms: u.bedrooms,
           rentMin: null,
           rentMax: null,
           count: 0,
           availableFrom: null,
+          leasingFacts: u.leasingFacts,
+          rentedAs: u.rentedAs,
         };
         g.count = (g.count ?? 0) + 1;
         if (u.rent !== null) {
@@ -197,29 +238,173 @@ async function offeredUnitTypes(
         }
         groups.set(key, g);
       }
-      return [...groups.values()];
+      return { offered: [...groups.values()], cities: fromUnits.cities };
     }
   }
-  return property.units
-    .filter((u) => u.available)
-    .map((u) => ({
-      community: property.name,
-      bedrooms: u.bedrooms,
-      rentMin: u.rentMin,
-      rentMax: u.rentMax,
-      count: null,
-      availableFrom: null,
-    }));
+  return {
+    offered: property.units
+      .filter((u) => u.available)
+      .map((u) => ({
+        community: property.name,
+        address: null,
+        city: null,
+        bedrooms: u.bedrooms,
+        rentMin: u.rentMin,
+        rentMax: u.rentMax,
+        count: null,
+        availableFrom: null,
+        leasingFacts: null,
+        rentedAs: null,
+      })),
+    cities: [],
+  };
+}
+
+/**
+ * How a caller's city or area narrowed what Sarah may offer:
+ *  - not_given / no_preference: nothing narrowed (the behaviour before cities existed).
+ *  - matched: only units in the matched city or cities.
+ *  - none_available: the city is one of ours but nothing there is open; nothing may be offered.
+ *  - unknown_city: we have no building there; nothing may be offered.
+ *  - no_city_data: no building has a city stored yet, so nothing can be narrowed.
+ */
+type CityStatus = "not_given" | "no_preference" | "matched" | "none_available" | "unknown_city" | "no_city_data";
+
+type CityFilter = {
+  status: CityStatus;
+  requested: string | null;
+  /** City labels exactly as stored, best match first. */
+  matched: string[];
+  /** What may be offered after the filter. */
+  offered: OfferedUnitType[];
+  /** Cities with at least one open unit, most openings first (city names and counts only). */
+  citiesWithAvailability: Array<{ city: string; units_available: number }>;
+  say: string | null;
+  message: string | null;
+};
+
+/** Spoken list: "Albany", "Albany and Troy", "Albany, Schenectady and Troy". */
+function sayList(items: string[], last = "and"): string {
+  if (items.length <= 1) return items.join("");
+  return `${items.slice(0, -1).join(", ")} ${last} ${items[items.length - 1]}`;
+}
+
+/** An area the caller named that we do not have, safe to read aloud: letters, spaces, hyphens, apostrophes. */
+function spokenPlace(s: string): string | null {
+  const t = s.replace(/[^A-Za-z' -]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 40).trim();
+  return t || null;
+}
+
+/** At most this many other cities in one spoken sentence; the rest stay in cities_with_availability. */
+const MAX_CITY_OPTIONS = 3;
+
+const NO_DISTANCE_RULE =
+  "Name only cities from cities_with_availability, at most three, most openings first. Never call " +
+  "them nearby or close, and never say how far away anything is: there is no distance information. " +
+  "If the caller picks one, call check_availability again with that city.";
+
+function applyCity(offered: OfferedUnitType[], cities: string[], spoken: unknown): CityFilter {
+  const requested = optString(spoken, 80) ?? null;
+  const counts = new Map<string, number>();
+  for (const t of offered) if (t.city) counts.set(t.city, (counts.get(t.city) ?? 0) + (t.count ?? 1));
+  const withAvailability = [...counts.entries()]
+    .map(([city, n]) => ({ city, units_available: n }))
+    .sort((a, b) => b.units_available - a.units_available || a.city.localeCompare(b.city));
+  const base = { requested, matched: [], offered, citiesWithAvailability: withAvailability, say: null, message: null };
+
+  if (!requested) return { ...base, status: "not_given" };
+  if (cities.length === 0) {
+    return {
+      ...base,
+      status: "no_city_data",
+      message:
+        "No city is stored for these buildings yet, so this result is not narrowed to the caller's area. " +
+        "Only say which city a unit is in when its address shows it.",
+    };
+  }
+  const m = matchCities(requested, cities);
+  if (m.status === "not_given") return { ...base, status: "not_given" };
+  if (m.status === "no_preference") return { ...base, status: "no_preference" };
+
+  const matched = m.status === "matched" ? m.cities : [];
+  const wanted = new Set(matched.map((c) => c.toLowerCase()));
+  const inArea = offered.filter((t) => t.city !== null && wanted.has(t.city.toLowerCase()));
+  if (m.status === "matched" && inArea.length > 0) {
+    return { ...base, status: "matched", matched, offered: inArea };
+  }
+
+  const others = withAvailability.filter((c) => !wanted.has(c.city.toLowerCase())).map((c) => c.city);
+  const options = sayList(others.slice(0, MAX_CITY_OPTIONS));
+  if (m.status === "matched") {
+    const where = sayList(matched, "or");
+    return {
+      ...base,
+      status: "none_available",
+      matched,
+      offered: [],
+      say: others.length
+        ? `I don't have anything open in ${where} right now. We do have openings in ${options}. Would any of those work?`
+        : `I don't have anything open in ${where} right now. I can note your interest so the team can follow up.`,
+      message: `Nothing is available in ${where} right now, so all_units is empty: do not offer any unit. ${NO_DISTANCE_RULE}`,
+    };
+  }
+  const place = spokenPlace(requested) ?? "that area";
+  return {
+    ...base,
+    status: "unknown_city",
+    offered: [],
+    say: others.length
+      ? `We don't currently have properties in ${place}. We do have openings in ${options}. Would any of those work?`
+      : `We don't currently have properties in ${place}. I can note your interest so the team can follow up.`,
+    message: `There are no buildings in the area they named, so all_units is empty: do not offer any unit. ${NO_DISTANCE_RULE}`,
+  };
 }
 
 function offeredForAgent(t: OfferedUnitType) {
   return {
     community: t.community,
+    address: t.address,
+    city: t.city,
     bedrooms: t.bedrooms,
     rent_min: t.rentMin,
     rent_max: t.rentMax,
     units_available: t.count,
     available_from: t.availableFrom,
+    // When present, describe the unit exactly this way (it overrides bedrooms / rent wording).
+    leasing_facts: t.leasingFacts ?? (t.rentedAs === "room" ? ROOM_SAY : null),
+    rented_as: t.rentedAs,
+  };
+}
+
+const LEASING_FACTS_RULE =
+  "When a unit has leasing_facts, describe it exactly as leasing_facts says. A unit with " +
+  "bedrooms 'room' is one room in a shared apartment: never call it an apartment of that size.";
+
+/**
+ * The single building's leasing profile, or nulls when it does not apply. A team with several
+ * buildings has no one "property" for the call (each offered unit carries its own community and
+ * address), and pets / move-in window are only stated when someone actually entered them: the
+ * imported rosters give neither, so Sarah must not invent a policy.
+ */
+async function leasingProfile(
+  ctx: GenericActionCtx<DataModel>,
+  orgId: string | undefined,
+  property: { name: string; petsAllowed?: boolean; moveInWindowDays?: number; address?: { formatted: string } },
+) {
+  const count = orgId ? await ctx.runQuery(internal.sarahTools.orgPropertyCount, { orgId }) : 1;
+  const single = count <= 1;
+  const petsAllowed = single ? (property.petsAllowed ?? null) : null;
+  const moveInWindowDays = single ? (property.moveInWindowDays ?? null) : null;
+  return {
+    propertyName: single ? property.name : null,
+    propertyAddress: single ? (property.address?.formatted ?? null) : null,
+    petsAllowed,
+    moveInWindowDays,
+    policyNote:
+      petsAllowed === null || moveInWindowDays === null
+        ? "pets_allowed or move_in_window_days is null: that policy has not been provided. Do not " +
+          "state or guess a pet policy or move-in window; say the team will confirm it."
+        : null,
   };
 }
 
@@ -282,7 +467,7 @@ function parseAnswers(raw: unknown): Array<{ key: string; question: string; valu
  */
 function optString(value: unknown, max = 500): string | undefined {
   return typeof value === "string"
-    ? realValue(value.slice(0, max).replace(/[\u0000-\u001f\u007f]+/g, " "))
+    ? realValue(stripAudioTags(value.slice(0, max).replace(/[\u0000-\u001f\u007f]+/g, " ")))
     : undefined;
 }
 
@@ -359,15 +544,14 @@ async function resolveCallUnit(
   },
 ): Promise<{ unitId: Id<"units">; unitLabel: string } | null> {
   const spokenKey = input.spokenUnit ? normalizeUnitKey(input.spokenUnit) : "";
-  if (spokenKey) {
-    const propertyId = await ctx.runQuery(internal.sarahTools.matchPropertyId, {
-      orgId,
-      spokenAddress: input.spokenAddress,
-    });
-    if (propertyId) {
-      const found = await ctx.runQuery(internal.residents.unitInProperty, { orgId, propertyId, unitKey: spokenKey });
-      if (found) return { unitId: found.unitId, unitLabel: found.unitLabel };
-    }
+  const propertyId = await ctx.runQuery(internal.sarahTools.matchPropertyId, {
+    orgId,
+    spokenAddress: input.spokenAddress,
+  });
+  if (propertyId) {
+    // Same rule as find_unit: an exact reading of the unit, or the only unit of a house.
+    const found = await ctx.runQuery(internal.sarahTools.exactUnit, { orgId, propertyId, spokenUnit: input.spokenUnit });
+    if (found) return found;
   }
   if (input.callerId) {
     // Caller ID must point at exactly one unit and must not contradict a unit the caller named.
@@ -411,32 +595,142 @@ http.route({
   path: "/tools/check-availability",
   method: "POST",
   handler: toolAction(async (ctx, request) => {
-    const body = await request.json();
-    const bedrooms: string | undefined = body.bedrooms;
-    const conversationId: string | undefined = body.conversation_id;
+    const body = await readBody(request);
+    const bedrooms = typeof body.bedrooms === "string" ? body.bedrooms : undefined;
+    const conversationId = typeof body.conversation_id === "string" ? body.conversation_id : undefined;
+    const agentId = typeof body.agent_id === "string" ? body.agent_id : undefined;
 
-    const orgId = await resolveBookingOrg(ctx, conversationId, body.agent_id);
+    const orgId = await resolveBookingOrg(ctx, conversationId, agentId);
     const property = await ctx.runQuery(internal.properties.currentInternal, { orgId });
     // Only units that are open right now. An unavailable type is simply absent, so there is
     // nothing in the result for Sarah to offer by mistake.
-    const offered = await offeredUnitTypes(ctx, orgId, property);
+    const all = await offeredWithCities(ctx, orgId, property);
+    // The caller's city or area, matched against the cities in the team's own data. With none
+    // given (or "anywhere") nothing is narrowed, exactly as before.
+    const area = applyCity(all.offered, all.cities, body.city);
+    const offered = area.offered;
     const requested = bedrooms ? offered.filter((t) => t.bedrooms === bedrooms) : [];
+    // currentInternal can return the coded default, which has no address field at all.
+    const profile = await leasingProfile(ctx, orgId, property as typeof property & { address?: { formatted: string } });
+    const inArea = area.status === "matched" ? ` in ${sayList(area.matched, "or")}` : "";
 
     return Response.json({
-      property_name: property.name,
-      // currentInternal can return the coded default, which has no address field at all.
-      property_address: (property as { address?: { formatted: string } }).address?.formatted ?? null,
-      pets_allowed: property.petsAllowed,
-      move_in_window_days: property.moveInWindowDays,
+      property_name: profile.propertyName,
+      property_address: profile.propertyAddress,
+      pets_allowed: profile.petsAllowed,
+      move_in_window_days: profile.moveInWindowDays,
+      ...(profile.policyNote ? { policy_note: profile.policyNote } : {}),
+      leasing_facts_rule: LEASING_FACTS_RULE,
       requested_unit: requested.length > 0 ? { ...offeredForAgent(requested[0]), available: true } : null,
-      ...(bedrooms && requested.length === 0
-        ? {
-            message:
-              "Nothing of that type is available right now. Do not offer it. Offer the closest " +
-              "type in all_units, or offer to note their interest.",
-          }
-        : {}),
+      city_requested: area.requested,
+      city_status: area.status,
+      city_matched: area.matched.length ? sayList(area.matched, "or") : null,
+      matched_cities: area.matched,
+      cities_with_availability: area.citiesWithAvailability,
+      ...(area.say ? { say: area.say } : {}),
+      ...(area.message
+        ? { message: area.message }
+        : bedrooms && requested.length === 0
+          ? {
+              message:
+                `Nothing of that type is available${inArea} right now. Do not offer it. Offer the closest ` +
+                "type in all_units, or offer to note their interest.",
+            }
+          : {}),
       all_units: offered.map((t) => ({ ...offeredForAgent(t), available: true })),
+    });
+  }),
+});
+
+/**
+ * get_unit_details: what a prospect may ask about an AVAILABLE unit (bathrooms, floor, laundry,
+ * heat and who pays for it). Only units with available = true are ever read, and nothing about
+ * residents or owners is returned. The building is matched like find_unit's; a null field means the
+ * roster does not say, and Sarah must not guess it.
+ */
+http.route({
+  path: "/tools/get-unit-details",
+  method: "POST",
+  handler: toolAction(async (ctx, request) => {
+    const body = await readBody(request);
+    const spokenAddress = optString(body.spoken_building, 300);
+    const bedrooms = optString(body.bedrooms, 20)?.toLowerCase();
+    const spokenUnit = optString(body.spoken_unit, 60);
+    const askProperty = {
+      status: "ask_property",
+      units: [] as unknown[],
+      say: "Which building is it, the street address or the name?",
+      message: "No building yet. Ask the say line and wait, then call get_unit_details again with what they say.",
+    };
+    const orgId = await resolveBookingOrg(
+      ctx,
+      typeof body.conversation_id === "string" ? body.conversation_id : undefined,
+      typeof body.agent_id === "string" ? body.agent_id : undefined,
+    );
+    if (!orgId || !spokenAddress) return Response.json(askProperty);
+    const r = await ctx.runQuery(internal.sarahTools.unitDetails, { orgId, spokenAddress, bedrooms, spokenUnit });
+
+    if (r.status === "not_matched") {
+      if (r.addressOptions.length > 0) {
+        return Response.json({
+          status: "needs_property_confirmation",
+          candidates: r.addressOptions,
+          units: [],
+          say: r.addressOptions.length === 1 ? `Did you mean ${r.addressOptions[0]}?` : `Is that ${sayOptions(r.addressOptions)}?`,
+          message:
+            "No exact building match. Ask the say line as one question and let the caller choose; never pick for " +
+            "them. When they confirm one, call get_unit_details again with exactly that address.",
+        });
+      }
+      return Response.json({
+        ...askProperty,
+        say:
+          r.addressOptionCount > 0 || r.addressStatus === "need_street"
+            ? "We have several buildings like that. What's the street number?"
+            : "I couldn't find that building. Could you say the street address again?",
+        message:
+          "No building matched and nothing is close enough to offer. Ask the say line once, then call " +
+          "get_unit_details again. If it still does not match, say the team will follow up. Never read a list of buildings.",
+      });
+    }
+
+    const base = { property_name: r.propertyName, property_address: r.propertyAddress };
+    if (r.status !== "matched") {
+      return Response.json({
+        status: r.status,
+        ...base,
+        units: [],
+        message:
+          r.status === "none_available"
+            ? "Nothing is available in this building right now. Say so, do not give any unit details, and offer to note their interest or check other buildings with check_availability."
+            : "No available unit in this building fits that bedroom count or unit. Say so, do not give any unit details, and offer check_availability or to note their interest.",
+      });
+    }
+    return Response.json({
+      status: "matched",
+      ...base,
+      units_found: r.total,
+      units: r.units.map((u) => ({
+        unit_label: u.unitLabel,
+        unit_type: u.unitType,
+        bedrooms: u.bedrooms,
+        rented_as: u.rentedAs,
+        bathrooms: u.bathrooms,
+        floor: u.floor,
+        laundry: u.laundry,
+        heating_fuel: u.heatingFuel,
+        gas_paid_by: u.gasPaidBy,
+        electric_paid_by: u.electricPaidBy,
+        // Only when certain from the roster; null otherwise.
+        heat_paid_by: u.heatPaidBy,
+        rent: u.rent,
+        available_from: u.availableFrom,
+        leasing_facts: u.leasingFacts,
+      })),
+      message:
+        "Answer only what the caller asked, from these fields. For any field that is null, say you don't have " +
+        "that detail and the team will follow up: never guess or infer it. " + LEASING_FACTS_RULE +
+        (r.total > r.units.length ? " More units match than are listed: ask which unit or bedroom count they mean." : ""),
     });
   }),
 });
@@ -539,8 +833,9 @@ http.route({
           matching.length > 0 || typeof bedrooms !== "string"
             ? "Thanks, I've got that noted. Would you like to set up a tour?"
             : "Thanks, I've noted what you're looking for. I don't see that size open right now, but I can note your interest or look at other sizes.",
-        property_name: property.name,
+        property_name: (await leasingProfile(ctx, orgId, property)).propertyName,
         requested_type_available: matching.length > 0,
+        leasing_facts_rule: LEASING_FACTS_RULE,
         available_units: offered.map(offeredForAgent),
         message:
           "Their answers are recorded and the team will review them. Never tell the caller they do " +
@@ -596,8 +891,9 @@ http.route({
       // Set only for a near miss on budget specifically. The exact real minimum for that unit —
       // ask if they can go up to this number before anything else, never a different figure.
       near_miss_budget_target: qualifies === false && nearMiss ? (nearMissBudgetTarget ?? null) : null,
-      property_name: property.name,
+      property_name: (await leasingProfile(ctx, orgId, property)).propertyName,
       available_units: (await offeredUnitTypes(ctx, orgId, property)).map(offeredForAgent),
+      leasing_facts_rule: LEASING_FACTS_RULE,
     });
   }),
 });
@@ -1185,7 +1481,358 @@ http.route({
       });
     }
 
-    return Response.json({ escalated: true, staff_notified: notified, team_alerted: notified });
+    return Response.json({
+      escalated: true,
+      staff_notified: notified,
+      team_alerted: notified,
+      message: WAIT_FOR_CALLER,
+    });
+  }),
+});
+
+// --- Owner call menu (Sarah Configuration section 13) ------------------------
+//
+// These tools are attached to the agent only while the owner call menu is live (agents.ts), and they
+// read the PUBLISHED config. Verification (property + email on file) and availability are decided
+// here, never by the model. check_staff_availability gives a transfer number only to a call with a
+// verified owner, and that number is what the transfer tool dials (a dynamic variable assigned from
+// its transfer_number). Every response carries transfer_number, "none" unless available, so a
+// refusal also clears the destination. No text is sent to anyone.
+
+/**
+ * verify_owner: is this caller an owner of the property they named? No address (or only a keypad
+ * digit) -> ask_property, nothing counted. Address only -> the property to confirm (or options). Address + email -> verified / not_verified / no_match_take_message. Never
+ * returns or hints at a stored email, and never says which part failed.
+ */
+http.route({
+  path: "/tools/verify-owner",
+  method: "POST",
+  handler: toolAction(async (ctx, request) => {
+    const body = await readBody(request);
+    const conversationId = typeof body.conversation_id === "string" ? body.conversation_id.slice(0, 200) : "";
+    if (!conversationId) return Response.json({ error: "missing conversation_id" }, { status: 400 });
+    const address = optString(body.spoken_property_address, 200) ?? "";
+    const email = optString(body.email, 200);
+    const callerName = optString(body.caller_name, 80);
+    const takeMessage = {
+      verified: false,
+      status: "no_match_take_message",
+      say: "I'm sorry, I can't put you through right now, but I can take a message and have them call you back.",
+      message:
+        "Say the say line. Then take a message: their name, the best callback number (read it back), and what it is " +
+        "about, one question each, skipping what they already said. Then call take_staff_message. Do not transfer.",
+    };
+    const orgId = await resolveBookingOrg(ctx, conversationId, typeof body.agent_id === "string" ? body.agent_id : undefined);
+    if (!orgId) return Response.json(takeMessage);
+    let r: FunctionReturnType<typeof internal.ownerRouting.verifyOwner>;
+    try {
+      r = await ctx.runMutation(internal.ownerRouting.verifyOwner, {
+        orgId,
+        elevenLabsConversationId: conversationId,
+        spokenAddress: address,
+        email,
+        callerName,
+      });
+    } catch (err) {
+      console.error("[verify-owner] failed:", err);
+      return Response.json(takeMessage);
+    }
+    if (r.status === "ask_property") {
+      return Response.json({
+        verified: false,
+        status: "ask_property",
+        say: r.say,
+        message:
+          "No property yet; nothing was checked or counted. Ask the say line and wait. Call verify_owner again only " +
+          "with the address the caller says. Do not read the phone menu yet.",
+      });
+    }
+    if (r.status === "verified") {
+      return Response.json({
+        verified: true,
+        status: "verified",
+        say: r.say,
+        message:
+          "Verified. If they already named who they want, confirm it or call check_staff_availability with them. " +
+          "Otherwise say the say line, then the phone menu word for word, and wait. Do not read any of this out.",
+      });
+    }
+    if (r.status === "needs_property_confirmation") {
+      return Response.json({
+        verified: false,
+        status: "needs_property_confirmation",
+        candidates: r.candidates,
+        say: r.say,
+        message: r.candidates.length
+          ? "Ask the say line as one question and wait. When they confirm an address, use it as spoken_property_address " +
+            "from now on. If you have no email yet, ask for the email address on file next."
+          : "Ask the say line and wait for their answer, then call verify_owner again with it. After two tries without " +
+            "a property, say you can take a message instead and take one with take_staff_message.",
+      });
+    }
+    if (r.status === "not_verified") {
+      return Response.json({
+        verified: false,
+        status: "not_verified",
+        attempts_left: r.attemptsLeft,
+        say: r.say,
+        message:
+          "Say the say line. Read the email back in spoken form, let them correct it, then call verify_owner again " +
+          "with the same address and that email. Never say which part did not match and never hint at any email on file.",
+      });
+    }
+    return Response.json({ ...takeMessage, say: r.say });
+  }),
+});
+
+/** Every refusal resets the transfer destination variables (see ownerRoutingLib.transferAssignmentValues). */
+const NO_TRANSFER = (() => {
+  const t = transferAssignmentValues(null);
+  return { transfer_number: t.number, transfer_digits: t.digits };
+})();
+
+/**
+ * check_staff_availability: can the person a VERIFIED existing owner asked for (a name, a role or a
+ * keypad key) be put through right now? verify_first until verify_owner verified this call. Returns
+ * a real transfer_number only when they can.
+ */
+http.route({
+  path: "/tools/check-staff-availability",
+  method: "POST",
+  handler: toolAction(async (ctx, request) => {
+    const body = await readBody(request);
+    const conversationId = typeof body.conversation_id === "string" ? body.conversation_id.slice(0, 200) : "";
+    if (!conversationId) return Response.json({ error: "missing conversation_id" }, { status: 400 });
+    const takeMessage =
+      "Say the say line. Then take a message: their name, the best callback number (read it back), and what " +
+      "it is about, one question each, skipping what they already said. Then call take_staff_message.";
+    const person = optString(body.person, 120);
+    if (!person) {
+      return Response.json({
+        ...NO_TRANSFER,
+        available: false,
+        status: "not_found",
+        say: "Who would you like to reach?",
+        message: "person is required: who the owner asked for (a name, a role or the key they pressed). Ask, then call this again.",
+      });
+    }
+    const orgId = await resolveBookingOrg(ctx, conversationId, typeof body.agent_id === "string" ? body.agent_id : undefined);
+    if (!orgId) {
+      return Response.json({
+        ...NO_TRANSFER,
+        available: false,
+        status: "menu_off",
+        say: "I can take a message and pass it on to the team.",
+        message: takeMessage,
+      });
+    }
+    let r: FunctionReturnType<typeof internal.ownerRouting.checkStaffAvailability>;
+    try {
+      r = await ctx.runMutation(internal.ownerRouting.checkStaffAvailability, {
+        orgId,
+        elevenLabsConversationId: conversationId,
+        person,
+      });
+    } catch (err) {
+      console.error("[check-staff-availability] failed:", err);
+      return Response.json({
+        ...NO_TRANSFER,
+        available: false,
+        status: "error",
+        say: "I can't put you through right now, but I can take a message and pass it on.",
+        message: takeMessage,
+      });
+    }
+    if (r.status === "verify_first") {
+      return Response.json({
+        ...NO_TRANSFER,
+        available: false,
+        status: "verify_first",
+        say: "",
+        message:
+          "Not verified yet. Do not transfer and do not read the menu. Remember who they asked for. Ask which " +
+          "property they own, then their email on file, and call verify_owner. Call this again only after it returns verified.",
+      });
+    }
+    if (r.status === "available" && r.transferNumber) {
+      // On the conversation too, so the call list shows who the owner was put through to.
+      await ctx.runMutation(internal.conversations.markEscalation, {
+        elevenLabsConversationId: conversationId,
+        reason: "owner_transfer",
+        summary: `Existing owner asked for ${r.label}; Sarah put the call through to their phone (the result is on the call's audit trail).`,
+        escalatedTo: r.label ?? "staff",
+      });
+      if (TRANSFER_MECHANISM === "twilio_dial") {
+        // The number stays on the server: transfer_owner_call re-checks and dials it itself.
+        return Response.json({
+          available: true,
+          status: "available",
+          person: r.label,
+          say: "",
+          message:
+            `Now call transfer_owner_call with person "${person}". Say nothing before it; then say its say line.`,
+        });
+      }
+      return Response.json({
+        available: true,
+        status: "available",
+        person: r.label,
+        transfer_number: r.transferNumber,
+        transfer_digits: r.transferDigits,
+        say: r.say,
+        message:
+          "Now call transfer_to_number with transfer_number exactly as given, client_message set to the say line, " +
+          "and a one-sentence agent_message. Say nothing else, and never say the number.",
+      });
+    }
+    return Response.json({
+      ...NO_TRANSFER,
+      available: false,
+      status: r.status,
+      person: r.label,
+      say: r.say,
+      message:
+        r.status === "not_found"
+          ? "Nobody matched. Say the say line and wait for their answer, then call this again with who they chose."
+          : takeMessage,
+    });
+  }),
+});
+
+/**
+ * transfer_owner_call (ownerRoutingLib.TRANSFER_MECHANISM "twilio_dial"): puts a verified owner
+ * through to the person check_staff_availability returned available for. The gate is decided again
+ * here (beginOwnerTransfer), once per call. The Twilio redirect runs a few seconds later
+ * (ownerTransfer.dial) so Sarah finishes her line first. Anything that stops it leaves the caller with
+ * Sarah, told to take a message.
+ */
+http.route({
+  path: "/tools/transfer-owner-call",
+  method: "POST",
+  handler: toolAction(async (ctx, request) => {
+    const body = await readBody(request);
+    const conversationId = typeof body.conversation_id === "string" ? body.conversation_id.slice(0, 200) : "";
+    if (!conversationId) return Response.json({ error: "missing conversation_id" }, { status: 400 });
+    const takeMessage = {
+      status: "not_connecting",
+      say: "I'm sorry, I can't put you through right now, but I can take a message and have them call you back.",
+      message:
+        "Say the say line. Then take a message: their name, the best callback number (read it back), and what it is " +
+        "about, one question each, skipping what they already said. Then call take_staff_message. Do not end the call.",
+    };
+    const person = optString(body.person, 120);
+    const callSid = typeof body.call_sid === "string" ? body.call_sid.trim() : "";
+    if (!person) {
+      return Response.json({
+        status: "not_connecting",
+        say: "Who would you like to reach?",
+        message: "person is required: the same person you passed to check_staff_availability. Ask, then call check_staff_availability again.",
+      });
+    }
+    // Only a real Twilio phone call can be handed over (not the web widget or a test chat).
+    if (!CALL_SID_RE.test(callSid)) return Response.json(takeMessage);
+    const orgId = await resolveBookingOrg(ctx, conversationId, typeof body.agent_id === "string" ? body.agent_id : undefined);
+    if (!orgId) return Response.json(takeMessage);
+    let r: FunctionReturnType<typeof internal.ownerRouting.beginOwnerTransfer>;
+    try {
+      r = await ctx.runMutation(internal.ownerRouting.beginOwnerTransfer, { orgId, elevenLabsConversationId: conversationId, person });
+    } catch (err) {
+      console.error("[transfer-owner-call] failed:", err);
+      return Response.json(takeMessage);
+    }
+    if (!r.ok) {
+      if (r.reason === "already") {
+        return Response.json({
+          status: "already_connecting",
+          say: "",
+          message:
+            "The transfer was already started. If the caller is still talking to you, it did not go through: say sorry, " +
+            "then take a message with take_staff_message. Do not call transfer_owner_call again.",
+        });
+      }
+      if (r.reason === "verify_first") {
+        return Response.json({
+          status: "verify_first",
+          say: "",
+          message:
+            "Not verified yet. Do not transfer. Ask which property they own, then their email on file, and call verify_owner.",
+        });
+      }
+      return Response.json({ ...takeMessage, say: r.say || takeMessage.say });
+    }
+    try {
+      await ctx.scheduler.runAfter(OWNER_TRANSFER_DELAY_MS, internal.ownerTransfer.dial, {
+        orgId,
+        elevenLabsConversationId: conversationId,
+        callSid,
+        label: r.label,
+        number: r.number,
+        digits: r.digits,
+      });
+    } catch (err) {
+      console.error("[transfer-owner-call] could not schedule the dial:", err);
+      return Response.json(takeMessage);
+    }
+    return Response.json({
+      status: "connecting",
+      person: r.label,
+      say: `I'll put you through to ${spokenStaffName(r.label)} now. Please hold.`,
+      message:
+        "Say the say line, then say nothing more: the call is being handed over. If the caller speaks to you again, " +
+        "the transfer did not go through: say sorry, then take a message with take_staff_message. Never end the call yourself.",
+    });
+  }),
+});
+
+/**
+ * take_staff_message: a message for a staff member the owner could not be put through to (after
+ * hours, no number yet). Saved on the team's callback list, assigned to that person's team member when
+ * the directory names one, and on the audit trail. Upserts per person per call.
+ */
+http.route({
+  path: "/tools/take-staff-message",
+  method: "POST",
+  handler: toolAction(async (ctx, request) => {
+    const body = await readBody(request);
+    const conversationId = typeof body.conversation_id === "string" ? body.conversation_id.slice(0, 200) : "";
+    if (!conversationId) return Response.json({ error: "missing conversation_id" }, { status: 400 });
+    const person = optString(body.person, 120);
+    const message = optString(body.message, 2000);
+    if (!person || !message) {
+      return Response.json({
+        logged: false,
+        error: !person
+          ? "person is required: who the message is for, as the owner said it."
+          : "message is required: one or two plain sentences on what it is about.",
+      });
+    }
+    const orgId = await resolveBookingOrg(ctx, conversationId, typeof body.agent_id === "string" ? body.agent_id : undefined);
+    const notSaved = {
+      logged: false,
+      say: "I'm sorry, I couldn't save your message just now. Please try calling back a little later.",
+      message: "Nothing was saved. Say the say line, and do not say the message was passed on.",
+    };
+    if (!orgId) return Response.json(notSaved);
+    try {
+      const r = await ctx.runMutation(internal.ownerRouting.takeStaffMessage, {
+        orgId,
+        elevenLabsConversationId: conversationId,
+        person,
+        callerName: optString(body.caller_name, 120),
+        callerNumber: realPhone(optString(body.caller_id, 40)),
+        callbackNumber: realPhone(optString(body.callback_phone, 40)),
+        message,
+      });
+      const who = r.label ? r.label.replace(/\([^)]*\)/g, "").trim() : "the team";
+      return Response.json({
+        logged: true,
+        say: `Thanks, I'll pass your message on to ${who}.`,
+        message: `Say the say line once. ${WAIT_FOR_CALLER}`,
+      });
+    } catch (err) {
+      console.error("[take-staff-message] failed:", err);
+      return Response.json(notSaved);
+    }
   }),
 });
 
@@ -1261,7 +1908,7 @@ http.route({
       callerNumber: telephony ?? spoken,
     });
 
-    return Response.json({ logged: true, severity: clamped });
+    return Response.json({ logged: true, severity: clamped, message: WAIT_FOR_CALLER });
   }),
 });
 
@@ -1281,13 +1928,16 @@ http.route({
     const body = await request.json();
     const orgId = await resolveBookingOrg(ctx, body.conversation_id, body.agent_id);
     const phone = realPhone(typeof body.caller_id === "string" ? body.caller_id : undefined);
+    // No question in the say line: it used to ask for the name, which made Sarah re-ask a name the
+    // caller had already given in their first sentence (2026-11-02).
     const noMatch = {
       matched: false,
-      say: "I don't see this number on file. Can I get your name first?",
       message:
-        "No match. Do not guess. Ask the caller's name, then the property name or address, then the " +
-        "unit number, and use find_unit. If that does not match either, take a callback phone or " +
-        "e-mail only to record it and use log_unmatched_caller.",
+        "No match. Do not guess. Ask only for what the caller has not already said in this call: their " +
+        "name, then the property name or address, then the unit number. Once you have the address and " +
+        "unit, call find_unit (right away if they already said them). If that does not match either, " +
+        "take a callback phone or e-mail only to record it and use log_unmatched_caller. " +
+        WAIT_FOR_CALLER,
     };
     if (!orgId || !phone) return Response.json(noMatch);
     const found = await ctx.runQuery(internal.sarahTools.lookupCaller, { orgId, phone });
@@ -1303,14 +1953,31 @@ http.route({
       message:
         "Possible match from caller ID. Confirm it by asking, for example: Am I speaking with " +
         "first_name in unit unit_label? If they say no, ignore this and ask their name and " +
-        "unit. Never say anything else about this resident.",
+        `unit. Never say anything else about this resident. ${WAIT_FOR_CALLER}`,
     });
   }),
 });
 
+/** "86, 182, 184 or 188 Remsen Street" when they share a street, else "A, B or C". */
+function sayOptions(options: string[], joiner: "or" | "and" = "or"): string {
+  const or = (xs: string[]) =>
+    xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} ${joiner} ${xs[xs.length - 1]}`;
+  const parts = options.map((o) => o.match(/^(\d[\d-]*)\s+(.+)$/));
+  const street = parts[0]?.[2];
+  if (options.length > 1 && street && parts.every((m) => m && m[2] === street)) {
+    return `${or(parts.map((m) => m![1]))} ${street}`;
+  }
+  return or(options);
+}
+
 /**
- * Spoken address + unit -> the stored unit label. Answers only whether there is a match: nothing
- * about who lives there, so reading a unit number out loud can't leak a neighbour's details.
+ * Spoken address + unit -> the stored unit label, or OPTIONS for the caller to confirm. Never
+ * anything about who lives anywhere or whether a unit is occupied: only unit labels and building
+ * street addresses, so reading them out cannot leak a neighbour's details.
+ *
+ * Only `matched: true` identifies a unit. Every other answer is a question for the caller:
+ * Sarah reads the options, the caller picks one, and she calls find_unit again with exactly what
+ * they confirmed. If none fits, the call takes the unmatched path (exception queue), never a guess.
  */
 http.route({
   path: "/tools/find-unit",
@@ -1318,41 +1985,248 @@ http.route({
   handler: toolAction(async (ctx, request) => {
     const body = await readBody(request);
     const spokenUnit = optString(body.spoken_unit, 60);
+    const spokenAddress = optString(body.spoken_address, 300);
+    const UNMATCHED =
+      "If the caller says none of these, is unsure, or it still does not match after one more try, " +
+      "ask for a callback phone number (and e-mail if they offer) only to record it, then call " +
+      "log_unmatched_caller and end the call politely. Never pick an option for the caller, never " +
+      "route on a guess, and do not look them up any other way.";
+    const CONFIRM =
+      "Read these options as one question and let the caller choose. Never choose for them. When they " +
+      "confirm one, call find_unit again with exactly that address and unit; only matched true " +
+      "identifies the unit. Never say whether a unit is occupied or who lives anywhere. ";
     const noMatch = {
       matched: false,
-      say: "I couldn't find that unit. Could you repeat the building name or address and the unit number?",
-      message:
-        "No match. Do not guess. Re-check the property and unit with the caller once. If it still does " +
-        "not match, ask for a callback phone number or e-mail only to record it, then call " +
-        "log_unmatched_caller and end the call politely. Do not look them up any other way.",
+      property_matched: false,
+      address_options: [] as string[],
+      say: "I couldn't find that address. Could you tell me the street address of your building again?",
+      message: "No match. Do not guess and do not read out any list. Re-check the address with the caller once. " + UNMATCHED,
     };
     const orgId = await resolveBookingOrg(
       ctx,
       typeof body.conversation_id === "string" ? body.conversation_id : undefined,
       typeof body.agent_id === "string" ? body.agent_id : undefined,
     );
-    if (!orgId || !spokenUnit) return Response.json(noMatch);
-    const spokenAddress = optString(body.spoken_address, 300);
+    if (!orgId) return Response.json(noMatch);
     const found = await ctx.runQuery(internal.sarahTools.findUnit, { orgId, spokenAddress, spokenUnit });
-    if (!found.matched) return Response.json(noMatch);
-    // The building's name is only what the caller's own address already pointed at.
-    const propertyId = await ctx.runQuery(internal.sarahTools.matchPropertyId, { orgId, spokenAddress });
-    const named = propertyId
-      ? await ctx.runQuery(internal.residents.unitInProperty, {
-          orgId,
-          propertyId,
-          unitKey: normalizeUnitKey(spokenUnit),
-        })
-      : null;
+
+    if (found.matched) {
+      return Response.json({
+        matched: true,
+        unit_label: found.unitLabel,
+        property_name: found.propertyName,
+        property_address: found.propertyAddress,
+        confirm_required: true,
+        say: found.unitLabel
+          ? `Thanks, I have unit ${found.unitLabel} at ${found.propertyAddress}. Is that right?`
+          : `Thanks, I have ${found.propertyAddress}. Is that right?`,
+        message:
+          "Unit found. Ask the say line once, then stop: the unit counts only after the caller says yes. " +
+          "From now on pass unit_label as spoken_unit and " +
+          "property_address as spoken_address to the logging tools (for a house with no unit label, " +
+          "leave spoken_unit out). Never say anything about who lives there; you are told nothing " +
+          `about residents here. ${WAIT_FOR_CALLER}`,
+      });
+    }
+
+    if (found.propertyMatched) {
+      const at = found.propertyAddress;
+      const base = {
+        matched: false,
+        property_matched: true,
+        property_address: at,
+        unit_count: found.unitCount,
+        similar_units: found.similar,
+        all_units: found.allUnits,
+      };
+      if (found.needUnit) {
+        return Response.json({
+          ...base,
+          say: "And what's your unit or apartment number?",
+          message: "The building matched but no unit was given. Ask for the unit number, then call find_unit again. Do not read out a list of units.",
+        });
+      }
+      if (found.similar.length > 0) {
+        const one = found.similar.length === 1;
+        return Response.json({
+          ...base,
+          say: one
+            ? `I don't see that unit at ${at}. Did you mean unit ${found.similar[0]}?`
+            : `I don't see that unit at ${at}. Is it unit ${sayOptions(found.similar)}?`,
+          message: "The building matched; the unit did not. These labels are close to what the caller said. " + CONFIRM + UNMATCHED,
+        });
+      }
+      if (found.allUnits.length > 0) {
+        return Response.json({
+          ...base,
+          say: `I don't see that unit at ${at}. The units I have there are ${sayOptions(found.allUnits, "and")}. Is it one of those?`,
+          message: "The building matched; nothing is close to the unit they said, and this building is small, so all its unit labels are listed. " + CONFIRM + UNMATCHED,
+        });
+      }
+      return Response.json({
+        ...base,
+        say: `I don't see that unit at ${at}. Could you say the unit number again, spell it, or tell me which floor you're on?`,
+        message:
+          "The building matched; nothing is close to the unit they said. Do NOT read out a list of units. " +
+          "Ask them to repeat or spell the unit, or say the floor, then call find_unit again once. " + UNMATCHED,
+      });
+    }
+
+    const options = found.addressOptions;
+    if (options.length > 0) {
+      const one = options.length === 1;
+      return Response.json({
+        matched: false,
+        property_matched: false,
+        address_options: options,
+        say:
+          found.addressStatus === "ambiguous"
+            ? `Is that ${sayOptions(options)}?`
+            : one
+              ? `Did you mean ${options[0]}?`
+              : `Did you mean ${sayOptions(options)}?`,
+        message:
+          (found.addressStatus === "ambiguous"
+            ? "Several of our buildings match what they said. "
+            : "No exact match; these building addresses are close to what they said. ") + CONFIRM + UNMATCHED,
+      });
+    }
+    if (found.addressOptionCount > 0) {
+      return Response.json({
+        ...noMatch,
+        say: "We have several buildings on that street. What's the building number?",
+        message: "Too many buildings match to read out. Do not read a list. Ask for the street number, then call find_unit again. " + UNMATCHED,
+      });
+    }
+    if (found.addressStatus === "no_address") {
+      return Response.json({
+        ...noMatch,
+        say: "What's the street address of your building?",
+        message: "No address was given. Ask for the street address, then call find_unit again. Never offer a list of buildings.",
+      });
+    }
+    return Response.json(noMatch);
+  }),
+});
+
+/**
+ * The recorded status of a resident's maintenance request or work order (Sarah Configuration
+ * section 10). User decision 2026-10-31: an EXACT address + unit match (the find_unit rule; a
+ * suggestion or similar label is refused) is enough to hear the status. Verification (caller ID of a
+ * resident of the unit or the number on the request, or a name matching a resident of the unit) is a
+ * soft signal: it only adds the scheduled visit day, date and time. The answer never says whether
+ * the caller was verified or whether a name matched; the result is recorded for staff in the audit
+ * log. Several items: summaries first, Sarah asks which one, then calls again with request_ref.
+ */
+/** A real lookup failure only: the team could not be resolved, the lookup threw, or a status is unmapped. */
+const STATUS_ERROR_SAY =
+  "I can't see the live status of a work order from this call. I'll pass your question to the right team member. They will get back to you.";
+const STATUS_ERROR_MESSAGE =
+  "The lookup failed. Do not guess or say whether there is any request. Say the say line, then log it with " +
+  "log_tenant_issue, call_type work_order_status, with the address, the unit, the issue and when they first " +
+  "reported it in the reason.";
+
+http.route({
+  path: "/tools/check-work-order-status",
+  method: "POST",
+  handler: toolAction(async (ctx, request) => {
+    const body = await readBody(request);
+    const conversationId = typeof body.conversation_id === "string" ? body.conversation_id.slice(0, 200) : "";
+    if (!conversationId) return Response.json({ error: "missing conversation_id" }, { status: 400 });
+    const fallback = { lookup_error: true, say: STATUS_ERROR_SAY, message: STATUS_ERROR_MESSAGE };
+
+    const orgId = await resolveBookingOrg(
+      ctx,
+      conversationId,
+      typeof body.agent_id === "string" ? body.agent_id : undefined,
+    );
+    if (!orgId) return Response.json(fallback);
+    const spokenAddress = optString(body.spoken_address, 300);
+    const spokenUnit = optString(body.spoken_unit, 60);
+    if (!spokenAddress) {
+      return Response.json({
+        unit_identified: false,
+        say: "What's the street address of your building?",
+        message: "Ask for the address (and then the unit if you do not have it), confirm the unit with find_unit, then call check_work_order_status again.",
+      });
+    }
+
+    let found: FunctionReturnType<typeof internal.sarahTools.workOrderStatus>;
+    try {
+      found = await ctx.runMutation(internal.sarahTools.workOrderStatus, {
+        orgId,
+        elevenLabsConversationId: conversationId,
+        spokenAddress,
+        spokenUnit,
+        callerId: realPhone(optString(body.caller_id, 40)),
+        callerName: optString(body.caller_name, 120),
+        issueDescription: optString(body.issue_description, 500),
+        requestRef: optString(body.request_ref, 20),
+      });
+    } catch (err) {
+      console.error("[check-work-order-status] failed:", err);
+      return Response.json(fallback);
+    }
+
+    if (!found.unitIdentified) {
+      return Response.json({
+        unit_identified: false,
+        say: "Let me check the address and unit first.",
+        message:
+          "The unit is not identified exactly, so nothing can be looked up. Call find_unit with what they said, " +
+          "read back what it returns and let them confirm, then call check_work_order_status again with exactly " +
+          "the property_address and unit_label of a find_unit result that had matched true. A suggestion or a " +
+          "similar unit is not enough. If the unit still cannot be identified, say you'll pass their question to " +
+          "the right team member, and log it with log_tenant_issue, call_type work_order_status.",
+      });
+    }
+    if (found.failedClosed) return Response.json({ ...fallback, unit_identified: true });
+
+    const READ_ONLY =
+      "Say only what this result gives you: the summary, the date it was reported and the status sentence. Never " +
+      "add a day, date, time, reason, cause, name or promise that is not in it, never read out ref, and never " +
+      "mention identity checks or whether a name matched. Then log the call with log_tenant_issue, call_type " +
+      "work_order_status (that only records the question; never say a request was logged).";
+    if (found.items.length === 0) {
+      return Response.json({
+        unit_identified: true,
+        request_count: 0,
+        say: "I don't see an open request for your unit. Would you like me to log one now?",
+        message:
+          "Nothing is on record for this unit in the last 30 days. If they want to report it, run the maintenance " +
+          "request flow and call log_maintenance_request. Otherwise log the call with log_tenant_issue, call_type " +
+          "work_order_status.",
+      });
+    }
+    if (found.selected) {
+      const s = found.selected;
+      return Response.json({
+        unit_identified: true,
+        request_count: found.items.length,
+        request: { summary: s.summary, reported: s.reported, status: s.status },
+        say: `I see the request about ${s.summary}, reported on ${s.reported}. ${s.status}`,
+        message: READ_ONLY,
+      });
+    }
+    const choices = found.items.map((i) => ({ ref: i.ref, summary: i.summary, reported: i.reported }));
+    const likely = found.likelyRef ? choices.find((c) => c.ref === found.likelyRef) : undefined;
+    const list = choices.map((c) => `${c.summary}, from ${c.reported}`);
+    const listSay =
+      list.length <= 1 ? list.join("") : `${list.slice(0, -1).join(", ")} or ${list[list.length - 1]}`;
     return Response.json({
-      matched: true,
-      unit_label: found.unitLabel ?? null,
-      property_name: named?.propertyName ?? null,
-      confirm_required: true,
-      say: `Thanks, I have unit ${found.unitLabel ?? ""}${named ? ` at ${named.propertyName}` : ""}. Is that right?`,
+      unit_identified: true,
+      request_count: found.total,
+      choices,
+      likely_ref: likely?.ref ?? null,
+      say: likely
+        ? `Is this about the ${likely.summary} you reported on ${likely.reported}?`
+        : `I see a few requests for your unit. Is it ${listSay}?`,
       message:
-        "Unit found. Confirm it with the caller. Never say anything about who lives there; you are " +
-        "told nothing about residents here.",
+        "Several requests are on record for this unit; no status is given yet. Ask which one they mean as ONE " +
+        "question (the say line), using what they told you about the issue and when they first reported it. When " +
+        "they pick one, call check_work_order_status again with the same details and request_ref set to that " +
+        "choice's ref, and describe only that one. If likely_ref is set the say line checks that one first; if " +
+        "they say no, ask about the others the same way. Never read out ref, and never describe any other request.",
     });
   }),
 });
@@ -1387,13 +2261,6 @@ http.route({
         { status: 400 },
       );
     }
-    const description = optString(body.description, 4000);
-    if (!description) {
-      return Response.json(
-        { logged: false, error: "description is required: one or two plain sentences on what is wrong." },
-        { status: 400 },
-      );
-    }
     const requestedSeverity = parseSeverityLevel(body.severity);
     if (!requestedSeverity) {
       return Response.json(
@@ -1408,6 +2275,71 @@ http.route({
     const callerName = optString(body.caller_name, 120);
     const spokenUnit = optString(body.spoken_unit, 60);
     const spokenAddress = optString(body.spoken_address, 300);
+    const orgId = await resolveBookingOrg(ctx, conversationId, body.agent_id);
+
+    let description = optString(body.description, 4000);
+    // A life-safety emergency is logged at once with whatever is known (LIFE-SAFETY step 2).
+    const lifeSafety = severity === "emergency" || ["fire", "flooding", "gas"].includes(issueType);
+    if (!description && lifeSafety) {
+      return Response.json(
+        { logged: false, error: "description is required: one or two plain sentences on what is wrong." },
+        { status: 400 },
+      );
+    }
+    // A find_unit match is not the caller's yes: conv_9001m6dzykqte399btbs28d2z4ss logged and routed a
+    // request on a unit the caller never confirmed. An update to a request already on file still
+    // goes through. An agent published before this argument existed sends nothing, so is not blocked.
+    if (!lifeSafety && (body.unit_confirmed === false || body.unit_confirmed === "false")) {
+      const onFile = orgId
+        ? await ctx.runQuery(internal.maintenance.callRequestDescription, {
+            orgId,
+            elevenLabsConversationId: conversationId,
+          })
+        : null;
+      if (!onFile) {
+        return Response.json({
+          logged: false,
+          request_created: false,
+          needs: "unit_confirmation",
+          message:
+            "Nothing was logged and nothing was sent: the caller has not confirmed the unit. Ask find_unit's " +
+            "say line if you have not, then wait for their yes and call this again with unit_confirmed true. " +
+            `Never say this was logged or sent. ${WAIT_FOR_CALLER}`,
+        });
+      }
+    }
+    // Anything else needs the actual problem first. "Maintenance complaint." was logged and sent to
+    // an asset manager before the caller said what was wrong (2026-11-02): nothing is created or
+    // routed for a description like that, and Sarah is told to ask instead. A later update call
+    // with a vague description keeps the one already on the request.
+    if (!lifeSafety && isVagueIssue(description, [callerName, spokenAddress, spokenUnit])) {
+      const onFile = orgId
+        ? await ctx.runQuery(internal.maintenance.callRequestDescription, {
+            orgId,
+            elevenLabsConversationId: conversationId,
+          })
+        : null;
+      if (!onFile) {
+        return Response.json({
+          logged: false,
+          request_created: false,
+          needs: "issue_description",
+          // No question here: the message decides what comes next (identify the unit, or ask what is wrong).
+          say: "Sure, I can help with that.",
+          message:
+            "Nothing was logged and nothing was sent: the description does not say what is wrong. If the unit " +
+            "is not identified yet (STEP 1), do that first. Then ask \"What's going on?\" and call " +
+            "log_maintenance_request again with what they say in description. Never say this was logged or sent.",
+        });
+      }
+      description = onFile;
+    }
+    if (!description) {
+      return Response.json(
+        { logged: false, error: "description is required: one or two plain sentences on what is wrong." },
+        { status: 400 },
+      );
+    }
     const callerNumber = realPhone(typeof body.caller_id === "string" ? body.caller_id : undefined);
     const callbackNumber = realPhone(typeof body.callback_phone === "string" ? body.callback_phone : undefined);
     const severityReason = optString(body.severity_reason, 500);
@@ -1417,7 +2349,6 @@ http.route({
         : clampSeverity(body.severity_score);
     const summaryLine = `${severity} maintenance request (${issueType.replace(/_/g, " ")}): ${description}`;
 
-    const orgId = await resolveBookingOrg(ctx, conversationId, body.agent_id);
     let saved: FunctionReturnType<typeof internal.maintenance.createFromCall> | null = null;
     let emergencyAlerted = false;
 
@@ -1493,17 +2424,14 @@ http.route({
       );
     }
 
-    // Sarah may say the team was alerted only when an emergency text was actually queued.
-    const alertSay =
-      severity === "emergency" && emergencyAlerted
-        ? "I've logged this as an emergency and alerted the team right away."
-        : "I've logged this and the team will follow up with you as soon as possible.";
+    // Only a life-safety result is spoken now. Routine and urgent results carry closing_line for the
+    // close of the call, so Sarah never announces the log mid-intake (see sarahReplies.ts).
     if (!saved) {
       return Response.json({
         logged: true,
         severity,
         team_alerted: emergencyAlerted,
-        say: severity === "emergency" ? alertSay : "I've logged that and the team will follow up with you.",
+        ...maintenanceLogLines({ severity, emergencyAlerted, saved: null }),
       });
     }
     const closedOutOfScope = saved.status === "closed_out_of_scope";
@@ -1516,13 +2444,11 @@ http.route({
       unit_label: saved.unitLabel,
       routed_to_asset_manager: saved.routedToAm,
       team_alerted: emergencyAlerted,
-      say: closedOutOfScope
-        ? "I've noted that. This one is the resident's responsibility, so we won't be sending a technician for it."
-        : severity === "emergency" || severity === "urgent"
-          ? alertSay
-          : saved.routedToAm
-            ? "I've logged that and sent it to the asset manager for your building to review. They'll follow up with you about next steps."
-            : "I've logged that and the team will match it to your unit and follow up with you.",
+      ...maintenanceLogLines({
+        severity,
+        emergencyAlerted,
+        saved: { routedToAm: saved.routedToAm, closedOutOfScope },
+      }),
     });
   }),
 });
@@ -1620,6 +2546,7 @@ http.route({
       say: emergencyAlerted
         ? "I wasn't able to match you to a unit, but I've alerted the team right away and an asset manager will call you back."
         : "I wasn't able to match you to a unit, so I've passed your details to one of our asset managers. They'll call you back.",
+      message: `Say the say line once. ${WAIT_FOR_CALLER}`,
     });
   }),
 });
@@ -1712,6 +2639,7 @@ http.route({
       unit_label: result.unitLabel ?? unit.unitLabel,
       assigned_to: result.amFirstName,
       say: "I've passed that to the asset manager for your building and they'll follow up with you.",
+      message: `Say the say line once. ${WAIT_FOR_CALLER}`,
     });
   }),
 });
@@ -1730,7 +2658,7 @@ http.route({
     const body = await readBody(request);
     const conversationId = typeof body.conversation_id === "string" ? body.conversation_id.slice(0, 200) : "";
     if (!conversationId) return Response.json({ error: "missing conversation_id" }, { status: 400 });
-    const say = "I've passed that to your asset manager, and they'll follow up about photos.";
+    const say = PHOTO_SAY;
     const orgId = await resolveBookingOrg(
       ctx,
       conversationId,
@@ -1753,7 +2681,12 @@ http.route({
           message: "No open maintenance request exists for this call yet. Call log_maintenance_request first, then this again.",
         });
       }
-      return Response.json({ recorded: true, request_number: result.number, say });
+      return Response.json({
+        recorded: true,
+        request_number: result.number,
+        say,
+        message: `Say the say line once. ${WAIT_FOR_CALLER}`,
+      });
     } catch (err) {
       console.error("[send-photo-link] failed:", err);
       return Response.json({ recorded: false, say });
@@ -1796,15 +2729,32 @@ http.route({
     const budget = optNumber(body.budget);
     const petsWanted = optBool(body.pets_wanted);
 
+    // The city or area they want to rent in, in their words. preferred_communities is the older
+    // argument for the same answer. A follow-up call that leaves it out keeps the stored one, so
+    // what is offered stays in their area for the whole call.
+    const saidArea = optString(body.preferred_area, 200) ?? optString(body.preferred_communities, 200);
+    const storedLead = saidArea
+      ? null
+      : await ctx.runQuery(internal.qualifications.byElevenLabsId, { elevenLabsConversationId: conversationId });
+    const preferredArea = saidArea ?? storedLead?.preferredArea;
+
     // Staff-facing flags only; none of this is ever returned to Sarah.
     const property = await ctx.runQuery(internal.properties.currentInternal, { orgId });
-    const offered = await offeredUnitTypes(ctx, orgId, property);
+    const all = await offeredWithCities(ctx, orgId, property);
+    const area = applyCity(all.offered, all.cities, preferredArea);
+    // What Sarah may offer: narrowed to their city when one matched (the same rule as check_availability).
+    const offered = area.offered;
     const matching = bedrooms ? offered.filter((t) => t.bedrooms === bedrooms) : [];
+    // The flags keep their team-wide meaning; the area ones are separate.
+    const matchingAnywhere = bedrooms ? all.offered.filter((t) => t.bedrooms === bedrooms) : [];
     const flags: string[] = [];
-    if (bedrooms && matching.length === 0) flags.push("no_available_match");
-    const floors = matching.map((t) => t.rentMin).filter((n): n is number => n !== null);
+    if (bedrooms && matchingAnywhere.length === 0) flags.push("no_available_match");
+    if (area.status === "none_available") flags.push("no_availability_in_area");
+    if (area.status === "unknown_city") flags.push("area_not_served");
+    const floors = matchingAnywhere.map((t) => t.rentMin).filter((n): n is number => n !== null);
     if (budget !== undefined && floors.length > 0 && budget < Math.min(...floors)) flags.push("budget_below_range");
-    if (petsWanted === true && !property.petsAllowed) flags.push("pets_not_allowed");
+    // Only an explicit "no pets" flags; an unset policy (imported buildings) is not a "no".
+    if (petsWanted === true && property.petsAllowed === false) flags.push("pets_not_allowed");
     if (optBool(body.third_party_payer) === true) flags.push("third_party_payer");
     if (optString(body.avoid_communities, 500)) flags.push("avoid_communities");
     const ready = Boolean(bedrooms && moveInDate && budget !== undefined && callerName && callerPhone);
@@ -1822,6 +2772,13 @@ http.route({
         budget,
         petsWanted,
         petType: optString(body.pet_type, 100),
+        ...(saidArea
+          ? {
+              preferredArea: saidArea,
+              // City names from the team's own data, for staff; empty for "anywhere" or an area we do not have.
+              preferredCities: area.matched,
+            }
+          : {}),
         leadClass: ready ? "ready" : "partial",
         leadFlags: flags,
         screeningAnswers: leasingCaptured(body),
@@ -1841,13 +2798,20 @@ http.route({
       assigned_to: assignedTo,
       requested_type_available: typeAvailable,
       available_units: offered.map(offeredForAgent),
+      leasing_facts_rule: LEASING_FACTS_RULE,
+      area_status: area.status,
+      area_matched: area.matched.length ? sayList(area.matched, "or") : null,
+      cities_with_availability: area.citiesWithAvailability,
       say:
-        typeAvailable === false
+        area.say ??
+        (typeAvailable === false
           ? "Thanks, I've noted what you're looking for. I don't see that size open right now, but I can note your interest or look at other sizes."
-          : "Thanks, I've got that noted. Would you like to set up a tour?",
+          : "Thanks, I've got that noted. Would you like to set up a tour?"),
       message:
         "Recorded. Never tell the caller they do or do not qualify, and never give a reason they might " +
-        "not. Call again to add details as you learn them.",
+        "not. Call again to add details as you learn them." +
+        (area.message ? ` ${area.message}` : "") +
+        ` ${WAIT_FOR_CALLER}`,
     });
   }),
 });
@@ -2025,6 +2989,105 @@ async function verifyTwilioSignature(
   }
   return null;
 }
+
+// --- Owner transfer: Twilio <Dial> and voicemail callbacks ------------------------------------
+//
+// ownerTransfer.dial points the live call's <Dial action> here. Both routes check X-Twilio-Signature
+// and ALWAYS answer with TwiML that keeps the caller on the line (or ends it politely): a thrown error
+// here would make Twilio say "an application error has occurred" and hang up on the owner.
+
+function twimlResponse(xml: string): Response {
+  return new Response(xml, { status: 200, headers: { "Content-Type": "text/xml" } });
+}
+
+/** The staff phone answered (call over: hang up) or not (busy / no answer / failed: offer voicemail). */
+http.route({
+  path: "/twilio/owner-transfer-result",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const form = new URLSearchParams(await request.text());
+    const denied = await verifyTwilioSignature(request, form);
+    if (denied) return denied;
+    const conv = (new URL(request.url).searchParams.get("c") ?? "").slice(0, 200);
+    const status = (form.get("DialCallStatus") ?? "").slice(0, 40);
+    const siteUrl = (process.env.CONVEX_SITE_URL ?? "").replace(/\/+$/, "");
+    let label: string | null = null;
+    try {
+      const tc = conv ? await ctx.runQuery(internal.ownerRouting.transferContext, { elevenLabsConversationId: conv }) : null;
+      label = tc?.label ?? null;
+      if (tc && dialAnswered(status)) {
+        await ctx.runMutation(internal.ownerRouting.logOwnerTransfer, {
+          orgId: tc.orgId,
+          elevenLabsConversationId: conv,
+          action: "owner_transfer_connected",
+          to: tc.label,
+          note: `${tc.label} picked up (talked ${Number(form.get("DialCallDuration") ?? 0) || 0} s).`,
+        });
+      } else if (tc) {
+        await ctx.runMutation(internal.ownerRouting.logOwnerTransfer, {
+          orgId: tc.orgId,
+          elevenLabsConversationId: conv,
+          action: "owner_transfer_failed",
+          to: tc.label,
+          note: `${tc.label} did not pick up (Twilio: ${status || "unknown"}). The caller stayed on the line and was offered voicemail.`,
+        });
+        await ctx.runMutation(internal.ownerRouting.takeStaffMessage, {
+          orgId: tc.orgId,
+          elevenLabsConversationId: conv,
+          person: tc.label,
+          callerNumber: realPhone(form.get("From") ?? undefined),
+          message: `A verified owner was put through to ${tc.label}, but the call was not answered (${status || "unknown"}). Please call them back.`,
+        });
+      }
+    } catch (err) {
+      console.error("[owner-transfer-result] failed:", err);
+    }
+    if (dialAnswered(status)) return twimlResponse(hangupTwiml());
+    return twimlResponse(
+      ownerTransferFallbackTwiml({ label, voicemailUrl: `${siteUrl}/twilio/owner-voicemail?c=${encodeURIComponent(conv)}` }),
+    );
+  }),
+});
+
+/** The caller left a voicemail after a transfer nobody picked up: it goes on that person's callback row. */
+http.route({
+  path: "/twilio/owner-voicemail",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const form = new URLSearchParams(await request.text());
+    const denied = await verifyTwilioSignature(request, form);
+    if (denied) return denied;
+    const conv = (new URL(request.url).searchParams.get("c") ?? "").slice(0, 200);
+    const recordingUrl = form.get("RecordingUrl") ?? "";
+    const seconds = Number(form.get("RecordingDuration") ?? 0) || 0;
+    let label: string | null = null;
+    try {
+      const tc = conv ? await ctx.runQuery(internal.ownerRouting.transferContext, { elevenLabsConversationId: conv }) : null;
+      label = tc?.label ?? null;
+      if (tc && /^https:\/\/api\.twilio\.com\//.test(recordingUrl)) {
+        await ctx.runMutation(internal.ownerRouting.takeStaffMessage, {
+          orgId: tc.orgId,
+          elevenLabsConversationId: conv,
+          person: tc.label,
+          callerNumber: realPhone(form.get("From") ?? undefined),
+          message:
+            `A verified owner was put through to ${tc.label}, but the call was not answered. They left a ${seconds}-second ` +
+            `voicemail: ${recordingUrl.slice(0, 300)}.mp3 (Twilio recording, sign in to Twilio to play it). Please call them back.`,
+        });
+        await ctx.runMutation(internal.ownerRouting.logOwnerTransfer, {
+          orgId: tc.orgId,
+          elevenLabsConversationId: conv,
+          action: "owner_voicemail_left",
+          to: tc.label,
+          note: `The owner left a ${seconds}-second voicemail for ${tc.label}. It is on their callback list.`,
+        });
+      }
+    } catch (err) {
+      console.error("[owner-voicemail] failed:", err);
+    }
+    return twimlResponse(ownerVoicemailThanksTwiml(label));
+  }),
+});
 
 /**
  * Twilio POSTs form-encoded fields, not JSON. Returns empty TwiML so Twilio doesn't also send

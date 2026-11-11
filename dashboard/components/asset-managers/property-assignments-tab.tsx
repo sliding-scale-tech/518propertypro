@@ -6,8 +6,8 @@ import Link from "next/link";
 import { useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { useToast } from "@/components/toast";
-import { Modal, cleanError } from "@/components/maintenance/shared";
+import { errorMessage, useToast } from "@/components/toast";
+import { Modal } from "@/components/maintenance/shared";
 import {
   Avatar,
   Btn,
@@ -62,7 +62,7 @@ export function PropertyAssignmentsTab() {
       await setTakingTours({ userId, takingTours: next });
       toast(next ? `Sarah will book tours for ${name}` : `Sarah stops booking tours for ${name}`);
     } catch (e) {
-      toast(cleanError(e), "error");
+      toast(errorMessage(e), "error");
     }
   }
 
@@ -74,7 +74,7 @@ export function PropertyAssignmentsTab() {
       toast(`${pending.property.name} now routes to ${pending.name} (${res.changed} of ${res.total} units updated)`);
       setPending(null);
     } catch (e) {
-      toast(cleanError(e), "error");
+      toast(errorMessage(e), "error");
     } finally {
       setSaving(false);
     }

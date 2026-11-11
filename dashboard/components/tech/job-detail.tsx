@@ -5,10 +5,11 @@ import { AlertTriangle, ArrowLeft, Camera, Check, Loader2, MapPin, Minus, PawPri
 import Link from "next/link";
 import { Component, useRef, useState, type ReactNode } from "react";
 import { ConfirmDialog, DatePicker, Pill, SevChip } from "@/components/ui";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { STATUS_LABEL, compressImage, dollarsToCents, errorMessage, formatCents, formatDate, mapsUrl, todayLocalIso, uploadBlob } from "./lib";
+import { tenantPreferredTimeText } from "@/convex/workOrderWindow";
+import { STATUS_LABEL, compressImage, dollarsToCents, formatCents, formatDate, mapsUrl, todayLocalIso, uploadBlob } from "./lib";
 
 function NotFound() {
   return (
@@ -227,6 +228,7 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
     (!need.notes || notes.length > 0);
   const missing = submitError?.match(/Missing:\s*(.*?)\.?$/)?.[1]?.split(/,\s*/);
   const hasPets = /\b(pet|pets|dog|dogs|cat|cats)\b/i.test(wo.accessNotes ?? "");
+  const preferredTime = tenantPreferredTimeText(wo.tenantPreferredTime);
 
   return (
     <div className={canEdit ? "pb-28" : "pb-6"}>
@@ -258,9 +260,35 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
       <h1 className="mt-1 text-xl font-semibold leading-snug">{wo.title}</h1>
       <p className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
         <Pill>{STATUS_LABEL[wo.status] ?? wo.status}</Pill>
+        {data.actionRequired ? (
+          <Pill tone="warn" className="font-semibold">
+            <AlertTriangle className="h-3 w-3" /> Action required
+          </Pill>
+        ) : null}
         {wo.window ? <Pill tone="warn">{wo.window}</Pill> : null}
         {wo.dueDate !== undefined ? <span>Due {formatDate(wo.dueDate)}</span> : null}
       </p>
+
+      {data.actionRequired && (
+        <div role="alert" className="mt-3 rounded-2xl border border-warning bg-warning-soft p-3.5 text-warning-ink">
+          <p className="flex items-center gap-2 text-sm font-semibold">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            {data.actionRequired.kind === "sent_back"
+              ? `Action required: ${data.actionRequired.byName ?? "Pat"} sent this back`
+              : `Action required: ${data.actionRequired.byName ?? "Pat"} needs more info`}
+          </p>
+          <blockquote className="mt-2 whitespace-pre-wrap break-words border-l-2 border-warning pl-3 text-sm font-medium">
+            &ldquo;{data.actionRequired.note}&rdquo;
+          </blockquote>
+          <p className="mt-2 text-xs">
+            {new Date(data.actionRequired.at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+            {" · "}
+            {data.actionRequired.kind === "sent_back"
+              ? "Fix it, add a note, then mark complete again."
+              : "Add a note with the information, then continue the job."}
+          </p>
+        </div>
+      )}
 
       <a
         href={mapsUrl(place || unit.unitNumber)}
@@ -281,6 +309,14 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
             <span className="block text-xs font-semibold uppercase text-muted-foreground">Access</span>
             {wo.accessNotes}
           </span>
+        </p>
+      )}
+
+      {preferredTime && (
+        <p className="mt-3 rounded-2xl bg-muted p-3 text-sm">
+          <span className="block text-xs font-semibold uppercase text-muted-foreground">Tenant&apos;s preferred time</span>
+          <span className="block break-words">{preferredTime}</span>
+          <span className="mt-1 block text-xs text-muted-foreground">What the tenant asked for, not a scheduled visit.</span>
         </p>
       )}
 
@@ -477,17 +513,14 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
               </div>
               <button
                 disabled={busy !== null}
-                onClick={() =>
-                  void run(
-                    "time",
-                    async () => {
-                      const h = Number(hours);
-                      if (!Number.isFinite(h) || h <= 0) throw new Error("Enter hours worked.");
-                      await addTime({ workOrderId: id, date, hours: h });
-                    },
-                    "Hours added.",
-                  )
-                }
+                onClick={() => {
+                  const h = Number(hours);
+                  if (!Number.isFinite(h) || h <= 0) {
+                    toast("Enter hours worked.", "error");
+                    return;
+                  }
+                  void run("time", () => addTime({ workOrderId: id, date, hours: h }).then(() => undefined), "Hours added.");
+                }}
                 className={`${btnCls} w-full`}
               >
                 Log hours
@@ -533,22 +566,28 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
               <button
                 disabled={busy !== null}
                 className={`${btnCls} w-full`}
-                onClick={() =>
+                onClick={() => {
+                  const cents = dollarsToCents(mAmt);
+                  const qty = Number(mQty);
+                  if (cents === null) {
+                    toast("Enter the amount like 12.50.", "error");
+                    return;
+                  }
+                  if (!Number.isFinite(qty) || qty <= 0) {
+                    toast("Quantity must be more than zero.", "error");
+                    return;
+                  }
                   void run(
                     "material",
                     async () => {
-                      const cents = dollarsToCents(mAmt);
-                      const qty = Number(mQty);
-                      if (cents === null) throw new Error("Enter the amount like 12.50.");
-                      if (!Number.isFinite(qty) || qty <= 0) throw new Error("Quantity must be more than zero.");
                       await addExpense({ workOrderId: id, kind: "material", description: mDesc, amountCents: cents, quantity: qty });
                       setMDesc("");
                       setMAmt("");
                       setMQty("1");
                     },
                     "Added.",
-                  )
-                }
+                  );
+                }}
               >
                 Add material / expense
               </button>

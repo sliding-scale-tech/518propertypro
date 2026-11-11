@@ -4,8 +4,7 @@ import { useMutation, useQuery } from "convex/react";
 import { useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { useToast } from "@/components/toast";
-import { cleanError } from "@/components/maintenance/shared";
+import { errorMessage, useToast } from "@/components/toast";
 import { Dialog } from "@/components/properties/dialog";
 import { Btn } from "@/components/ui";
 import { ResidentModal, type ResidentFormValue, type UnitOption } from "./resident-modal";
@@ -70,7 +69,7 @@ export function useResidentActions(onDeactivated?: () => void) {
               toast("Resident updated");
               setEditing(null);
             } catch (err) {
-              toast(cleanError(err), "error");
+              toast(errorMessage(err), "error");
             } finally {
               setBusy(false);
             }
@@ -95,7 +94,7 @@ export function useResidentActions(onDeactivated?: () => void) {
                   setConfirming(null);
                   onDeactivated?.();
                 } catch (err) {
-                  toast(cleanError(err), "error");
+                  toast(errorMessage(err), "error");
                 } finally {
                   setBusy(false);
                 }

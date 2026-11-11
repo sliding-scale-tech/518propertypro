@@ -1,7 +1,9 @@
 /**
- * Phone helpers, dependency-free. Everything stored or matched is E.164 ("+15185550123"),
+ * Phone helpers (only the ConvexError class is imported). Everything stored or matched is E.164 ("+15185550123"),
  * because caller ID, Twilio and the residentPhones index all need one canonical spelling.
  */
+
+import { ConvexError } from "convex/values";
 
 const E164 = /^\+[1-9]\d{7,14}$/;
 
@@ -29,6 +31,6 @@ export function toE164(raw: string): string | null {
 /** Throws a user-facing error for any phone that can't be normalised. */
 export function requireE164(raw: string, label = "Phone number"): string {
   const out = toE164(raw);
-  if (!out) throw new Error(`${label} must be a valid phone number, e.g. +15185550123.`);
+  if (!out) throw new ConvexError(`${label} must be a valid phone number, e.g. +15185550123.`);
   return out;
 }

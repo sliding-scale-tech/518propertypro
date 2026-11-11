@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import { internalQuery, mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
@@ -7,6 +7,8 @@ import { isAdminView, requireAdminView, requireOrg, requireOrgAdmin, viewFor } f
 import type { OrgContext } from "./authz";
 import { amScope } from "./amScope";
 import { scheduleNotify } from "./notify";
+import type { MappedUnitFields } from "./rosterMapping";
+import { unitKey } from "./unitMatch";
 
 /**
  * Units: the ONLY module that writes the `units` table.
@@ -35,14 +37,8 @@ const MAX_TEXT = 2000;
  * display string. Pure and exported so the voice tools can normalize the same way.
  */
 export function normalizeUnitKey(s: string): string {
-  let key = s.toLowerCase().trim();
-  // Strip leading label words repeatedly so "apt #4b" and "unit apt 4b" both reach "4b".
-  for (;;) {
-    const next = key.replace(/^(?:unit|apartment|apt|suite|#)[\s.:#-]*/, "");
-    if (next === key) break;
-    key = next;
-  }
-  return key.replace(/[^a-z0-9]+/g, "");
+  // One implementation, in the pure matcher Sarah's find_unit also uses, so the two never drift.
+  return unitKey(s);
 }
 
 /**
@@ -64,7 +60,7 @@ export async function assertValidAssetManager(
     membership.orgId !== orgId ||
     !(membership.jobRoles ?? []).includes("asset_manager")
   ) {
-    throw new Error("That person is not an asset manager on this team.");
+    throw new ConvexError("That person is not an asset manager on this team.");
   }
 }
 
@@ -83,20 +79,20 @@ export async function countOwnedBy(
 /** Unit in this team, or the same "not found" whether it is missing or someone else's. */
 async function ownUnit(ctx: QueryCtx | MutationCtx, org: OrgContext, unitId: Id<"units">) {
   const unit = await ctx.db.get(unitId);
-  if (!unit || unit.orgId !== org.orgId) throw new Error("Unit not found.");
+  if (!unit || unit.orgId !== org.orgId) throw new ConvexError("Unit not found.");
   return unit;
 }
 
 function cleanText(value: string, label: string, max = MAX_TEXT): string {
   const out = value.trim();
-  if (out.length > max) throw new Error(`${label} is too long.`);
+  if (out.length > max) throw new ConvexError(`${label} is too long.`);
   return out;
 }
 
 function requireUnitNumber(raw: string): { unitNumber: string; unitNumberKey: string } {
   const unitNumber = cleanText(raw, "Unit number", 40);
   const unitNumberKey = normalizeUnitKey(unitNumber);
-  if (!unitNumber || !unitNumberKey) throw new Error("Enter a unit number.");
+  if (!unitNumber || !unitNumberKey) throw new ConvexError("Enter a unit number.");
   return { unitNumber, unitNumberKey };
 }
 
@@ -112,7 +108,7 @@ async function assertNoDuplicate(
       q.eq("propertyId", propertyId).eq("unitNumberKey", unitNumberKey),
     )
     .first();
-  if (dup && dup._id !== exceptId) throw new Error("That unit already exists on this property.");
+  if (dup && dup._id !== exceptId) throw new ConvexError("That unit already exists on this property.");
 }
 
 // --- Reads ----------------------------------------------------------------
@@ -168,7 +164,7 @@ export const listByProperty = query({
   args: { propertyId: v.id("properties") },
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
-    if (!canViewUnits(org)) throw new Error("You don't have access to that.");
+    if (!canViewUnits(org)) throw new ConvexError("You don't have access to that.");
     const property = await ctx.db.get(args.propertyId);
     if (!property || property.orgId !== org.orgId) return [];
     const units = await ctx.db
@@ -184,7 +180,7 @@ export const list = query({
   args: { propertyId: v.optional(v.id("properties")) },
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
-    if (!canViewUnits(org)) throw new Error("You don't have access to that.");
+    if (!canViewUnits(org)) throw new ConvexError("You don't have access to that.");
     const propertyId = args.propertyId;
     const units = propertyId
       ? await ctx.db
@@ -234,16 +230,16 @@ export const create = mutation({
     const org = await requireAdminView(ctx);
 
     const property = await ctx.db.get(args.propertyId);
-    if (!property || property.orgId !== org.orgId) throw new Error("Property not found.");
+    if (!property || property.orgId !== org.orgId) throw new ConvexError("Property not found.");
 
     const { unitNumber, unitNumberKey } = requireUnitNumber(args.unitNumber);
     await assertNoDuplicate(ctx, args.propertyId, unitNumberKey);
     const assetManagerUserId = args.assetManagerUserId ?? property.defaultAssetManagerUserId;
-    if (!assetManagerUserId) throw new Error("Pick an asset manager for this unit.");
+    if (!assetManagerUserId) throw new ConvexError("Pick an asset manager for this unit.");
     await assertValidAssetManager(ctx, org.orgId, assetManagerUserId);
 
     const bedrooms = cleanText(args.bedrooms, "Bedrooms", 20);
-    if (!bedrooms) throw new Error("Enter the number of bedrooms.");
+    if (!bedrooms) throw new ConvexError("Enter the number of bedrooms.");
 
     const now = Date.now();
     const id = await ctx.db.insert("units", {
@@ -308,10 +304,14 @@ export const update = mutation({
     }
     if (args.bedrooms !== undefined) {
       const bedrooms = cleanText(args.bedrooms, "Bedrooms", 20);
-      if (!bedrooms) throw new Error("Enter the number of bedrooms.");
+      if (!bedrooms) throw new ConvexError("Enter the number of bedrooms.");
       patch.bedrooms = bedrooms;
     }
-    if (args.floor !== undefined) patch.floor = args.floor;
+    if (args.floor !== undefined) {
+      patch.floor = args.floor;
+      // A roster text label ("Basement") describes the old number; a new number replaces it.
+      if (args.floor !== unit.floor && unit.floorRaw !== undefined) patch.floorRaw = undefined;
+    }
     if (args.isTopFloor !== undefined) patch.isTopFloor = args.isTopFloor;
     if (args.bathrooms !== undefined) patch.bathrooms = args.bathrooms;
     if (args.parking !== undefined) patch.parking = cleanText(args.parking, "Parking", 200);
@@ -344,7 +344,7 @@ export const setAvailability = mutation({
 
     const manager = isAdminView(org);
     const ownAm = org.jobRoles.includes("asset_manager") && unit.assetManagerUserId === org.user._id;
-    if (!manager && !ownAm) throw new Error("You don't have access to that.");
+    if (!manager && !ownAm) throw new ConvexError("You don't have access to that.");
 
     await ctx.db.patch(unit._id, {
       available: args.available,
@@ -377,7 +377,7 @@ export const bulkAssignAssetManager = mutation({
   args: { unitIds: v.array(v.id("units")), assetManagerUserId: v.id("users") },
   handler: async (ctx, args): Promise<{ changed: number }> => {
     const org = await requireAdminView(ctx);
-    if (args.unitIds.length > MAX_BULK) throw new Error(`Pick at most ${MAX_BULK} units at a time.`);
+    if (args.unitIds.length > MAX_BULK) throw new ConvexError(`Pick at most ${MAX_BULK} units at a time.`);
     await assertValidAssetManager(ctx, org.orgId, args.assetManagerUserId);
 
     // Resolve every unit before writing any, so one bad id fails the whole batch cleanly
@@ -529,7 +529,7 @@ export async function reassignUnitWithReason(
   const unit = await ownUnit(ctx, org, unitId);
   await assertValidAssetManager(ctx, org.orgId, to);
   const moved = await reassignDetailed(ctx, org, unit, to, reason);
-  if (!moved) throw new Error("That unit already belongs to this asset manager.");
+  if (!moved) throw new ConvexError("That unit already belongs to this asset manager.");
   return { previousManagerUserId: unit.assetManagerUserId, unit, requestsMoved: moved.requestsMoved };
 }
 
@@ -549,6 +549,124 @@ export const remove = mutation({
     });
   },
 });
+
+// --- Roster import (B3) ------------------------------------------------------
+
+/** The unit columns the client roster owns; convex/rosterImport.ts maps them (rosterMapping.ts). */
+const ROSTER_FIELDS = [
+  "unitNumber",
+  "unitNumberKey",
+  "unitType",
+  "floor",
+  "floorRaw",
+  "bedrooms",
+  "bedroomsCount",
+  "bathrooms",
+  "rentedAs",
+  "occupancy",
+  "leaseType",
+  "leaseEnd",
+  "rent",
+  "rentPaidTo",
+  "heatingFuel",
+  "gasPaidBy",
+  "electricPaidBy",
+  "laundry",
+  "available",
+] as const satisfies ReadonlyArray<keyof MappedUnitFields & keyof Doc<"units">>;
+
+/**
+ * Creates or updates one unit from a roster row, inside the import mutation. Lives here so the
+ * units table keeps a single writer and the asset-manager rule is enforced the same way.
+ *
+ * - Create: the AM is validated (assertValidAssetManager) and the unit is checked for a duplicate
+ *   key on its property, exactly like `create`.
+ * - Update: only the roster's own columns are compared and patched ("-" removes the field);
+ *   the asset manager is never changed, so units already moved to their real AM (e.g. Nikki,
+ *   later, through the bulk-apply path) stay with them on a re-import. leasingFacts is written
+ *   only for room rentals, so text staff typed on other units is kept.
+ * - No change: no write and no audit row, which is what makes a re-run a no-op.
+ */
+export async function upsertRosterUnit(
+  ctx: MutationCtx,
+  args: {
+    orgId: string;
+    propertyId: Id<"properties">;
+    existing: Doc<"units"> | null;
+    fields: MappedUnitFields;
+    assetManagerUserId: Id<"users">;
+    note: string;
+  },
+): Promise<{ unitId: Id<"units">; action: "created" | "updated" | "unchanged"; changed: string[] }> {
+  const { fields } = args;
+  if (!args.existing) {
+    await assertNoDuplicate(ctx, args.propertyId, fields.unitNumberKey);
+    await assertValidAssetManager(ctx, args.orgId, args.assetManagerUserId);
+    const now = Date.now();
+    const doc: Omit<Doc<"units">, "_id" | "_creationTime"> = {
+      orgId: args.orgId,
+      propertyId: args.propertyId,
+      unitNumber: fields.unitNumber,
+      unitNumberKey: fields.unitNumberKey,
+      bedrooms: fields.bedrooms,
+      available: fields.available,
+      assetManagerUserId: args.assetManagerUserId,
+      maintenanceIntakeActive: true,
+      createdAt: now,
+      updatedAt: now,
+    };
+    // Only stated values are written; an absent key is the "-" of the sheet.
+    const optional = doc as Record<string, unknown>;
+    for (const key of ROSTER_FIELDS) {
+      if (fields[key] !== undefined) optional[key] = fields[key];
+    }
+    if (fields.leasingFacts !== undefined) doc.leasingFacts = fields.leasingFacts;
+    const id = await ctx.db.insert("units", doc);
+    await writeAudit(ctx, {
+      orgId: args.orgId,
+      entity: "unit",
+      entityId: id,
+      action: "unit_created",
+      to: fields.unitNumber,
+      note: args.note,
+    });
+    return { unitId: id, action: "created", changed: [] };
+  }
+
+  const unit = args.existing;
+  if (unit.orgId !== args.orgId) throw new ConvexError("Unit not found.");
+  if (unit.propertyId !== args.propertyId) {
+    throw new ConvexError(
+      `${args.note}: unit "${unit.unitNumber}" is on another property; the import will not move it. Move it by hand first.`,
+    );
+  }
+  if (fields.unitNumberKey !== unit.unitNumberKey) {
+    await assertNoDuplicate(ctx, args.propertyId, fields.unitNumberKey, unit._id);
+  }
+  const patch: Record<string, unknown> = {};
+  const changed: string[] = [];
+  for (const key of ROSTER_FIELDS) {
+    if (fields[key] !== unit[key]) {
+      patch[key] = fields[key];
+      changed.push(key);
+    }
+  }
+  if (fields.leasingFacts !== undefined && fields.leasingFacts !== unit.leasingFacts) {
+    patch.leasingFacts = fields.leasingFacts;
+    changed.push("leasingFacts");
+  }
+  if (changed.length === 0) return { unitId: unit._id, action: "unchanged", changed };
+  if (patch.available === false) patch.availableFrom = undefined;
+  await ctx.db.patch(unit._id, { ...(patch as Partial<Doc<"units">>), updatedAt: Date.now() });
+  await writeAudit(ctx, {
+    orgId: args.orgId,
+    entity: "unit",
+    entityId: unit._id,
+    action: "unit_updated",
+    note: `${args.note}: ${changed.join(", ")}`,
+  });
+  return { unitId: unit._id, action: "updated", changed };
+}
 
 /**
  * Org-purge only: deletes every unit of a team that is being torn down (called from

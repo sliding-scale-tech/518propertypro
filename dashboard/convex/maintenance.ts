@@ -1,6 +1,6 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
-import { internalMutation, mutation, query } from "./_generated/server";
+import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { writeAudit } from "./audit";
 import { canManageMaintenance, currentOrg, requireAdminView, requireOrg, viewFor } from "./authz";
@@ -17,6 +17,7 @@ import { findResidentsByPhone } from "./residents";
 import { clampSeverity } from "./severity";
 import { tenantMessage } from "./sarahConfigRead";
 import { normalizeUnitKey } from "./units";
+import { exactUnitInProperty } from "./sarahTools";
 
 /**
  * Maintenance requests (F4): the intake record Sarah (or a person) creates. Separate from a
@@ -91,7 +92,7 @@ const TRANSITIONS: Record<Status, Status[]> = {
 
 export function assertRequestTransition(from: Status, to: Status): void {
   if (!TRANSITIONS[from].includes(to)) {
-    throw new Error(`A request that is "${from.replace(/_/g, " ")}" can't be moved to "${to.replace(/_/g, " ")}".`);
+    throw new ConvexError(`A request that is "${from.replace(/_/g, " ")}" can't be moved to "${to.replace(/_/g, " ")}".`);
   }
 }
 
@@ -163,8 +164,8 @@ export async function attachableRequest(
   const org = await requireOrg(ctx);
   const req = await ctx.db.get(requestId);
   const scope = await scopeOf(ctx, org);
-  if (!req || !canRead(org, req, scope)) throw new Error("Request not found.");
-  if (!canAttachMedia(org, req, scope)) throw new Error("You don't have access to that.");
+  if (!req || !canRead(org, req, scope)) throw new ConvexError("Request not found.");
+  if (!canAttachMedia(org, req, scope)) throw new ConvexError("You don't have access to that.");
   return { org, req };
 }
 
@@ -175,23 +176,23 @@ export async function actableRequest(
   const org = await requireOrg(ctx);
   const req = await ctx.db.get(requestId);
   const scope = await scopeOf(ctx, org);
-  if (!req || !canRead(org, req, scope)) throw new Error("Request not found.");
-  if (!canAct(org, req, scope)) throw new Error("You don't have access to that.");
+  if (!req || !canRead(org, req, scope)) throw new ConvexError("Request not found.");
+  if (!canAct(org, req, scope)) throw new ConvexError("You don't have access to that.");
   return { org, req };
 }
 
 async function patOnlyRequest(ctx: MutationCtx, requestId: Id<"maintenanceRequests">) {
   const org = await requireOrg(ctx);
   const req = await ctx.db.get(requestId);
-  if (!req || !canRead(org, req, await scopeOf(ctx, org))) throw new Error("Request not found.");
-  if (!canManageMaintenance(org)) throw new Error("You don't have access to that.");
+  if (!req || !canRead(org, req, await scopeOf(ctx, org))) throw new ConvexError("Request not found.");
+  if (!canManageMaintenance(org)) throw new ConvexError("You don't have access to that.");
   return { org, req };
 }
 
 function requireText(raw: string, label: string, max = 1000): string {
   const out = raw.trim();
-  if (!out) throw new Error(`${label} is required.`);
-  if (out.length > max) throw new Error(`${label} is too long.`);
+  if (!out) throw new ConvexError(`${label} is required.`);
+  if (out.length > max) throw new ConvexError(`${label} is too long (at most ${max} characters).`);
   return out;
 }
 
@@ -303,7 +304,7 @@ async function routeRequest(
 
   if (opts.unitId) {
     const chosen = await ctx.db.get(opts.unitId);
-    if (!chosen || chosen.orgId !== req.orgId) throw new Error("Unit not found.");
+    if (!chosen || chosen.orgId !== req.orgId) throw new ConvexError("Unit not found.");
     unit = chosen;
     confidence = "exact"; // a person picked it
   } else {
@@ -318,13 +319,11 @@ async function routeRequest(
       if (props.length === 1) propertyId = props[0]._id;
     }
     const spokenKey = req.spokenUnit ? normalizeUnitKey(req.spokenUnit) : "";
-    if (propertyId && spokenKey) {
-      const pid = propertyId;
-      const found = await ctx.db
-        .query("units")
-        .withIndex("by_property_and_unit_key", (q) => q.eq("propertyId", pid).eq("unitNumberKey", spokenKey))
-        .first();
-      if (found && found.orgId === req.orgId) {
+    if (propertyId) {
+      // Same rule as Sarah's find_unit: an exact reading of the spoken unit, or the only unit of a
+      // single-unit building (a house). A merely similar label never matches here.
+      const found = await exactUnitInProperty(ctx, req.orgId, propertyId, req.spokenUnit);
+      if (found) {
         unit = found;
         confidence = "exact";
       }
@@ -530,6 +529,22 @@ function cleanAnswers(answers: Array<{ key: string; question: string; value: str
 }
 
 /**
+ * The description already on the request Sarah logged in this call, or null when there is none.
+ * Lets log_maintenance_request keep that description when a later update call sends a vague one
+ * ("maintenance issue") instead of refusing the update or overwriting what the caller said.
+ */
+export const callRequestDescription = internalQuery({
+  args: { orgId: v.string(), elevenLabsConversationId: v.string() },
+  handler: async (ctx, args): Promise<string | null> => {
+    const rows = await ctx.db
+      .query("maintenanceRequests")
+      .withIndex("by_conversation", (q) => q.eq("elevenLabsConversationId", args.elevenLabsConversationId))
+      .collect();
+    return rows.find((r) => r.orgId === args.orgId)?.description ?? null;
+  },
+});
+
+/**
  * Called by Sarah's maintenance tool (wired later) and by the post-call webhook. Upserts on
  * the ElevenLabs conversation id so a tool call followed by the webhook is one request, not
  * two. Internal: orgId is trusted because no client can reach it.
@@ -714,7 +729,7 @@ async function createdSummary(
   emergencyAlerted: boolean,
 ): Promise<CreatedFromCall> {
   const req = await ctx.db.get(id);
-  if (!req) throw new Error("Request not found.");
+  if (!req) throw new ConvexError("Request not found.");
   const unit = req.unitId ? await ctx.db.get(req.unitId) : null;
   const am = req.assignedAssetManagerUserId ? await ctx.db.get(req.assignedAssetManagerUserId) : null;
   return {
@@ -860,7 +875,7 @@ export const createManual = mutation({
   handler: async (ctx, args): Promise<{ requestId: Id<"maintenanceRequests">; number: number }> => {
     const org = await requireOrg(ctx);
     const unit = await ctx.db.get(args.unitId);
-    if (!unit || unit.orgId !== org.orgId) throw new Error("Unit not found.");
+    if (!unit || unit.orgId !== org.orgId) throw new ConvexError("Unit not found.");
 
     // WHO MAY CREATE (decided by the owner):
     //  - Admin view (team admin, Executive/Alex, Pat, simplr_admin) may create a manual request for
@@ -871,13 +886,13 @@ export const createManual = mutation({
     // Pat"); it never reaches a technician or becomes a work order from here.
     const adminView = viewFor(org.isAdmin, org.jobRoles) === "admin";
     const ownAm = isAssetManager(org) && unit.assetManagerUserId === org.user._id;
-    if (!adminView && !ownAm) throw new Error("You don't have access to that.");
+    if (!adminView && !ownAm) throw new ConvexError("You don't have access to that.");
 
     let residentId: Id<"residents"> | undefined;
     if (args.residentId) {
       const resident = await ctx.db.get(args.residentId);
       if (!resident || resident.orgId !== org.orgId || resident.unitId !== unit._id) {
-        throw new Error("That resident doesn't live in this unit.");
+        throw new ConvexError("That resident doesn't live in this unit.");
       }
       residentId = resident._id;
     }
@@ -1422,7 +1437,7 @@ export const approveAndForward = mutation({
   handler: async (ctx, args) => {
     const { org, req } = await actableRequest(ctx, args.requestId);
     if (req.status !== "new" && req.status !== "under_review" && req.status !== "more_info_needed") {
-      throw new Error("This request isn't waiting on the asset manager.");
+      throw new ConvexError("This request isn't waiting on the asset manager.");
     }
     await validateAndForward(ctx, org, req, optText(args.note, 1000));
   },
@@ -1488,7 +1503,7 @@ export const requestInfo = mutation({
 function closeParts(rawReason: string, rawExplanation: string | undefined) {
   const reason = requireText(rawReason, "A reason", 500);
   const explanation = requireText(rawExplanation ?? "", "An explanation", 1000);
-  if (explanation.length < 5) throw new Error("Add a short explanation (at least 5 characters).");
+  if (explanation.length < 5) throw new ConvexError("Add a short explanation (at least 5 characters).");
   return { reason, explanation };
 }
 
@@ -1505,7 +1520,7 @@ export const closeOutOfScope = mutation({
   handler: async (ctx, args): Promise<{ notified: boolean; reason?: string }> => {
     const { org, req } = await actableRequest(ctx, args.requestId);
     // Once forwarded, closing without a work order is Pat's call (closeNoWorkOrder).
-    if (req.status === "forwarded_to_pat") throw new Error("This request is with the maintenance lead.");
+    if (req.status === "forwarded_to_pat") throw new ConvexError("This request is with the maintenance lead.");
     const { reason, explanation } = closeParts(args.reason, args.explanation);
     await move(ctx, org, req, "closed_out_of_scope", "closed_out_of_scope", `${reason}: ${explanation}`, {
       closeReason: reason,
@@ -1519,7 +1534,7 @@ export const forwardToPat = mutation({
   args: { requestId: v.id("maintenanceRequests"), note: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const { org, req } = await actableRequest(ctx, args.requestId);
-    if (!req.validatedAt) throw new Error("Validate the request before forwarding it.");
+    if (!req.validatedAt) throw new ConvexError("Validate the request before forwarding it.");
     const note = optText(args.note, 1000);
     await move(ctx, org, req, "forwarded_to_pat", "forwarded", note, { nextAction: note });
 
@@ -1543,10 +1558,10 @@ export const markDuplicate = mutation({
   args: { requestId: v.id("maintenanceRequests"), originalId: v.id("maintenanceRequests") },
   handler: async (ctx, args) => {
     const { org, req } = await actableRequest(ctx, args.requestId);
-    if (args.originalId === req._id) throw new Error("A request can't duplicate itself.");
+    if (args.originalId === req._id) throw new ConvexError("A request can't duplicate itself.");
     const original = await ctx.db.get(args.originalId);
     // Unreadable and nonexistent originals look the same.
-    if (!original || !canRead(org, original, await scopeOf(ctx, org))) throw new Error("Original request not found.");
+    if (!original || !canRead(org, original, await scopeOf(ctx, org))) throw new ConvexError("Original request not found.");
     await move(ctx, org, req, "closed_duplicate", "marked_duplicate", `Duplicate of MR-${original.number}`, {
       closeReason: `Duplicate of MR-${original.number}`,
       possibleDuplicateOf: original._id,
@@ -1575,12 +1590,12 @@ export const fixUnit = mutation({
   args: { requestId: v.id("maintenanceRequests"), unitId: v.id("units") },
   handler: async (ctx, args) => {
     const { org, req } = await actableRequest(ctx, args.requestId);
-    if (!OPEN.includes(req.status)) throw new Error("This request is closed.");
+    if (!OPEN.includes(req.status)) throw new ConvexError("This request is closed.");
     // Non-Pat callers (asset managers) may only re-point to a unit they MANAGE.
     if (!canManageMaintenance(org)) {
       const target = await ctx.db.get(args.unitId);
       if (!target || target.orgId !== org.orgId || target.assetManagerUserId !== org.user._id) {
-        throw new Error("You don't have access to that.");
+        throw new ConvexError("You don't have access to that.");
       }
     }
     await routeRequest(ctx, req._id, { actorUserId: org.user._id, unitId: args.unitId, notify: true });
@@ -1591,7 +1606,7 @@ export const overrideSeverity = mutation({
   args: { requestId: v.id("maintenanceRequests"), severity: severityValidator, reason: v.string() },
   handler: async (ctx, args) => {
     const { org, req } = await actableRequest(ctx, args.requestId);
-    if (!OPEN.includes(req.status)) throw new Error("This request is closed.");
+    if (!OPEN.includes(req.status)) throw new ConvexError("This request is closed.");
     const reason = requireText(args.reason, "A reason", 500);
     if (args.severity === req.severity) return;
 
@@ -1636,7 +1651,7 @@ export const editDraft = mutation({
   },
   handler: async (ctx, args) => {
     const { org, req } = await actableRequest(ctx, args.requestId);
-    if (!OPEN.includes(req.status)) throw new Error("This request is closed.");
+    if (!OPEN.includes(req.status)) throw new ConvexError("This request is closed.");
 
     const patch: Partial<Doc<"maintenanceRequests">> = {};
     const changed: string[] = [];
@@ -1649,7 +1664,7 @@ export const editDraft = mutation({
     }
     if (args.category !== undefined) {
       const category = args.category.trim();
-      if (!Object.prototype.hasOwnProperty.call(ISSUE_LABELS, category)) throw new Error("Pick a valid category.");
+      if (!Object.prototype.hasOwnProperty.call(ISSUE_LABELS, category)) throw new ConvexError("Pick a valid category.");
       if (category !== req.issueType) {
         patch.issueType = category;
         changed.push("category");
@@ -1685,7 +1700,7 @@ export const editDraft = mutation({
       changed.push("preferred access times");
     }
     if (args.answers !== undefined) {
-      if (args.answers.length > 40) throw new Error("Too many answers.");
+      if (args.answers.length > 40) throw new ConvexError("Too many answers were sent (at most 40).");
       const edits = new Map(args.answers.map((a) => [a.key, a.value.trim().slice(0, 500)]));
       let touched = false;
       const next = req.answers.map((a) => {
@@ -1747,7 +1762,7 @@ export const withdrawFromPat = mutation({
   args: { requestId: v.id("maintenanceRequests"), note: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const { org, req } = await actableRequest(ctx, args.requestId);
-    if (req.status !== "forwarded_to_pat") throw new Error("This request isn't with the maintenance lead.");
+    if (req.status !== "forwarded_to_pat") throw new ConvexError("This request isn't with the maintenance lead.");
     const note = optText(args.note, 1000);
     await move(ctx, org, req, "under_review", "withdrawn_from_pat", note, { nextAction: note });
 
@@ -1791,10 +1806,10 @@ export async function addRequestNote(
     const org = await requireOrg(ctx);
     const req = await ctx.db.get(args.requestId);
     const scope = await scopeOf(ctx, org);
-    if (!req || !canRead(org, req, scope)) throw new Error("Request not found.");
+    if (!req || !canRead(org, req, scope)) throw new ConvexError("Request not found.");
     const isPat = canManageMaintenance(org);
-    if (!isPat && !canAct(org, req, scope)) throw new Error("You don't have access to that.");
-    if (!OPEN.includes(req.status)) throw new Error("This request is closed.");
+    if (!isPat && !canAct(org, req, scope)) throw new ConvexError("You don't have access to that.");
+    if (!OPEN.includes(req.status)) throw new ConvexError("This request is closed.");
     const note = requireText(args.note, "A note", max);
 
     await writeAudit(ctx, {
@@ -1869,10 +1884,10 @@ export const reopen = mutation({
         .withIndex("by_request", (q) => q.eq("requestId", req._id))
         .collect();
       if (wos.some((w) => w.status !== "reviewed_closed" && w.status !== "cancelled")) {
-        throw new Error("This request still has an open work order.");
+        throw new ConvexError("This request still has an open work order.");
       }
     } else if (req.status !== "closed_out_of_scope" && req.status !== "closed_duplicate") {
-      throw new Error("Only a closed request can be reopened.");
+      throw new ConvexError("Only a closed request can be reopened.");
     }
     await ctx.db.patch(req._id, {
       status: "under_review",
@@ -1907,7 +1922,7 @@ export const resolveException = mutation({
   handler: async (ctx, args) => {
     const { org, req } = await patOnlyRequest(ctx, args.requestId);
     if (!req.inExceptionQueue || !OPEN.includes(req.status)) {
-      throw new Error("This request isn't in the exception queue.");
+      throw new ConvexError("This request isn't in the exception queue.");
     }
     await routeRequest(ctx, req._id, { actorUserId: org.user._id, unitId: args.unitId, notify: true });
     await writeAudit(ctx, {
@@ -1930,7 +1945,7 @@ export const approveFallback = mutation({
     const { org, req } = await patOnlyRequest(ctx, args.requestId);
     const note = requireText(args.note, "A note", 500);
     if (!req.inExceptionQueue || req.routeReason !== "AM unavailable" || !OPEN.includes(req.status)) {
-      throw new Error("This request isn't waiting on an unavailable asset manager.");
+      throw new ConvexError("This request isn't waiting on an unavailable asset manager.");
     }
     const membership = await ctx.db
       .query("memberships")
@@ -1942,7 +1957,7 @@ export const approveFallback = mutation({
       membership.orgId !== org.orgId ||
       !(roles.includes("asset_manager") || roles.includes("maintenance_lead"))
     ) {
-      throw new Error("Pick an asset manager or maintenance lead on this team.");
+      throw new ConvexError("Pick an asset manager or maintenance lead on this team.");
     }
     await ctx.db.patch(req._id, {
       assignedAssetManagerUserId: args.userId,

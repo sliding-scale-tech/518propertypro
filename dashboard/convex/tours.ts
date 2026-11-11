@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { action, internalAction, internalMutation, internalQuery, mutation, query } from "./_generated/server";
@@ -103,7 +103,7 @@ export const setTimeZone = mutation({
   args: { timeZone: v.string() },
   handler: async (ctx, args) => {
     const org = await requireOrgAdmin(ctx);
-    if (!sched.isValidTimeZone(args.timeZone)) throw new Error("That is not a time zone we recognize.");
+    if (!sched.isValidTimeZone(args.timeZone)) throw new ConvexError("That is not a time zone we recognize.");
     await ctx.db.patch(org.orgId, { timeZone: args.timeZone, updatedAt: Date.now() });
   },
 });
@@ -129,7 +129,7 @@ export async function saveWeeklyHours(
 ): Promise<sched.DayHours[]> {
   const weeklyHours = sched.validateWeeklyHours(input);
   if (weeklyHours.length === 0) {
-    throw new Error("Pick at least one day. To stop taking tours, switch tours off on the Team page.");
+    throw new ConvexError("Pick at least one day. To stop taking tours, switch tours off on the Team page.");
   }
 
   const now = Date.now();
@@ -161,14 +161,14 @@ export const setTakingTours = mutation({
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
     if (args.userId !== org.user._id && !isAdminView(org)) {
-      throw new Error("Only a team admin can change a teammate's tours.");
+      throw new ConvexError("Only a team admin can change a teammate's tours.");
     }
 
     const membership = await ctx.db
       .query("memberships")
       .withIndex("by_user", (q) => q.eq("userId", args.userId))
       .first();
-    if (!membership || membership.orgId !== org.orgId) throw new Error("That person is not on your team.");
+    if (!membership || membership.orgId !== org.orgId) throw new ConvexError("That person is not on your team.");
 
     const now = Date.now();
     const existing = await ctx.db
@@ -202,7 +202,7 @@ export const addDayOff = mutation({
   args: { date: v.string() },
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
-    if (!sched.isDateKey(args.date)) throw new Error("date must be YYYY-MM-DD.");
+    if (!sched.isDateKey(args.date)) throw new ConvexError("Pick a valid date.");
 
     const organization = await ctx.db.get(org.orgId);
     if (organization?.timeZone) {
@@ -216,7 +216,7 @@ export const addDayOff = mutation({
         .filter((q) => q.eq(q.field("status"), "booked"))
         .first();
       if (clash) {
-        throw new Error("You already have a tour booked that day. Move or cancel it first, then turn the day off.");
+        throw new ConvexError("You already have a tour booked that day. Move or cancel it first, then turn the day off.");
       }
     }
 
@@ -275,7 +275,7 @@ export const tourDetails = query({
     const tour = await ctx.db.get(args.tourId);
     if (!tour || tour.orgId !== org.orgId) return null;
     if (tour.assignedUserId !== org.user._id && !isAdminView(org)) {
-      throw new Error("Only a team admin can view a teammate's tour.");
+      throw new ConvexError("Only a team admin can view a teammate's tour.");
     }
 
     const member = await ctx.db.get(tour.assignedUserId);
@@ -301,6 +301,8 @@ export const tourDetails = query({
       // has no elevenLabsConversationId and so nothing further to show here.
       fromCall: qualification
         ? {
+            preferredArea: qualification.preferredArea,
+            preferredCities: qualification.preferredCities,
             bedrooms: qualification.bedrooms,
             moveInDate: qualification.moveInDate,
             budget: qualification.budget,
@@ -405,9 +407,9 @@ export const cancelBookedTour = action({
   handler: async (ctx, args): Promise<void> => {
     const org = await requireOrgId(ctx);
     const tour = await ctx.runQuery(internal.tours.byId, { tourId: args.tourId });
-    if (!tour || tour.orgId !== org.orgId) throw new Error("That tour was not found.");
+    if (!tour || tour.orgId !== org.orgId) throw new ConvexError("That tour was not found.");
     if (tour.assignedUserId !== org.userId && !isAdminView(org)) {
-      throw new Error("Only a team admin can cancel a teammate's tour.");
+      throw new ConvexError("Only a team admin can cancel a teammate's tour.");
     }
     if (tour.status === "cancelled") return;
 

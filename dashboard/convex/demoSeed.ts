@@ -45,7 +45,7 @@ export const seed = internalMutation({
       await ctx.db.insert("properties", {
         orgId,
         userId,
-        name: "Maple Court Apartments",
+        name: "518 Property Pro",
         units: [
           { bedrooms: "studio", rentMin: 1150, rentMax: 1350, available: true },
           { bedrooms: "1br", rentMin: 1450, rentMax: 1750, available: true },
@@ -55,7 +55,7 @@ export const seed = internalMutation({
         petsAllowed: true,
         moveInWindowDays: 60,
         address: {
-          formatted: "1420 Maple Court, Columbus, OH 43215",
+          formatted: "60 Broad Street, Waterford, NY 12188",
         },
         updatedAt: now,
       });
@@ -230,7 +230,7 @@ export const seed = internalMutation({
       bump("qualifications");
 
       const transcript: Array<{ role: "user" | "agent"; text: string }> = [
-        { role: "agent", text: "Thanks for calling Maple Court Apartments, this is Sarah! Are you calling about renting an apartment, or something else?" },
+        { role: "agent", text: "Thanks for calling 518 Property Pro, this is Sarah! Are you calling about renting an apartment, or something else?" },
         { role: "user", text: `Hi, I'm looking for a ${l.bedrooms === "studio" ? "studio" : l.bedrooms.replace("br", " bedroom")}.` },
         { role: "agent", text: "Happy to help. What is your budget looking like, and when would you want to move in?" },
         { role: "user", text: `Around ${l.budget} a month, moving in ${l.moveInDate}.` },

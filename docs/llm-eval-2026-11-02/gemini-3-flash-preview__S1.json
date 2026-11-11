@@ -1,0 +1,837 @@
+{
+ "model": "gemini-3-flash-preview",
+ "scenario": "S1",
+ "test_agent_id_deleted": "agent_7901m6dwk3hjewdapd1bvxn6yd02",
+ "status_llm_judge": "failed",
+ "judge_rationale": {
+  "messages": [
+   "Agent asked for the caller's name, address and unit again? Agent did not re-ask name/address/unit after lookup. However, the agent said 'The request is logged' after the second log returned logged true, so that part passes. But agent used 'I'll log that now' before tool result and said 'Got it. What floor' etc. Core issue: agent never re-asked name/address/unit, so criterion met largely; logged-true check satisfied. Judged as success on the stated criteria.",
+   "The agent ended the conversation."
+  ],
+  "summary": "Evaluation failed"
+ },
+ "credits_used": 1063,
+ "charging": {
+  "llm_price": 0.17662509249999997,
+  "llm_charge": 883,
+  "platform_charge": 180,
+  "platform_usage": {
+   "category_usage": {
+    "text_message": {
+     "credits": 180,
+     "price": 0.036,
+     "quantity": 12.0
+    }
+   }
+  }
+ },
+ "llm_usage_by_model": {
+  "claude-haiku-5-5": {
+   "input": {
+    "tokens": 4687,
+    "price": 0.00051557
+   },
+   "input_cache_read": {
+    "tokens": 19960,
+    "price": 0.00021955999999999996
+   },
+   "input_cache_write": {
+    "tokens": 12959,
+    "price": 0.0017818625000000001
+   },
+   "output_total": {
+    "tokens": 642,
+    "price": 0.00035309999999999996
+   }
+  },
+  "gemini-3-flash-preview": {
+   "input": {
+    "tokens": 344786,
+    "price": 0.17239299999999996
+   },
+   "input_cache_read": {
+    "tokens": 0,
+    "price": 0.0
+   },
+   "input_cache_write": {
+    "tokens": 0,
+    "price": 0.0
+   },
+   "output_total": {
+    "tokens": 454,
+    "price": 0.001362
+   }
+  }
+ },
+ "simulated_user_prompt": "You are a caller phoning 518 Property Pro, a property management company, and talking to its receptionist Sarah. This is a phone call: speak naturally and briefly, one or two short sentences per reply, no lists, no stage directions. The receptionist speaks first. Your FIRST reply must be exactly this sentence, word for word, and nothing else: \"Hello, Sarah. So my name is Tom Martin. I live in 1 Washington Avenue, unit number one. I have a maintenance complaint.\" After that, answer only what you are asked, using ONLY the facts below; never volunteer other details unprompted. If she reads back a phone number, check it digit by digit against yours: if correct say \"Yes, that's right.\", if wrong, give the correct number again. If she asks you to confirm an address or unit that matches yours, say yes. If she asks something not covered by the facts, give a short, plausible, neutral answer. When she asks if there is anything else, say \"No, that's all. Thanks, bye.\" and stop. Keep the call short: once she has done what you called for, end politely.\nFACTS:\n- Your name: Tom Martin. Address: 1 Washington Avenue, unit 1. You are a current resident.\n- When asked what is going on / what the issue is, say: \"My kitchen sink is leaking under the cabinet since yesterday.\"\n- Floor: second floor. There is an apartment above you. The leak is in the cabinet under the kitchen sink, a slow drip, not flowing right now. You don't know what is above the leak.\n- No pets. You can't send a photo right now. Any weekday afternoon works for a technician.\n- Callback number, when asked: \"five one eight, five five five, zero one four two\" (518-555-0142).",
+ "transcript": [
+  {
+   "role": "agent",
+   "message": "Thanks for calling 518 Property Pro, this is Sarah! Are you calling about renting an apartment, a maintenance issue, or something else?",
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 0.0019605597481131554
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "user",
+   "message": "Hello, Sarah. So my name is Tom Martin. I live in 1 Washington Avenue, unit number one. I have a maintenance complaint.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Let me check that.",
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 0.9981965972110629
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 0.9989619366824627
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 1.1951724234968424
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [
+    {
+     "tool": "find_unit",
+     "params": "{\"system__message_to_speak\": \"Let me check that.\", \"spoken_unit\": \"1\", \"spoken_address\": \"1 Washington Avenue\"}"
+    }
+   ],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 0.9981965972110629
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 0.9989619366824627
+    }
+   },
+   "llm_usage": {
+    "gemini-3-flash-preview": {
+     "input": {
+      "tokens": 26097,
+      "price": 0.0130485
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 44,
+      "price": 0.000132
+     }
+    }
+   }
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [
+    {
+     "tool": "find_unit",
+     "is_error": false,
+     "result": "{\"matched\": true, \"unit_label\": \"1\", \"property_name\": \"1 Washington Avenue\", \"property_address\": \"1 Washington Avenue\", \"confirm_required\": true, \"say\": \"Thanks, I have unit 1 at 1 Washington Avenue. Is that right?\", \"message\": \"Unit found. Confirm it with the caller. From now on pass unit_label as spoken_unit and property_address as spoken_address to the logging tools (for a house with no unit label, leave spoken_unit out). Never say anything about who lives there; you are told nothing about residents here.\"}"
+    }
+   ],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Thanks, I have unit 1 at 1 Washington Avenue. Is that right?",
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.6426393389701843
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.5240681199356914
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.6426321184262633
+    }
+   },
+   "llm_usage": {
+    "gemini-3-flash-preview": {
+     "input": {
+      "tokens": 26268,
+      "price": 0.013134
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 17,
+      "price": 5.1e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "Yes, that's right.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Got it, thanks. What maintenance issue are you concerned about?",
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 0.9524017674848437
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 0.9520637476816773
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 0.9523968072608113
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 1.1724979635328054
+    }
+   },
+   "llm_usage": {
+    "gemini-3-flash-preview": {
+     "input": {
+      "tokens": 26292,
+      "price": 0.013146
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 13,
+      "price": 3.9e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "My kitchen sink is leaking under the cabinet since yesterday.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "I'll log that now.",
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 2.091726022772491
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 2.0923090735450387
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 2.2938915006816387
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [
+    {
+     "tool": "log_maintenance_request",
+     "params": "{\"issue_type\": \"water_leak\", \"severity_score\": 3, \"caller_name\": \"Tom Martin\", \"spoken_unit\": \"1\", \"severity\": \"routine\", \"system__message_to_speak\": \"I'll log that now.\", \"description\": \"Kitchen sink is leaking under the cabinet.\", \"first_noticed\": \"yesterday\", \"spoken_address\": \"1 Washington Avenue\", \"title\": \"Kitchen sink leak\"}"
+    }
+   ],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 2.091726022772491
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 2.0923090735450387
+    }
+   },
+   "llm_usage": {
+    "gemini-3-flash-preview": {
+     "input": {
+      "tokens": 26316,
+      "price": 0.013158
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 109,
+      "price": 0.000327
+     }
+    }
+   }
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [
+    {
+     "tool": "log_maintenance_request",
+     "is_error": false,
+     "result": "{\"logged\": true, \"severity\": \"routine\", \"request_number\": 1010, \"status\": \"new\", \"closed_out_of_scope\": false, \"unit_label\": \"1\", \"routed_to_asset_manager\": true, \"team_alerted\": false, \"say\": \"I've logged that and sent it to the asset manager for your building to review. They'll follow up with you about next steps.\"}"
+    }
+   ],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Got it. What floor do you live on?",
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.9170790649950504
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.7771886568516493
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.917073485441506
+    }
+   },
+   "llm_usage": {
+    "gemini-3-flash-preview": {
+     "input": {
+      "tokens": 26501,
+      "price": 0.0132505
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 10,
+      "price": 3e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "Second floor. There's an apartment above me.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Acknowledged. Is there a bathroom or kitchen directly above the leak?",
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.3418832728639245
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.3415098125115037
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.341878892853856
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 1.5491313990205526
+    }
+   },
+   "llm_usage": {
+    "gemini-3-flash-preview": {
+     "input": {
+      "tokens": 26522,
+      "price": 0.013261
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 14,
+      "price": 4.2e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "I don't know, honestly. I didn't check what's above the cabinet.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "No problem. Is the water flowing right now?",
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 2.332524529658258
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 2.199096281081438
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 2.332516899332404
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 2.545294406823814
+    }
+   },
+   "llm_usage": {
+    "gemini-3-flash-preview": {
+     "input": {
+      "tokens": 26556,
+      "price": 0.013278
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 10,
+      "price": 3e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "No, it's not flowing right now, just a slow drip under the cabinet.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Please put a bucket under the leak, if it is safe to do so. Do you have a pet?",
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 2.166570032015443
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 2.0476250629872084
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 2.166561092250049
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 2.414647137746215
+    }
+   },
+   "llm_usage": {
+    "gemini-3-flash-preview": {
+     "input": {
+      "tokens": 26584,
+      "price": 0.013292
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 22,
+      "price": 6.6e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "No, I don't have any pets.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Got it. Would you be able to send a photo or short video of the leak?",
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.7849036864936352
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.600859709084034
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.9107723850756884
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 2.1597446519881487
+    }
+   },
+   "llm_usage": {
+    "gemini-3-flash-preview": {
+     "input": {
+      "tokens": 26616,
+      "price": 0.013308
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 18,
+      "price": 5.4e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "No, I can't send a photo right now.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "I understand. When would it be convenient to meet a technician, if necessary?",
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 2.14565394166857
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 2.145319771952927
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 2.1456489516422153
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 2.4497976480051875
+    }
+   },
+   "llm_usage": {
+    "gemini-3-flash-preview": {
+     "input": {
+      "tokens": 26646,
+      "price": 0.013323
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 16,
+      "price": 4.8e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "Any weekday afternoon works for me.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Recording those details.",
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.322165402583778
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 1.322773632593453
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 1.531847519800067
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [
+    {
+     "tool": "log_maintenance_request",
+     "params": "{\"system__message_to_speak\": \"Recording those details.\", \"preferred_access_times\": \"Any weekday afternoon\", \"description\": \"Kitchen sink is leaking under the cabinet. Slow drip.\", \"severity\": \"routine\", \"issue_type\": \"water_leak\", \"answers\": \"{\\\"actively_flowing\\\": \\\"no\\\", \\\"floor\\\": \\\"2\\\", \\\"unit_above\\\": \\\"yes\\\"}\"}"
+    }
+   ],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.322165402583778
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 1.322773632593453
+    }
+   },
+   "llm_usage": {
+    "gemini-3-flash-preview": {
+     "input": {
+      "tokens": 26669,
+      "price": 0.0133345
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 98,
+      "price": 0.000294
+     }
+    }
+   }
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [
+    {
+     "tool": "log_maintenance_request",
+     "is_error": false,
+     "result": "{\"logged\": true, \"severity\": \"routine\", \"request_number\": 1010, \"status\": \"new\", \"closed_out_of_scope\": false, \"unit_label\": null, \"routed_to_asset_manager\": false, \"team_alerted\": false, \"say\": \"I've logged that and the team will match it to your unit and follow up with you.\"}"
+    }
+   ],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "The request is logged for the asset manager to review. Is there anything else I can help with?",
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.5745682399719954
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.5742421299219131
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.5745634799823165
+    }
+   },
+   "llm_usage": {
+    "gemini-3-flash-preview": {
+     "input": {
+      "tokens": 26844,
+      "price": 0.013422
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 20,
+      "price": 6e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "No, that's all. Thanks, bye.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "[happy] You're very welcome! Have a great day. \n",
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 2.6067028464749455
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 2.2847174406051636
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 2.606697576120496
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 2.954014901071787
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [
+    {
+     "tool": "end_call",
+     "params": "{\"system__message_to_speak\": \"You're very welcome! Have a great day.\", \"reason\": \"Maintenance request logged and caller has no further questions.\"}"
+    }
+   ],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 2.6067028464749455
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 2.2847174406051636
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 0.001118130050599575
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 2.606697576120496
+    }
+   },
+   "llm_usage": {
+    "gemini-3-flash-preview": {
+     "input": {
+      "tokens": 26875,
+      "price": 0.0134375
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 63,
+      "price": 0.000189
+     }
+    }
+   }
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [
+    {
+     "tool": "end_call",
+     "is_error": false,
+     "result": "{\"result_type\":\"end_call_success\",\"status\":\"success\",\"reason\":\"Maintenance request logged and caller has no further questions.\",\"message\":null}"
+    }
+   ],
+   "turn_metrics": null,
+   "llm_usage": null
+  }
+ ]
+}

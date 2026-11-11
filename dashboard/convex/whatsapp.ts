@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import {
   action,
   internalMutation,
@@ -131,9 +131,8 @@ export const connect = action({
   args: {},
   handler: async (ctx): Promise<{ status: string }> => {
     if (!waha.isConfigured()) {
-      throw new Error(
-        "WhatsApp is not configured. Set WAHA_BASE_URL and WAHA_API_KEY — see infra/waha/README.md.",
-      );
+      console.error("whatsapp.connect: WhatsApp is not configured on this deployment (WAHA env vars missing).");
+      throw new ConvexError("WhatsApp isn't set up for this team yet. Ask your administrator to finish the setup.");
     }
     const siteUrl = process.env.CONVEX_SITE_URL;
     if (!siteUrl) throw new Error("CONVEX_SITE_URL is not set on this deployment.");
@@ -235,7 +234,7 @@ export const staffReply = action({
   handler: async (): Promise<void> => {
     // Texting policy: staff replies are off. Thrown before anything is sent or recorded, so the
     // thread is not taken off the bot by a reply that cannot go out.
-    throw new Error("Texting is turned off for now except emergency alerts.");
+    throw new ConvexError("Texting is turned off for now except emergency alerts.");
   },
 });
 

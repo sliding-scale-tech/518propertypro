@@ -226,8 +226,9 @@ async function buildSystemContext(ctx: ActionCtx): Promise<string> {
 
   const propertyBlock = [
     property.name,
-    `Pets allowed: ${property.petsAllowed ? "yes" : "no"}`,
-    `Move-in window: within ${property.moveInWindowDays} days`,
+    // Unset = not provided (imported buildings): say so rather than invent a policy.
+    `Pets allowed: ${property.petsAllowed === undefined ? "not provided, do not state a pet policy" : property.petsAllowed ? "yes" : "no"}`,
+    `Move-in window: ${property.moveInWindowDays === undefined ? "not provided, do not state one" : `within ${property.moveInWindowDays} days`}`,
     "Units:",
     units,
   ].join("\n");

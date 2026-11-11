@@ -4,8 +4,7 @@ import { useMutation, useQuery } from "convex/react";
 import { useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { errorMessage } from "@/components/tech/lib";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import { Btn, Drawer, Field, Select, Textarea } from "@/components/ui";
 import { ISSUE_TYPES, SEVERITY_CHOICES, issueLabel, mrId, type Severity } from "./shared";
 

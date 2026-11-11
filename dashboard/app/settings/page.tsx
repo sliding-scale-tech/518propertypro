@@ -4,7 +4,7 @@ import { Select } from "@/components/ui";
 import { useAction, useMutation, useQuery } from "convex/react";
 import { useEffect, useState } from "react";
 import { api } from "@/convex/_generated/api";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import { RUBRIC } from "@/convex/leadScoring";
 import { RESIDENT_TRIAGE_BLOCK } from "@/convex/residentTriage";
 import {
@@ -97,7 +97,7 @@ function SettingsPageInner() {
       toast("Agent saved — changes apply to the next call");
     } catch (err) {
       setStatus("error");
-      setError(err instanceof Error ? err.message : "Could not save the agent.");
+      setError(errorMessage(err, "Could not save the agent."));
     }
   };
 

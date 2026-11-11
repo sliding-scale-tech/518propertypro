@@ -6,10 +6,10 @@ import { useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Dialog } from "@/components/properties/dialog";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import { AddUnitModal, type NewUnit } from "@/components/units/add-unit-modal";
 import { EditUnitModal } from "@/components/units/edit-unit-modal";
-import { errorMessage, formatRent, type Manager, type UnitRow } from "@/components/units/types";
+import { formatRent, type Manager, type UnitRow } from "@/components/units/types";
 import { UnitHistory } from "@/components/units/unit-history";
 import { Btn, Card, CardHead, DataTable, IconBtn, Pill, Select, Toggle, type Column } from "@/components/ui";
 

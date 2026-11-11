@@ -35,8 +35,8 @@ ADDITIONAL KNOWLEDGE:
 async function buildSystemContext(ctx: any): Promise<string> {
   const property: {
     name: string;
-    petsAllowed: boolean;
-    moveInWindowDays: number;
+    petsAllowed?: boolean;
+    moveInWindowDays?: number;
     units: Array<{ bedrooms: string; rentMin: number; rentMax: number; available: boolean }>;
   } = await ctx.runQuery(internal.properties.currentInternal, {});
   const docs: Array<{ title: string; body: string }> = await ctx.runQuery(
@@ -46,8 +46,9 @@ async function buildSystemContext(ctx: any): Promise<string> {
 
   const propertyText = [
     `Name: ${property.name}`,
-    `Pets allowed: ${property.petsAllowed ? "yes" : "no"}`,
-    `Move-in window: within ${property.moveInWindowDays} days`,
+    // Unset = not provided (imported buildings): say so rather than invent a policy.
+    `Pets allowed: ${property.petsAllowed === undefined ? "not provided, do not state a pet policy" : property.petsAllowed ? "yes" : "no"}`,
+    `Move-in window: ${property.moveInWindowDays === undefined ? "not provided, do not state one" : `within ${property.moveInWindowDays} days`}`,
     "Units:",
     ...property.units.map(
       (u: { bedrooms: string; rentMin: number; rentMax: number; available: boolean }) =>

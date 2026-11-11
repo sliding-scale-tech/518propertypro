@@ -1,11 +1,13 @@
 "use client";
 
 import type { FunctionReturnType } from "convex/server";
-import { ArrowDown, ArrowUp, Plus, Trash2 } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import type { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { isValidPhone, isValidPhoneOrExt, NO_PRESS_ZERO_WARNING, UTILITY_PLACEHOLDER } from "@/convex/sarahConfigLib";
+import { isValidPhone, UTILITY_PLACEHOLDER } from "@/convex/sarahConfigLib";
+import { routingProblems } from "@/convex/ownerRoutingLib";
 import { Btn, Field, IconBtn, Input, Textarea, cx } from "@/components/ui";
+import { FieldError, HoursEditor, PhoneField, RoutingEditor, routingDraftProblems, type RoutingDraft } from "./routing-editor";
 
 /** The editors for each kind of "Needs approval" item. Pure form UI: the modal owns saving. */
 
@@ -27,23 +29,35 @@ export function validateContent(c: Content): string | null {
     const bad = c.properties.find((p) => p.phone.trim() && !isValidPhone(p.phone.trim()));
     if (bad) return `The number for ${bad.name} is not a valid phone number. Use digits and +, like +15185550100.`;
   } else if (c.kind === "delia") {
-    if (c.phone.trim() && !isValidPhoneOrExt(c.phone)) return "Enter a valid phone number or extension.";
-    if (c.name.length > 100) return "The name is too long.";
+    const p = deliaProblems(c)[0];
+    if (p) return p.message;
   } else if (c.kind === "escalation") {
     const bad = c.externalPhones.find((p) => p.trim() && (!isValidPhone(p) || p.trim() === "911"));
     if (bad) return `"${bad}" is not a valid phone number.`;
   } else if (c.kind === "routing") {
-    if (c.entries.length > 9) return "The menu can have at most 9 entries.";
-    if (c.entries.some((e) => !e.label.trim())) return "Every entry needs a name.";
-    const bad = c.entries.find((e) => e.phone.trim() && !isValidPhoneOrExt(e.phone));
-    if (bad) return `The number for ${bad.label} is not a valid phone number or extension.`;
-    if (c.fallback.length > 1000 || c.afterHours.length > 1000) return "Fallback and after-hours text can be at most 1000 characters.";
+    const p = routingDraftProblems(routingDraftOf(c), c.ownLine)[0];
+    if (p) return p.message;
   } else {
     if (c.levels.some((l) => !l.definition.trim())) return "Every severity level needs a definition.";
     const bad = c.escalation.flatMap((e) => e.externalPhones).find((p) => p.trim() && (!isValidPhone(p) || p.trim() === "911"));
     if (bad) return `"${bad}" is not a valid phone number.`;
   }
   return null;
+}
+
+type DeliaContent = Extract<Content, { kind: "delia" }>;
+type RoutingContent = Extract<Content, { kind: "routing" }>;
+
+/** Delia's one entry, checked with the same rules as the routing directory. */
+function deliaProblems(c: DeliaContent) {
+  return routingProblems(
+    { enabled: false, entries: [{ label: c.name.trim() || "Delia (Accounting)", phone: c.phone, extension: c.extension, hours: c.hours }] },
+    { ownLines: c.ownLine ? [c.ownLine] : [] },
+  );
+}
+
+function routingDraftOf(c: RoutingContent): RoutingDraft {
+  return { enabled: c.enabled, entries: c.entries, fallback: c.fallback, afterHours: c.afterHours, mainOfficeNumber: c.mainOfficeNumber };
 }
 
 /** The server arguments for a save. */
@@ -54,12 +68,25 @@ export function toPayload(c: Content) {
   if (c.kind === "gas") {
     return { kind: "gas" as const, phones: c.properties.map((p) => ({ propertyId: p.id as Id<"properties">, phone: p.phone })) };
   }
-  if (c.kind === "delia") return { kind: "delia" as const, name: c.name, phone: c.phone, hours: c.hours };
+  if (c.kind === "delia") return { kind: "delia" as const, name: c.name, phone: c.phone, hours: c.hours, extension: c.extension };
   if (c.kind === "escalation") {
     return { kind: "escalation" as const, level: c.level, userIds: c.userIds as Id<"users">[], externalPhones: c.externalPhones };
   }
   if (c.kind === "routing") {
-    return { kind: "routing" as const, entries: c.entries, fallback: c.fallback, afterHours: c.afterHours };
+    return {
+      kind: "routing" as const,
+      entries: c.entries.map((e) => ({
+        label: e.label,
+        phone: e.phone,
+        hours: e.hours,
+        extension: e.extension,
+        // "" = nobody chosen (the team callback list); the server treats ""/null/absent alike.
+        userId: e.userId ? (e.userId as Id<"users">) : ("" as const),
+      })),
+      fallback: c.fallback,
+      afterHours: c.afterHours,
+      mainOfficeNumber: c.mainOfficeNumber,
+    };
   }
   return {
     kind: "severity" as const,
@@ -75,18 +102,16 @@ function PhoneInput({
   onChange,
   readOnly,
   label,
-  allowExt,
   placeholder,
 }: {
   value: string;
   onChange: (v: string) => void;
   readOnly: boolean;
   label: string;
-  allowExt?: boolean;
   placeholder?: string;
 }) {
   const v = value.trim();
-  const bad = v !== "" && !(allowExt ? isValidPhoneOrExt(v) : isValidPhone(v));
+  const bad = v !== "" && !isValidPhone(v);
   return (
     <div className="min-w-0">
       <Input
@@ -96,9 +121,9 @@ function PhoneInput({
         autoComplete="off"
         maxLength={24}
         readOnly={readOnly}
-        placeholder={placeholder ?? (allowExt ? "Phone or ext." : "+15185550100")}
+        placeholder={placeholder ?? "+15185550100"}
         value={value}
-        onChange={(e) => onChange(e.target.value.replace(/[^\d+()\-.\sext]/gi, ""))}
+        onChange={(e) => onChange(e.target.value.replace(/[^\d+()\-.\s]/g, ""))}
         className={cx(bad && "border-danger-ink")}
       />
       {bad ? <p className="mt-1 text-xs text-danger-ink">Use digits and +, like +15185550100.</p> : null}
@@ -287,23 +312,61 @@ export function ContentEditor({
   }
 
   if (c.kind === "delia") {
+    const err: Record<string, string> = {};
+    for (const p of deliaProblems(c)) {
+      const k = p.field.split(".").pop() ?? p.field;
+      if (!err[k]) err[k] = p.message;
+    }
     return (
       <div className="space-y-3">
         <p className="text-sm text-muted-foreground">
-          Vendor payment questions go to Delia in accounting. Enter her number or extension. Sarah gives it only for vendor payment
-          questions.
+          Vendor payment questions go to Delia in accounting. Enter her direct number, and an extension if she has one. Sarah gives
+          the number only for vendor payment questions. This is the same entry as Delia&apos;s line in the Routing directory.
         </p>
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid gap-3 sm:grid-cols-[1fr_12rem_7rem]">
           <Field label="Name">
-            <Input maxLength={100} readOnly={readOnly} value={c.name} onChange={(e) => onChange({ ...c, name: e.target.value })} />
+            <div>
+              <Input
+                maxLength={100}
+                readOnly={readOnly}
+                aria-invalid={!!err.label}
+                value={c.name}
+                onChange={(e) => onChange({ ...c, name: e.target.value })}
+                className={cx(err.label && "border-danger-ink")}
+              />
+              <FieldError message={err.label} />
+            </div>
           </Field>
-          <Field label="Phone or extension">
-            <PhoneInput label="Delia phone or extension" allowExt value={c.phone} readOnly={readOnly} onChange={(phone) => onChange({ ...c, phone })} />
+          <Field label="Phone number">
+            <PhoneField
+              label="Delia phone number"
+              placeholder="518-555-0123"
+              value={c.phone}
+              readOnly={readOnly}
+              error={err.phone}
+              onChange={(phone) => onChange({ ...c, phone })}
+            />
           </Field>
-          <Field label="Hours (optional)">
-            <Input maxLength={200} readOnly={readOnly} value={c.hours} onChange={(e) => onChange({ ...c, hours: e.target.value })} />
+          <Field label="Extension">
+            <div>
+              <Input
+                aria-label="Delia extension"
+                inputMode="numeric"
+                maxLength={12}
+                readOnly={readOnly}
+                placeholder="Optional"
+                aria-invalid={!!err.extension}
+                value={c.extension}
+                onChange={(e) => onChange({ ...c, extension: e.target.value.replace(/[^\d]/g, "") })}
+                className={cx(err.extension && "border-danger-ink")}
+              />
+              <FieldError message={err.extension} />
+            </div>
           </Field>
         </div>
+        <Field label="Hours (New York time, optional)">
+          <HoursEditor label="Delia's hours" value={c.hours} readOnly={readOnly} error={err.hours} onChange={(hours) => onChange({ ...c, hours })} />
+        </Field>
       </div>
     );
   }
@@ -327,81 +390,20 @@ export function ContentEditor({
   }
 
   if (c.kind === "routing") {
-    const move = (i: number, d: number) => {
-      const j = i + d;
-      if (j < 0 || j >= c.entries.length) return;
-      const next = [...c.entries];
-      [next[i], next[j]] = [next[j], next[i]];
-      onChange({ ...c, entries: next });
-    };
     return (
       <div className="space-y-3">
-        <div role="alert" className="rounded-xl bg-warning-soft px-3 py-2 text-[13px] font-medium text-warning-ink">
-          {NO_PRESS_ZERO_WARNING}
-        </div>
         <p className="text-sm text-muted-foreground">
-          Phone menu options. Leave a number blank until Pat provides it: a blank entry shows as &quot;Needs contact details&quot; and keeps
-          the menu off.
+          Phone menu options, in key order. Leave a number blank until Pat provides it: Sarah then says that person isn&apos;t
+          available by phone and takes a message. The on/off switch is on the Routing directory tab.
         </p>
-        <div className="space-y-2">
-          {c.entries.map((e, i) => (
-            <div key={i} className="grid items-start gap-1.5 sm:grid-cols-[2.25rem_1fr_11rem_9rem_auto]">
-              <div className="flex h-9 items-center justify-center rounded-lg bg-muted text-sm font-semibold" title={`Press ${i + 1}`}>
-                {i + 1}
-              </div>
-              <Input
-                aria-label={`Name for key ${i + 1}`}
-                maxLength={100}
-                readOnly={readOnly}
-                placeholder="Name"
-                value={e.label}
-                onChange={(ev) => onChange({ ...c, entries: c.entries.map((x, k) => (k === i ? { ...x, label: ev.target.value } : x)) })}
-              />
-              <div>
-                <PhoneInput
-                  label={`Phone or extension for ${e.label || `key ${i + 1}`}`}
-                  allowExt
-                  value={e.phone}
-                  readOnly={readOnly}
-                  onChange={(phone) => onChange({ ...c, entries: c.entries.map((x, k) => (k === i ? { ...x, phone } : x)) })}
-                />
-                {e.phone.trim() === "" ? <div className="mt-1 text-xs text-warning-ink">Needs contact details</div> : null}
-              </div>
-              <Input
-                aria-label={`Hours for ${e.label || `key ${i + 1}`}`}
-                maxLength={200}
-                readOnly={readOnly}
-                placeholder="Hours (optional)"
-                value={e.hours}
-                onChange={(ev) => onChange({ ...c, entries: c.entries.map((x, k) => (k === i ? { ...x, hours: ev.target.value } : x)) })}
-              />
-              {!readOnly ? (
-                <div className="flex gap-1">
-                  <IconBtn label="Move up" disabled={i === 0} onClick={() => move(i, -1)}>
-                    <ArrowUp />
-                  </IconBtn>
-                  <IconBtn label="Move down" disabled={i === c.entries.length - 1} onClick={() => move(i, 1)}>
-                    <ArrowDown />
-                  </IconBtn>
-                  <IconBtn label={`Delete ${e.label || `key ${i + 1}`}`} onClick={() => requestRemove(i)}>
-                    <Trash2 />
-                  </IconBtn>
-                </div>
-              ) : null}
-            </div>
-          ))}
-          {!readOnly && c.entries.length < 9 ? (
-            <Btn sm onClick={() => onChange({ ...c, entries: [...c.entries, { label: "", phone: "", hours: "" }] })}>
-              <Plus className="h-3.5 w-3.5" /> Add person
-            </Btn>
-          ) : null}
-        </div>
-        <Field label="If nobody answers" hint="What happens when the person does not pick up. Pat and Alex to decide.">
-          <Textarea rows={2} maxLength={1000} readOnly={readOnly} value={c.fallback} onChange={(e) => onChange({ ...c, fallback: e.target.value })} />
-        </Field>
-        <Field label="After hours" hint="What callers get outside office hours. Pat and Alex to decide.">
-          <Textarea rows={2} maxLength={1000} readOnly={readOnly} value={c.afterHours} onChange={(e) => onChange({ ...c, afterHours: e.target.value })} />
-        </Field>
+        <RoutingEditor
+          value={routingDraftOf(c)}
+          onChange={(d) => onChange({ ...c, ...d })}
+          readOnly={readOnly}
+          members={members}
+          ownLine={c.ownLine}
+          onRemove={requestRemove}
+        />
       </div>
     );
   }

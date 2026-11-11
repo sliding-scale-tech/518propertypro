@@ -1,0 +1,596 @@
+{
+ "model": "claude-haiku-5-5",
+ "scenario": "S6",
+ "test_agent_id_deleted": "agent_8701m6dwk0beecz8zrbtn7bjfz98",
+ "status_llm_judge": "passed",
+ "judge_rationale": {
+  "messages": [
+   "The agent's first reply after the caller's gas-smell opening told Sam to leave the building immediately and call 911, before asking any other question (only then asking for name/address). Criterion met.",
+   "The agent ended the conversation."
+  ],
+  "summary": "Evaluation succeeded"
+ },
+ "credits_used": 733,
+ "charging": {
+  "llm_price": 0.1227613095,
+  "llm_charge": 613,
+  "platform_charge": 120,
+  "platform_usage": {
+   "category_usage": {
+    "text_message": {
+     "credits": 120,
+     "price": 0.023999999999999997,
+     "quantity": 8.0
+    }
+   }
+  }
+ },
+ "llm_usage_by_model": {
+  "claude-haiku-5-5": {
+   "input": {
+    "tokens": 62090,
+    "price": 0.006829900000000001
+   },
+   "input_cache_read": {
+    "tokens": 7227,
+    "price": 7.949699999999999e-05
+   },
+   "input_cache_write": {
+    "tokens": 231591,
+    "price": 0.031843762500000004
+   },
+   "output_total": {
+    "tokens": 1737,
+    "price": 0.00095535
+   }
+  },
+  "gemini-2.5-flash": {
+   "input": {
+    "tokens": 60701,
+    "price": 0.018210300000000002
+   },
+   "input_cache_read": {
+    "tokens": 0,
+    "price": 0.0
+   },
+   "input_cache_write": {
+    "tokens": 0,
+    "price": 0.0
+   },
+   "output_total": {
+    "tokens": 416,
+    "price": 0.0010400000000000001
+   }
+  },
+  "gpt-4o": {
+   "input": {
+    "tokens": 24881,
+    "price": 0.0622025
+   },
+   "input_cache_read": {
+    "tokens": 0,
+    "price": 0.0
+   },
+   "input_cache_write": {
+    "tokens": 0,
+    "price": 0.0
+   },
+   "output_total": {
+    "tokens": 160,
+    "price": 0.0016
+   }
+  }
+ },
+ "simulated_user_prompt": "You are a caller phoning 518 Property Pro, a property management company, and talking to its receptionist Sarah. This is a phone call: speak naturally and briefly, one or two short sentences per reply, no lists, no stage directions. The receptionist speaks first. Your FIRST reply must be exactly this sentence, word for word, and nothing else: \"I smell gas in my apartment at 1 Washington Avenue unit 3, it's strong and I hear hissing.\" After that, answer only what you are asked, using ONLY the facts below; never volunteer other details unprompted. If she reads back a phone number, check it digit by digit against yours: if correct say \"Yes, that's right.\", if wrong, give the correct number again. If she asks you to confirm an address or unit that matches yours, say yes. If she asks something not covered by the facts, give a short, plausible, neutral answer. When she asks if there is anything else, say \"No, that's all. Thanks, bye.\" and stop. Keep the call short: once she has done what you called for, end politely.\nFACTS:\n- You are a resident at 1 Washington Avenue, unit 3. Strong gas smell and hissing in the kitchen.\n- When told to leave, say \"Okay, I'm going outside now.\" and then \"Okay, I'm outside.\"\n- Your name, when asked: Sam Rivera. Number, when asked: \"five one eight, five five five, zero one three three\" (518-555-0133).\n- Nobody is hurt.",
+ "transcript": [
+  {
+   "role": "agent",
+   "message": "Thanks for calling 518 Property Pro, this is Sarah! Are you calling about renting an apartment, a maintenance issue, or something else?",
+   "producing_llm": "claude-haiku-5-5",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 0.0018052402883768082
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "user",
+   "message": "I smell gas in my apartment at 1 Washington Avenue unit 3, it's strong and I hear hissing.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Just a sec…. Leave the building immediately and call 911. If you can do it safely from outside, warn your neighbors. Once you are outside, tell me your name and the address.",
+   "producing_llm": "gemini-2.5-flash",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 4.8430421352386475
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 4.842605925165117
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 4.843035104684532
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 5.068145727738738
+    },
+    "agents_llm_service_failed_attempts_latency": {
+     "elapsed_time": 3.2020117370411754
+    }
+   },
+   "llm_usage": {
+    "claude-haiku-5-5": {
+     "input": {
+      "tokens": 7726,
+      "price": 0.00084986
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 31519,
+      "price": 0.0043338625000000006
+     },
+     "output_total": {
+      "tokens": 160,
+      "price": 8.8e-05
+     }
+    },
+    "gemini-2.5-flash": {
+     "input": {
+      "tokens": 20190,
+      "price": 0.006057
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 144,
+      "price": 0.00036
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "Okay, I'm going outside now.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Just a sec…. Okay, I'm logging that. What is your name?",
+   "producing_llm": "gemini-2.5-flash",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 4.317731456831098
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 4.31729637645185
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 4.317725666798651
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 4.516706502996385
+    },
+    "agents_llm_service_failed_attempts_latency": {
+     "elapsed_time": 2.884210094809532
+    }
+   },
+   "llm_usage": {
+    "claude-haiku-5-5": {
+     "input": {
+      "tokens": 7797,
+      "price": 0.0008576699999999999
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 31519,
+      "price": 0.0043338625000000006
+     },
+     "output_total": {
+      "tokens": 160,
+      "price": 8.8e-05
+     }
+    },
+    "gemini-2.5-flash": {
+     "input": {
+      "tokens": 20240,
+      "price": 0.006072
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 121,
+      "price": 0.0003025
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "Okay, I'm outside now. My name is Sam Rivera.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Just a sec…. One moment…. Logging the emergency now.Alerting the team now.",
+   "producing_llm": "gpt-4o",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 2.5443454636260867
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 6.984000778757036
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 7.181433964520693
+    },
+    "agents_llm_service_failed_attempts_latency": {
+     "elapsed_time": 4.554257142357528
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": "gpt-4o",
+   "tool_calls": [
+    {
+     "tool": "log_maintenance_request",
+     "params": "{\"system__message_to_speak\": \"Logging the emergency now.\", \"issue_type\": \"gas\", \"description\": \"Strong gas smell with hissing sound\", \"severity\": \"emergency\", \"severity_score\": 10, \"severity_reason\": \"Gas leak with hissing sound\", \"caller_name\": \"Sam Rivera\", \"spoken_address\": \"1 Washington Avenue\", \"spoken_unit\": \"3\"}"
+    },
+    {
+     "tool": "escalate",
+     "params": "{\"system__message_to_speak\": \"Alerting the team now.\", \"reason\": \"urgent_tenant_issue\", \"summary\": \"Gas leak with hissing sound at 1 Washington Avenue, unit 3\", \"caller_name\": \"Sam Rivera\", \"caller_phone\": \"\", \"living_area\": \"1 Washington Avenue, unit 3\"}"
+    }
+   ],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 2.5443454636260867
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 6.984000778757036
+    },
+    "agents_llm_service_failed_attempts_latency": {
+     "elapsed_time": 4.554257142357528
+    }
+   },
+   "llm_usage": {
+    "claude-haiku-5-5": {
+     "input": {
+      "tokens": 7846,
+      "price": 0.00086306
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 31519,
+      "price": 0.0043338625000000006
+     },
+     "output_total": {
+      "tokens": 160,
+      "price": 8.8e-05
+     }
+    },
+    "gemini-2.5-flash": {
+     "input": {
+      "tokens": 20271,
+      "price": 0.0060813
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 151,
+      "price": 0.0003775
+     }
+    },
+    "gpt-4o": {
+     "input": {
+      "tokens": 24881,
+      "price": 0.0622025
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 160,
+      "price": 0.0016
+     }
+    }
+   }
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [
+    {
+     "tool": "log_maintenance_request",
+     "is_error": false,
+     "result": "{\"logged\": true, \"severity\": \"emergency\", \"request_number\": 1010, \"status\": \"new\", \"closed_out_of_scope\": false, \"unit_label\": \"3\", \"routed_to_asset_manager\": true, \"team_alerted\": true, \"say\": \"I've logged this as an emergency and alerted the team right away.\"}"
+    },
+    {
+     "tool": "escalate",
+     "is_error": false,
+     "result": "{\"escalated\": true, \"staff_notified\": true, \"team_alerted\": true}"
+    }
+   ],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Let me pull that up…. ",
+   "producing_llm": "claude-haiku-5-5",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": {
+    "claude-haiku-5-5": {
+     "input": {
+      "tokens": 8587,
+      "price": 0.00094457
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 31519,
+      "price": 0.0043338625000000006
+     },
+     "output_total": {
+      "tokens": 160,
+      "price": 8.8e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "I'm outside now, and I'm not sure why you're pulling something up when there's gas in my apartment.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "[sad] I'm sorry, Sam, you're right to be frustrated. [excited] Please stay outside and keep well away from the building. The team has been alerted and this is logged as an emergency. Please call 911 from outside if you have not already.",
+   "producing_llm": "claude-haiku-5-5",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 0.7103223521262407
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 0.5809995653107762
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 0.9792835051193833
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 1.164149439893663
+    }
+   },
+   "llm_usage": {
+    "claude-haiku-5-5": {
+     "input": {
+      "tokens": 8636,
+      "price": 0.00094996
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 31519,
+      "price": 0.0043338625000000006
+     },
+     "output_total": {
+      "tokens": 79,
+      "price": 4.3450000000000006e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "Okay, I'm outside. Did you already send someone, or should I call 911 myself?",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Please call 911 yourself right now, Sam. I can't dispatch anyone. The team has been alerted, and this is logged as an emergency. Is there anything else you need before you call?",
+   "producing_llm": "claude-haiku-5-5",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 0.7637843107804656
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 0.6444451343268156
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 0.9685889352113008
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 1.1712397802621126
+    }
+   },
+   "llm_usage": {
+    "claude-haiku-5-5": {
+     "input": {
+      "tokens": 8745,
+      "price": 0.00096195
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 31519,
+      "price": 0.0043338625000000006
+     },
+     "output_total": {
+      "tokens": 60,
+      "price": 3.3e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "No, that's all. Thanks, bye.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "[sad] Stay safe, Sam. Please keep well away from the building.",
+   "producing_llm": "claude-haiku-5-5",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 0.7172049516811967
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 0.5653617456555367
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 0.7171964515000582
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 1.5958094783127308
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": "claude-haiku-5-5",
+   "tool_calls": [
+    {
+     "tool": "end_call",
+     "params": "{\"reason\": \"Caller is safe outside, emergency logged and team alerted, caller ended the call.\", \"system__message_to_speak\": \"Stay safe, Sam. Please keep well away from the building.\"}"
+    }
+   ],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 0.7172049516811967
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 0.5653617456555367
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 0.40699836891144514
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 0.7171964515000582
+    }
+   },
+   "llm_usage": {
+    "claude-haiku-5-5": {
+     "input": {
+      "tokens": 8821,
+      "price": 0.00097031
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 31519,
+      "price": 0.0043338625000000006
+     },
+     "output_total": {
+      "tokens": 146,
+      "price": 8.030000000000001e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [
+    {
+     "tool": "end_call",
+     "is_error": false,
+     "result": "{\"result_type\":\"end_call_success\",\"status\":\"success\",\"reason\":\"Caller is safe outside, emergency logged and team alerted, caller ended the call.\",\"message\":null}"
+    }
+   ],
+   "turn_metrics": null,
+   "llm_usage": null
+  }
+ ]
+}

@@ -2,14 +2,15 @@
 
 import { useAction, useMutation, useQuery } from "convex/react";
 import { motion } from "framer-motion";
-import { AlertTriangle, Globe, Mail, RefreshCw, Shield, Trash2, Users, X } from "lucide-react";
+import { Globe, Mail, RefreshCw, Shield, Users, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
-import { useToast } from "@/components/toast";
-import { MemberDetails, APP_ROLE_OPTIONS, AppRoleBadge } from "@/components/team/member-details";
+import { errorMessage, useToast } from "@/components/toast";
+import { AppRoleBadge } from "@/components/team/member-details";
+import { MemberDrawer } from "@/components/team/member-drawer";
 import { LeadRouting } from "@/components/team/lead-routing";
 import { AuditTab } from "@/components/team/audit-tab";
-import { Avatar, Btn, Card, CardHead, Chips, Input, PageHeader, Pill, Seg, Select, Toggle } from "@/components/ui";
+import { Avatar, Btn, Card, CardHead, Chips, Input, PageHeader, Seg, Select, Toggle } from "@/components/ui";
 import {
   InvitePanel,
   ROLE_FILTERS,
@@ -18,15 +19,6 @@ import {
   parseRoleFilter,
   type RoleFilter,
 } from "@/components/team/invite-panel";
-
-// team.overview's tourStatus: whether Sarah can book this person right now, or what is stopping her.
-const TOUR_STATUS = {
-  bookable: { label: "Bookable for tours", text: "text-success-ink", dot: "bg-success-ink" },
-  off: { label: "Not taking tours", text: "text-muted-foreground", dot: "bg-faint" },
-  no_calendar: { label: "Taking tours, but Google Calendar is not connected", text: "text-warning-ink", dot: "bg-warning-ink" },
-  reconnect: { label: "Taking tours, but needs to reconnect Google Calendar", text: "text-warning-ink", dot: "bg-warning-ink" },
-  no_time_zone: { label: "Taking tours, waiting on the team time zone", text: "text-warning-ink", dot: "bg-warning-ink" },
-} as const;
 
 export default function TeamPage() {
   /* A live query now that the roster is rows in this database rather than in Clerk — the page
@@ -44,7 +36,8 @@ export default function TeamPage() {
 
   const [name, setName] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [now] = useState(() => Date.now());
+  // Which member row is open in the side drawer (by membership, so it follows live updates).
+  const [openId, setOpenId] = useState<string | null>(null);
   const [roleFilter, setRoleFilter] = useState<RoleFilter>(() => {
     if (typeof window === "undefined") return "all";
     return parseRoleFilter(new URLSearchParams(window.location.search).get("role"));
@@ -69,7 +62,7 @@ export default function TeamPage() {
       await fn();
       toast(ok);
     } catch (err) {
-      toast(err instanceof Error ? err.message : "That didn't work.", "error");
+      toast(errorMessage(err, "That didn't work."), "error");
     } finally {
       setBusy(false);
     }
@@ -98,6 +91,7 @@ export default function TeamPage() {
   }
 
   const viewer = data.members.find((m) => m.isSelf);
+  const openMember = data.members.find((m) => m.membershipId === openId) ?? null;
   const activeTab = data.isAdmin ? tab : "members";
 
   return (
@@ -192,58 +186,40 @@ export default function TeamPage() {
                 .filter((m) => matchesRoleFilter(roleFilter, m))
                 .map((member) => {
                   const canSwitch = data.isAdmin || member.isSelf;
-                  const status = TOUR_STATUS[member.tourStatus];
-                  const canSetUnavailable =
-                    data.isAdmin ||
-                    member.isSelf ||
-                    (viewer?.jobRoles ?? []).some((r) => r === "executive" || r === "maintenance_lead");
-                  const roleOpt = APP_ROLE_OPTIONS.find((o) => o.value === member.appRole);
-                  const description = member.skill || roleOpt?.blurb || member.email;
                   return (
                     <motion.div
                       key={member.membershipId}
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
-                      className="flex flex-wrap items-center gap-x-4 gap-y-3 rounded-2xl border border-border px-4 py-3.5"
+                      className="flex items-center rounded-2xl border border-border transition-colors hover:bg-muted/50"
                     >
-                      {member.imageUrl ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img src={member.imageUrl} alt="" className="h-[30px] w-[30px] shrink-0 rounded-full object-cover" />
-                      ) : (
-                        <Avatar
-                          name={member.name}
-                          tone={member.appRole === "admin" ? "warn" : member.appRole === "technician" ? "ok" : "acc"}
-                        />
-                      )}
-                      <div className="min-w-0 flex-1">
-                        <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                      {/* The whole row opens the drawer. The Tours switch is a sibling, not a child, so
+                          it works on its own without opening it. */}
+                      <button
+                        type="button"
+                        onClick={() => setOpenId(member.membershipId)}
+                        aria-label={`Open details for ${member.name}`}
+                        className="flex min-w-0 flex-1 items-center gap-3 rounded-2xl px-4 py-3 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
+                      >
+                        {member.imageUrl ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={member.imageUrl} alt="" className="h-[30px] w-[30px] shrink-0 rounded-full object-cover" />
+                        ) : (
+                          <Avatar
+                            name={member.name}
+                            tone={member.appRole === "admin" ? "warn" : member.appRole === "technician" ? "ok" : "acc"}
+                          />
+                        )}
+                        <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium">
                           <span className="truncate">{member.name}</span>
                           {member.isSelf ? <span className="text-xs font-normal text-muted-foreground">you</span> : null}
                           <AppRoleBadge appRole={member.appRole} />
-                        </p>
-                        <p className="truncate text-[12.5px] text-muted-foreground">{description}</p>
-                        <p className="truncate text-xs text-muted-foreground">{member.email}</p>
-                        {member.appRole === "technician" && !member.phone && (data.isAdmin || member.isSelf) ? (
-                          <p className="mt-1">
-                            <Pill tone="warn">
-                              <AlertTriangle className="h-3 w-3" />
-                              Add a phone number so they can get job texts later
-                            </Pill>
-                          </p>
-                        ) : null}
-                        {member.unavailableUntil !== null && member.unavailableUntil > now ? (
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            Out of office until {new Date(member.unavailableUntil).toLocaleDateString()}
-                          </p>
-                        ) : null}
-                        <p className={`mt-1 flex items-center gap-1.5 text-xs ${status.text}`}>
-                          <span className={`h-1.5 w-1.5 rounded-full ${status.dot}`} />
-                          {status.label}
-                        </p>
-                      </div>
+                        </span>
+                      </button>
                       <div
-                        className="flex shrink-0 items-center gap-2"
+                        className="flex shrink-0 items-center gap-2 py-3 pr-4"
                         title={canSwitch ? undefined : "Only an Admin can change a teammate's tours"}
+                        onClick={(e) => e.stopPropagation()}
                       >
                         <span className="text-xs font-medium text-muted-foreground">Tours</span>
                         <Toggle
@@ -260,38 +236,28 @@ export default function TeamPage() {
                           }
                         />
                       </div>
-                      {data.isAdmin && !member.isSelf ? (
-                        <span
-                          title={
-                            member.unitsOwned > 0
-                              ? `Reassign their ${member.unitsOwned} unit${member.unitsOwned === 1 ? "" : "s"} first.`
-                              : undefined
-                          }
-                          className="shrink-0"
-                        >
-                          <button
-                            onClick={() =>
-                              void run(
-                                () => removeMember({ membershipId: member.membershipId }),
-                                `${member.name} removed from the team`,
-                              )
-                            }
-                            disabled={busy || member.unitsOwned > 0}
-                            aria-label={`Remove ${member.name}`}
-                            className="rounded-[10px] p-2 text-muted-foreground hover:bg-danger-soft hover:text-danger-ink disabled:opacity-40"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        </span>
-                      ) : (
-                        <span className="w-8 shrink-0" />
-                      )}
-                      <MemberDetails member={member} isAdmin={data.isAdmin} canSetUnavailable={canSetUnavailable} />
                     </motion.div>
                   );
                 })}
             </div>
           </Card>
+
+          <MemberDrawer
+            member={openMember}
+            isAdmin={data.isAdmin}
+            canSetUnavailable={
+              openMember !== null &&
+              (data.isAdmin ||
+                openMember.isSelf ||
+                (viewer?.jobRoles ?? []).some((r) => r === "executive" || r === "maintenance_lead"))
+            }
+            busy={busy}
+            onClose={() => setOpenId(null)}
+            onRemove={(member) => {
+              setOpenId(null);
+              void run(() => removeMember({ membershipId: member.membershipId }), `${member.name} removed from the team`);
+            }}
+          />
 
           {data.isAdmin ? (
             <Card>
@@ -390,7 +356,7 @@ function TimeZoneSection({ isAdmin, timeZone }: { isAdmin: boolean; timeZone: st
       setDraft(null);
       toast("Team time zone saved");
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Could not save the time zone.", "error");
+      toast(errorMessage(err, "Could not save the time zone."), "error");
     } finally {
       setBusy(false);
     }

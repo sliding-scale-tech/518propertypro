@@ -4,6 +4,8 @@
  * (convex/transcriptEmail.ts) and team invitations (convex/team.ts).
  */
 
+import { ConvexError } from "convex/values";
+
 const BASE = "https://api.resend.com";
 
 function apiKey(): string {
@@ -50,8 +52,16 @@ export async function sendEmail(input: {
 
   if (!res.ok) {
     const detail = await res.text();
-    // Surface Resend's own message verbatim — e.g. "invalid `to` field" is more useful than
-    // anything synthesised here.
-    throw new Error(`Resend ${res.status}: ${detail.slice(0, 500)}`);
+    // The person sees a generic line; the cause goes to the logs. Only the status and Resend's
+    // error name are logged, because the body can echo the recipient's address.
+    let errorName = "unknown";
+    try {
+      const parsed = JSON.parse(detail) as { name?: unknown };
+      if (typeof parsed.name === "string") errorName = parsed.name.slice(0, 80);
+    } catch {
+      /* body was not JSON; the status is still logged */
+    }
+    console.error(`[resend] send failed: status ${res.status}, error ${errorName}`);
+    throw new ConvexError("We couldn't send that email. Check the address and try again.");
   }
 }

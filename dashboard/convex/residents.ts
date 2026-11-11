@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import { internalQuery, mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
@@ -23,8 +23,8 @@ const MAX_PHONES = 5;
 
 function cleanName(raw: string): string {
   const name = raw.trim();
-  if (!name) throw new Error("Enter the resident's name.");
-  if (name.length > 120) throw new Error("Name is too long.");
+  if (!name) throw new ConvexError("Enter the resident's name.");
+  if (name.length > 120) throw new ConvexError("Name is too long.");
   return name;
 }
 
@@ -32,7 +32,7 @@ function cleanEmail(raw: string | undefined): string | undefined {
   const email = raw?.trim().toLowerCase();
   if (!email) return undefined;
   if (email.length > 200 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    throw new Error("That email address doesn't look right.");
+    throw new ConvexError("That email address doesn't look right.");
   }
   return email;
 }
@@ -41,13 +41,13 @@ function cleanLeaseEnd(raw: string | undefined): string | undefined {
   const d = raw?.trim();
   if (!d) return undefined;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || Number.isNaN(Date.parse(d))) {
-    throw new Error("Lease end must be a date like 2027-06-30.");
+    throw new ConvexError("Lease end must be a date like 2027-06-30.");
   }
   return d;
 }
 
 function cleanPhones(raw: string[]): string[] {
-  if (raw.length > MAX_PHONES) throw new Error(`At most ${MAX_PHONES} phone numbers.`);
+  if (raw.length > MAX_PHONES) throw new ConvexError(`Add at most ${MAX_PHONES} phone numbers per resident.`);
   const out = raw.map((p) => requireE164(p));
   return [...new Set(out)];
 }
@@ -237,7 +237,7 @@ export const create = mutation({
   handler: async (ctx, args): Promise<Id<"residents">> => {
     const org = await requireAdminView(ctx);
     const unit = await ctx.db.get(args.unitId);
-    if (!unit || unit.orgId !== org.orgId) throw new Error("Unit not found.");
+    if (!unit || unit.orgId !== org.orgId) throw new ConvexError("Unit not found.");
 
     const phones = cleanPhones(args.phones);
     const id = await ctx.db.insert("residents", {
@@ -279,14 +279,14 @@ export const update = mutation({
   handler: async (ctx, args) => {
     const org = await requireAdminView(ctx);
     const resident = await ctx.db.get(args.residentId);
-    if (!resident || resident.orgId !== org.orgId) throw new Error("Resident not found.");
+    if (!resident || resident.orgId !== org.orgId) throw new ConvexError("Resident not found.");
 
     // Fields are copied one by one so nothing else the client sends (an orgId, `active`,
     // `source`) can reach the row.
     const patch: Partial<Doc<"residents">> = { updatedAt: Date.now() };
     if (args.unitId !== undefined) {
       const unit = await ctx.db.get(args.unitId);
-      if (!unit || unit.orgId !== org.orgId) throw new Error("Unit not found.");
+      if (!unit || unit.orgId !== org.orgId) throw new ConvexError("Unit not found.");
       patch.unitId = unit._id;
     }
     if (args.fullName !== undefined) patch.fullName = cleanName(args.fullName);
@@ -308,13 +308,88 @@ export const update = mutation({
   },
 });
 
+/**
+ * Roster import (B3): makes the unit's roster residents match the roster's tenant names. Names
+ * only, no phones, source "roster_import". Matched by exact name on the unit, so a re-run with
+ * the same names writes nothing. A name no longer listed is deactivated (never deleted); a name
+ * listed again is reactivated. Residents added by hand (source "manual") are never touched.
+ * The caller has already validated the names (rosterMapping.mapRosterRow).
+ */
+export async function syncRosterResidents(
+  ctx: MutationCtx,
+  args: { orgId: string; unit: Doc<"units">; names: string[]; leaseEnd: string | undefined; note: string },
+): Promise<{ created: number; updated: number; deactivated: number; unchanged: number }> {
+  const existing = (
+    await ctx.db
+      .query("residents")
+      .withIndex("by_unit", (q) => q.eq("unitId", args.unit._id))
+      .collect()
+  ).filter((r) => r.orgId === args.orgId && r.source === "roster_import");
+  const counts = { created: 0, updated: 0, deactivated: 0, unchanged: 0 };
+  const now = Date.now();
+
+  for (const fullName of args.names) {
+    const match = existing.find((r) => r.fullName === fullName);
+    if (!match) {
+      const id = await ctx.db.insert("residents", {
+        orgId: args.orgId,
+        unitId: args.unit._id,
+        fullName,
+        phones: [],
+        leaseEnd: args.leaseEnd,
+        active: true,
+        source: "roster_import",
+        updatedAt: now,
+      });
+      await writeAudit(ctx, {
+        orgId: args.orgId,
+        entity: "resident",
+        entityId: id,
+        action: "resident_created",
+        to: args.unit.unitNumber,
+        note: args.note,
+      });
+      counts.created += 1;
+      continue;
+    }
+    if (match.active && match.leaseEnd === args.leaseEnd) {
+      counts.unchanged += 1;
+      continue;
+    }
+    await ctx.db.patch(match._id, { active: true, leaseEnd: args.leaseEnd, updatedAt: now });
+    await writeAudit(ctx, {
+      orgId: args.orgId,
+      entity: "resident",
+      entityId: match._id,
+      action: match.active ? "resident_updated" : "resident_reactivated",
+      note: args.note,
+    });
+    counts.updated += 1;
+  }
+
+  for (const r of existing) {
+    if (!r.active || args.names.includes(r.fullName)) continue;
+    await ctx.db.patch(r._id, { active: false, updatedAt: now });
+    await syncPhones(ctx, { ...r, active: false }, []);
+    await writeAudit(ctx, {
+      orgId: args.orgId,
+      entity: "resident",
+      entityId: r._id,
+      action: "resident_deactivated",
+      note: `${args.note}: no longer on the roster`,
+    });
+    counts.deactivated += 1;
+  }
+  return counts;
+}
+
 /** Moved out / removed. Keeps the row (history points at it) but drops its phones from lookup. */
 export const deactivate = mutation({
   args: { residentId: v.id("residents") },
   handler: async (ctx, args) => {
     const org = await requireAdminView(ctx);
     const resident = await ctx.db.get(args.residentId);
-    if (!resident || resident.orgId !== org.orgId) throw new Error("Resident not found.");
+    if (!resident || resident.orgId !== org.orgId) throw new ConvexError("Resident not found.");
     if (!resident.active) return;
 
     await ctx.db.patch(resident._id, { active: false, updatedAt: Date.now() });

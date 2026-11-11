@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import type { Infer } from "convex/values";
 
 /**
@@ -215,32 +215,37 @@ export function defaultQuestionFlows(): QuestionFlows {
       ask("mi_long", "How long has it been broken?", true, { field: "answers.how_long" }),
       ask("mi_photo", "Would you be able to send a photo?", false, { answerKind: "yesno", field: "send_photo_link (only if they say yes)" }),
     ],
+    // Order: the client document's leasing list, except that the city or area comes first (the
+    // user moved it there on 2026-10-30), with the communities to avoid right after it. The doc's
+    // remaining order is unchanged: bedrooms, budget, third-party payer (and the payer's details),
+    // pets, move-in date, then contact details and "anything else". Steps are REQUIRED so they are
+    // asked in this order (OPTIONAL steps all wait until every REQUIRED one is done).
     leasing: [
+      ask("ls_area", "Which city or area are you looking to rent in?", true, { field: "preferred_area" }),
+      ask("ls_avoid", "Are there any communities you want to avoid?", true, { field: "avoid_communities" }),
       ask("ls_beds", "How many bedrooms are you looking for?", true, { field: "bedrooms" }),
       ask("ls_budget", "What is your monthly budget?", true, { field: "budget" }),
-      ask("ls_move", "When would you like to move in?", true, { field: "move_in_date" }),
+      ask("ls_payer", "Will a third party, like an agency, employer or family member, pay some or all of the rent?", true, {
+        answerKind: "yesno",
+        field: "third_party_payer",
+      }),
+      ask("ls_payer_name", "What is the payer's name?", true, { field: "payer_name", when: [ans("ls_payer", "is", "yes")] }),
+      ask("ls_payer_phone", "What is the payer's phone number?", true, {
+        field: "payer_phone",
+        when: [ans("ls_payer", "is", "yes")],
+      }),
+      ask("ls_payer_email", "What is the payer's email address?", true, {
+        field: "payer_email",
+        when: [ans("ls_payer", "is", "yes")],
+      }),
       ask("ls_pets", "Do you have any pets?", true, { answerKind: "yesno", field: "pets_wanted" }),
       ask("ls_pet_detail", "What type of pet, and how many?", true, {
         field: "pet_type, pet_count",
         when: [ans("ls_pets", "is", "yes")],
       }),
+      ask("ls_move", "When would you like to move in?", true, { field: "move_in_date" }),
       ask("ls_name", "May I have your name?", true, { field: "caller_name" }),
       ask("ls_phone", "What is the best number to reach you on?", true, { field: "caller_phone" }),
-      ask("ls_payer", "Will a third party, like an agency, employer or family member, pay some or all of the rent?", false, {
-        answerKind: "yesno",
-        field: "third_party_payer",
-      }),
-      ask("ls_payer_name", "What is the payer's name?", false, { field: "payer_name", when: [ans("ls_payer", "is", "yes")] }),
-      ask("ls_payer_phone", "What is the payer's phone number?", false, {
-        field: "payer_phone",
-        when: [ans("ls_payer", "is", "yes")],
-      }),
-      ask("ls_payer_email", "What is the payer's email address?", false, {
-        field: "payer_email",
-        when: [ans("ls_payer", "is", "yes")],
-      }),
-      ask("ls_prefer", "Which communities in the Capital Region do you prefer?", false, { field: "preferred_communities" }),
-      ask("ls_avoid", "Are there any communities you want to avoid?", false, { field: "avoid_communities" }),
       ask("ls_other", "Is there anything else you would like us to know?", false, { field: "other_info" }),
     ],
     tour: [
@@ -327,27 +332,27 @@ export function validateQuestionFlows(flows: StoredQuestionFlows | undefined): v
   for (const id of QFLOW_IDS) {
     const list = flows[id];
     if (!list) continue;
-    if (list.length > MAX_STEPS) throw new Error("Too many steps in one question flow.");
+    if (list.length > MAX_STEPS) throw new ConvexError("Too many steps in one question flow.");
     const seen = new Set<string>();
     for (const n of list) {
-      if (!/^[A-Za-z0-9_]{1,40}$/.test(n.id)) throw new Error("A question has an invalid id.");
-      if (seen.has(n.id)) throw new Error("Each question in a flow needs its own id.");
-      if (!n.text.trim()) throw new Error("Questions cannot be empty.");
-      if (n.text.length > 400) throw new Error("A question is too long (400 characters at most).");
-      if ((n.field ?? "").length > 80) throw new Error("A question's field name is too long.");
+      if (!/^[A-Za-z0-9_]{1,40}$/.test(n.id)) throw new ConvexError("A question has an invalid id.");
+      if (seen.has(n.id)) throw new ConvexError("Each question in a flow needs its own id.");
+      if (!n.text.trim()) throw new ConvexError("Questions cannot be empty.");
+      if (n.text.length > 400) throw new ConvexError("A question is too long (400 characters at most).");
+      if ((n.field ?? "").length > 80) throw new ConvexError("A question's field name is too long.");
       const when = n.when ?? [];
-      if (when.length > MAX_WHEN) throw new Error("A question can have at most 3 conditions.");
+      if (when.length > MAX_WHEN) throw new ConvexError("A question can have at most 3 conditions.");
       for (const c of when) {
         if (c.type === "fact") {
-          if (!c.fact || !FACT_KEYS.includes(c.fact)) throw new Error("A condition uses an unknown situation.");
+          if (!c.fact || !FACT_KEYS.includes(c.fact)) throw new ConvexError("A condition uses an unknown situation.");
         } else {
           if (!c.questionId || !seen.has(c.questionId)) {
-            throw new Error("A condition must point at a question that comes earlier in the same flow.");
+            throw new ConvexError("A condition must point at a question that comes earlier in the same flow.");
           }
           const op = OPS.find((o) => o.key === c.op);
-          if (!op) throw new Error("A condition is missing its comparison.");
-          if (op.needsValue && !(c.value ?? "").trim()) throw new Error("A condition is missing its value.");
-          if ((c.value ?? "").length > 200) throw new Error("A condition value is too long.");
+          if (!op) throw new ConvexError("A condition is missing its comparison.");
+          if (op.needsValue && !(c.value ?? "").trim()) throw new ConvexError("A condition is missing its value.");
+          if ((c.value ?? "").length > 200) throw new ConvexError("A condition value is too long.");
         }
       }
       seen.add(n.id);

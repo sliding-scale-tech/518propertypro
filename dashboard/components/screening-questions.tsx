@@ -7,7 +7,7 @@ import { HelpCircle, Lock, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import type { CoreKey } from "@/convex/coreQuestions";
 
 type Question = Doc<"screeningQuestions">;
@@ -60,7 +60,7 @@ export function BuiltInQuestions() {
       await setBuiltin({ key, enabled });
       toast(enabled ? "Sarah will ask this again" : "Sarah will stop asking this");
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Could not change that.", "error");
+      toast(errorMessage(err, "Could not change that."), "error");
     }
   };
 
@@ -282,7 +282,7 @@ function QuestionModal({
       toast(question ? "Question updated" : "Question added — Sarah will start asking it");
       onClose();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Could not save that question.", "error");
+      toast(errorMessage(err, "Could not save that question."), "error");
     } finally {
       setBusy(false);
     }

@@ -20,7 +20,8 @@ export type Unit = {
 export type Property = {
   name: string;
   units: Unit[];
-  petsAllowed: boolean;
+  // Absent = no pet policy entered (imported buildings); only an explicit false disqualifies.
+  petsAllowed?: boolean;
 };
 
 export type QualifyInput = {
@@ -125,7 +126,7 @@ export function evaluateQualification(
     };
   }
 
-  if (input.petsWanted === true && !property.petsAllowed) {
+  if (input.petsWanted === true && property.petsAllowed === false) {
     return {
       qualifies: false,
       disqualifyReason: `${property.name} does not allow pets.`,

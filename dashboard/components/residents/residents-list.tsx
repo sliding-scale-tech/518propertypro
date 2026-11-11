@@ -6,10 +6,9 @@ import Link from "next/link";
 import { useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { cleanError } from "@/components/maintenance/shared";
 import { ResidentModal } from "@/components/residents/resident-modal";
 import { useResidentActions } from "@/components/residents/use-resident-actions";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import { Btn, Card, CardHead, DataTable, Input, Pill, Select, type Column } from "@/components/ui";
 
 /** Tenant directory used to recognise callers. Embedded in the Tenants page (Residents tab). */
@@ -158,7 +157,7 @@ export function ResidentsList() {
               toast("Resident added");
               setAdding(false);
             } catch (err) {
-              toast(cleanError(err), "error");
+              toast(errorMessage(err), "error");
             } finally {
               setBusy(false);
             }

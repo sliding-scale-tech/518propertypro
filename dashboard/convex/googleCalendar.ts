@@ -1,5 +1,5 @@
 import type { GenericActionCtx } from "convex/server";
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { internal } from "./_generated/api";
 import type { DataModel, Id } from "./_generated/dataModel";
 import {
@@ -305,7 +305,7 @@ export const markInvalid = internalMutation({
  */
 export async function accessTokenFor(ctx: ActionCtx, userId: Id<"users">): Promise<string> {
   const connection = await ctx.runQuery(internal.googleCalendar.connectionForUser, { userId });
-  if (!connection) throw new Error("This team member has not connected Google Calendar.");
+  if (!connection) throw new ConvexError("This team member has not connected Google Calendar.");
   if (connection.invalidAt) {
     throw new google.GoogleAuthRevokedError("This team member needs to reconnect Google Calendar.");
   }

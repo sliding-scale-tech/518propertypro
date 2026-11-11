@@ -1,13 +1,14 @@
 "use client";
 
 import { useConvex, useQuery } from "convex/react";
+import { errorMessage } from "@/components/ui/toast";
 import { Download, Loader2 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
 import { Btn, Card, CardHead, DatePicker, Input, Select } from "@/components/ui";
-import { cleanError, formatWhen } from "@/components/maintenance/shared";
+import { formatWhen } from "@/components/maintenance/shared";
 
 type Row = Doc<"auditEvents">;
 type Entity = Row["entity"];
@@ -104,7 +105,7 @@ export function AuditTab() {
         setCursor(cur);
         setIsDone(done);
       } catch (e) {
-        if (myGen === gen.current) setError(cleanError(e));
+        if (myGen === gen.current) setError(errorMessage(e));
       } finally {
         if (myGen === gen.current) setLoading(false);
       }

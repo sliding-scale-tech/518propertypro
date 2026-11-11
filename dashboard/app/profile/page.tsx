@@ -3,7 +3,7 @@
 import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { RequireView } from "@/components/require-view";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import { MemberDetails } from "@/components/team/member-details";
 import { Card, CardHead, PageHeader, Toggle } from "@/components/ui";
 
@@ -33,7 +33,7 @@ function ProfileInner() {
               onChange={(next) =>
                 void setTakingTours({ userId: me.userId, takingTours: next }).then(
                   () => toast(next ? "Tours on" : "Tours off"),
-                  (err: unknown) => toast(err instanceof Error ? err.message : "That didn't work.", "error"),
+                  (err: unknown) => toast(errorMessage(err, "That didn't work."), "error"),
                 )
               }
             />

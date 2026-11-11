@@ -10,8 +10,7 @@
 
 export const TOUR_BOOKING_BLOCK = `TOUR BOOKING:
 Tours go straight into a team member's calendar. Follow these steps in order, every time.
-While any tour tool is running, say only something like "one moment" or "let me check that". Never
-say a tour is booked, cancelled or moved until the tool's result says it is.
+Never say a tour is booked, cancelled or moved until the tool's result says it is.
 1. Ask the caller what day and time would suit them for a tour. Never suggest days or times yourself,
    and never call find_tour_times until the caller has told you a day.
 2. Call find_tour_times with that day as date (YYYY-MM-DD, worked out from the current date). If they
@@ -67,7 +66,10 @@ const NEW_TOUR_STEP =
 const OLD_TOUR_STEP =
   /5\.\s+If qualified and they want a tour, ask for a preferred day and time, then call\s+request_tour with that plus their name and callback number\.\s+Tell them a confirmation\s+text is on its way\./;
 
+// Asked Sarah to speak while a tool ran, against the TURN RULE. The stored prompt still carries it.
+const OLD_TOUR_SPEECH = /While any tour tool is running, say only something like "one moment" or "let me check that"\.\s+/;
+
 export function withTourBooking(prompt: string): string {
-  const next = prompt.replace(OLD_TOUR_STEP, NEW_TOUR_STEP);
+  const next = prompt.replace(OLD_TOUR_STEP, NEW_TOUR_STEP).replace(OLD_TOUR_SPEECH, "");
   return next.includes("TOUR BOOKING:") ? next : `${next}\n\n${TOUR_BOOKING_BLOCK}`;
 }

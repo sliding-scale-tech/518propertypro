@@ -19,7 +19,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import { Dropdown } from "@/components/ui/dropdown";
 import { Card, Pill, SevChip } from "@/components/ui";
 import { RejectPanel } from "@/components/board/reject-panel";
@@ -33,7 +33,6 @@ import {
   btnDanger,
   btnOutline,
   btnPrimary,
-  cleanError,
   formatWhen,
   inputClass,
   mrNumber,
@@ -133,7 +132,7 @@ export function RequestDetail({
       await fn();
       toast(okMessage, "success");
     } catch (e) {
-      toast(cleanError(e), "error");
+      toast(errorMessage(e), "error");
       throw e;
     }
   };
@@ -147,19 +146,30 @@ export function RequestDetail({
         try {
           const isImage = file.type.startsWith("image/") && file.type !== "image/svg+xml";
           const isVideo = file.type.startsWith("video/");
-          if (!isImage && !isVideo) throw new Error("Only photos and videos can be attached.");
+          const reject = (why: string) => toast(`${file.name}: ${why}`, "error");
+          if (!isImage && !isVideo) {
+            reject("Only photos and videos can be attached.");
+            continue;
+          }
           if (file.size > (isImage ? MAX_IMAGE : MAX_VIDEO)) {
-            throw new Error(isImage ? "Photos can be at most 10 MB." : "Videos can be at most 50 MB.");
+            reject(isImage ? "Photos can be at most 10 MB." : "Videos can be at most 50 MB.");
+            continue;
           }
           const url = await genUrl({ requestId });
           const res = await fetch(url, { method: "POST", headers: { "Content-Type": file.type }, body: file });
-          if (!res.ok) throw new Error("Upload failed.");
+          if (!res.ok) {
+            reject("Upload failed.");
+            continue;
+          }
           const { storageId } = (await res.json()) as { storageId: Id<"_storage"> };
           const result = await attach({ requestId, storageId });
-          if (!result.ok) throw new Error(result.error);
+          if (!result.ok) {
+            reject(result.error);
+            continue;
+          }
           saved += 1;
         } catch (e) {
-          toast(`${file.name}: ${cleanError(e)}`, "error");
+          toast(`${file.name}: ${errorMessage(e, "Upload failed.")}`, "error");
         }
       }
       if (saved > 0) toast(saved === 1 ? "File attached." : `${saved} files attached.`, "success");

@@ -8,7 +8,7 @@ import { useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import type { AppRole } from "@/convex/jobRoles";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import { Btn, DatePicker, Input, Pill, Seg, Select, type Tone } from "@/components/ui";
 
 type Channel = "sms" | "email" | "push";
@@ -125,7 +125,7 @@ export function MemberDetails({
       toast(ok);
       return true;
     } catch (err) {
-      toast(err instanceof Error ? err.message : "That didn't work.", "error");
+      toast(errorMessage(err, "That didn't work."), "error");
       return false;
     } finally {
       setBusy(false);
@@ -133,7 +133,7 @@ export function MemberDetails({
   };
 
   return (
-    <div className="w-full space-y-3 border-t border-border pt-3 text-sm">
+    <div className="w-full space-y-3 text-sm">
       <div className="flex flex-wrap items-center gap-2">
         <AppRoleBadge appRole={member.appRole} />
         {outOfOffice ? (
@@ -163,7 +163,7 @@ export function MemberDetails({
 
       {isAdmin && editingRoles ? (
         <div className="flex flex-wrap items-center gap-2">
-          <span className="w-20 text-xs font-medium text-muted-foreground">Role</span>
+          <span className="w-24 text-xs font-medium text-muted-foreground">Role</span>
           <AppRoleSelect
             value={roleDraft}
             onChange={setRoleDraft}
@@ -196,7 +196,7 @@ export function MemberDetails({
           it or there is a number to show. */}
       {canEditContact || member.phone ? (
         <div className="flex flex-wrap items-center gap-2">
-          <span className="w-20 text-xs font-medium text-muted-foreground">Phone</span>
+          <span className="w-24 text-xs font-medium text-muted-foreground">Phone</span>
           {canEditContact ? (
             <>
               <Input
@@ -232,7 +232,7 @@ export function MemberDetails({
 
       {canEditContact ? (
         <div className="flex flex-wrap items-center gap-2">
-          <span className="w-20 text-xs font-medium text-muted-foreground">Skill</span>
+          <span className="w-24 text-xs font-medium text-muted-foreground">Skill</span>
           <Input
             value={skillValue}
             maxLength={80}
@@ -257,7 +257,7 @@ export function MemberDetails({
       ) : null}
 
       <div className="flex flex-wrap items-center gap-3">
-        <span className="w-20 text-xs font-medium text-muted-foreground">Notify by</span>
+        <span className="w-24 text-xs font-medium text-muted-foreground">Notify by</span>
         {CHANNELS.map((c) => (
           <label
             key={c.value}
@@ -281,7 +281,7 @@ export function MemberDetails({
 
       {canSetUnavailable ? (
         <div className="flex flex-wrap items-center gap-2">
-          <span className="w-20 text-xs font-medium text-muted-foreground">Out of office</span>
+          <span className="w-24 text-xs font-medium text-muted-foreground">Out of office</span>
           <div className="w-44">
             <DatePicker
               value={dateDraft}
@@ -325,7 +325,7 @@ export function MemberDetails({
 
       {canSetUnavailable && isAm ? (
         <div className="flex flex-wrap items-center gap-2">
-          <span className="w-20 text-xs font-medium text-muted-foreground">Covered by</span>
+          <span className="w-24 text-xs font-medium text-muted-foreground">Covered by</span>
           <Select
             value={coverValue}
             onChange={(e) => setCoverDraft(e.target.value)}

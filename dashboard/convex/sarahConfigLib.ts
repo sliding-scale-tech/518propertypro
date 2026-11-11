@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import type { Infer } from "convex/values";
 import { SEVERITY_LEVELS } from "./severity";
 import type { SeverityLevel } from "./severity";
@@ -10,6 +10,8 @@ import {
   validateQuestionFlows,
 } from "./questionFlowLib";
 import type { QuestionFlows } from "./questionFlowLib";
+import { composeOwnerRoutingBlock, menuOf, routingProblems, routingWarnings } from "./ownerRoutingLib";
+import type { MenuEntry, RoutingCheckOptions } from "./ownerRoutingLib";
 
 /**
  * Sarah configuration (build plan P17): everything Pat can change about Sarah without a
@@ -147,11 +149,27 @@ export const sarahConfigValidator = v.object({
   ),
   routingDirectory: v.object({
     enabled: v.boolean(),
-    entries: v.array(v.object({ label: v.string(), phone: v.string(), hours: v.optional(v.string()) })),
+    // In key order: the first entry is key 1. `phone` is E.164 once saved ("" = no number yet).
+    // `hours` uses the format in ownerRoutingLib.ts ("Mon-Fri 09:00-17:00", America/New_York; empty =
+    // any time). `extension` is dialled after the transfer connects. `userId` is the team member whose
+    // callback list gets the message when this person cannot be reached. All optional so older
+    // stored configs stay valid.
+    entries: v.array(
+      v.object({
+        label: v.string(),
+        phone: v.string(),
+        hours: v.optional(v.string()),
+        extension: v.optional(v.string()),
+        userId: v.optional(v.id("users")),
+      }),
+    ),
     // What happens when nobody answers, and what callers get after hours. Both optional so older
     // stored configs stay valid. Only used on a live call once the owner routing menu is approved.
     fallback: v.optional(v.string()),
     afterHours: v.optional(v.string()),
+    // The client's main office number, which their carrier forwards to Sarah's line. Never a
+    // transfer target: a transfer there would loop back to Sarah.
+    mainOfficeNumber: v.optional(v.string()),
   }),
   leasing: v.object({
     tourMinutes: v.number(),
@@ -190,7 +208,7 @@ export type FlowConfig = Infer<typeof flowValidator>;
 // --- Defaults (the current hard-coded behaviour) ---------------------------------------------
 
 export const DEFAULT_COMPANY_NAME = "518 Property Pro";
-export const DEFAULT_FIRST_MESSAGE = `Thanks for calling ${DEFAULT_COMPANY_NAME}, this is Sarah! Are you calling about renting an apartment, a maintenance issue, or something else?`;
+export const DEFAULT_FIRST_MESSAGE = `Thanks for calling ${DEFAULT_COMPANY_NAME}, this is Sarah! Are you calling about renting an apartment, a maintenance issue, as a property owner, or something else?`;
 
 /** Draft wording only: nothing is ever texted to a tenant until Pat approves it. */
 export function defaultTenantMessages(): TenantMessages {
@@ -236,7 +254,7 @@ export function spokenWording(w: string): string {
 export const SCRIPT_DRAFTS: Record<"fire" | "flooding" | "gas_hissing" | "gas_slight" | "other", { wording: string; phone?: string }> = {
   fire: {
     wording:
-      "If there is a fire or smoke, leave the building right now and call 911. Don't stop to collect anything. Once you are safe, tell me your name and the address so we can alert the team.",
+      "If there is a fire or smoke, leave the building right now and call 911. Once you are safe, tell me your name and the address so we can alert the team.",
     phone: "911",
   },
   flooding: {
@@ -260,7 +278,7 @@ export const SCRIPT_DRAFTS: Record<"fire" | "flooding" | "gas_hissing" | "gas_sl
 };
 
 export const TENANT_RESPONSIBILITY_DRAFT =
-  "Property Pro doesn't replace light bulbs or window blinds, and trash needs to be taken to the curb by the resident. I can't log this as a repair, but I've noted your call.";
+  "Under our current policy, expired lightbulbs, broken window blinds, and trash that needs to be taken to the curb are the tenant's responsibility. Property Pro does not replace these.";
 
 /** Proposals for the two decisions that are not caller wording. Not spoken by Sarah. */
 export const DECISION_DRAFTS = {
@@ -272,13 +290,17 @@ export const DECISION_DRAFTS = {
 
 /** Earlier built-in defaults. A draft that still equals one of these (and is not approved) is upgraded to the current draft. */
 const LEGACY_WORDINGS: Record<string, string[]> = {
-  "script-fire": ["Leave the building right now and call 911 from outside."],
+  "script-fire": [
+    "Leave the building right now and call 911 from outside.",
+    "If there is a fire or smoke, leave the building right now and call 911. Don't stop to collect anything. Once you are safe, tell me your name and the address so we can alert the team.",
+  ],
   "script-flooding": ["Move to a safe place away from the water, and call 518-365-0996."],
   "script-gas_hissing": ["Leave immediately and call 911 from outside. If you can do it safely from outside, warn your neighbors."],
   "script-gas_slight": ["Leave immediately and contact your gas utility provider from outside."],
   "script-other": ["Get somewhere safe and call 911."],
   "tenant-responsibility": [
     "Property Pro doesn't replace expired light bulbs or broken window blinds, and doesn't take trash to the curb, so those are the tenant's responsibility. I'll make a note of your call.",
+    "Property Pro doesn't replace light bulbs or window blinds, and trash needs to be taken to the curb by the resident. I can't log this as a repair, but I've noted your call.",
   ],
   "flow-rent_fees": [
     `Rent is due on the 1st of each month. There is a five-day grace period, and a computer-generated late notice goes out on the 6th day. Rent that is not paid in full before the 6th day carries a $50 late fee. You can pay by any of these: ${PAYMENT_METHODS}.`,
@@ -291,19 +313,22 @@ const LEGACY_WORDINGS: Record<string, string[]> = {
   ],
   "flow-eviction": [
     `That notice is about unpaid rent or late fees under your lease. You can pay the outstanding amount in any of these ways: ${PAYMENT_METHODS}. Or you can contact your asset manager right away to talk about a payment plan. Our current policy is that at least some payment is needed before a payment plan is set up. I can't give legal advice, and I can't promise a payment plan will be approved. If you expect to be late with rent, please contact your asset manager as soon as you can.`,
+    `That notice is about unpaid rent or late fees under your lease. You can pay the amount owed. ${PAYMENT_SENTENCES} Or you can contact your asset manager right away to talk about a payment plan. Our current policy is that some payment is needed before a payment plan is set up. I can't give legal advice. I can't promise a payment plan will be approved. If you expect to be late with rent, please contact your asset manager as soon as you can.`,
   ],
   "flow-non_renewal": [
     "Thank you for letting us know. On move-out day, or within a day or two afterward, you'll meet your asset manager or another Property Pro employee. The team does a walkthrough and collects the keys, and then assesses whether any security deposit will be returned. I can't say what that outcome will be.",
   ],
   "flow-work_order_status": [
     "I can't see the live status of a work order from here, so I'll pass your question to the right team member and they'll get back to you.",
+    "I can't see the live status of a work order from this call. I'll pass your question to the right team member. They will get back to you.",
+    "Once I've confirmed your name, address and unit, I can tell you the recorded status of your request. If I can't confirm them, or I can't find it: I can't see the live status of a work order from this call. I'll pass your question to the right team member. They will get back to you.",
   ],
   "flow-renewal": [
     "The team will prepare a new lease for your review and email it to you. If you have questions or concerns about the lease, your asset manager can help. If you agree to the lease, sign it, date it and return it. A lease is only binding once it is signed by both you and a Property Pro Realty Group Inc. representative.",
   ],
   "flow-vendor_payment": ["Questions about payment status go to Delia in our accounting department."],
   "flow-neighbor_dispute": [
-    "I'm sorry you're dealing with that. Arguments, loud or offensive behavior and similar neighbor disputes should be directed to your local law enforcement.",
+    "I'm sorry you're dealing with that. Property Pro can't step in on arguments or noise between neighbors. For those, please contact your local police non-emergency line, or 911 if anyone is in danger.",
   ],
 };
 
@@ -348,7 +373,7 @@ export const FLOW_DEFS: ReadonlyArray<{
     key: "eviction",
     label: "Eviction notice or late rent (legal)",
     section: "8",
-    wording: `That notice is about unpaid rent or late fees under your lease. You can pay the amount owed. ${PAYMENT_SENTENCES} Or you can contact your asset manager right away to talk about a payment plan. Our current policy is that some payment is needed before a payment plan is set up. I can't give legal advice. I can't promise a payment plan will be approved. If you expect to be late with rent, please contact your asset manager as soon as you can.`,
+    wording: `That notice is about unpaid rent or late fees under your lease. You can pay the amount owed. ${PAYMENT_SENTENCES} Or you can contact your asset manager right away to talk about a payment plan. Our current policy requires at least some payment before a payment plan is entered into. I can't give legal advice. I can't promise a payment plan will be approved. If you expect to be late with rent, please contact your asset manager as soon as you can.`,
     confirm: "Pat must approve this wording before activation, because it concerns eviction and legal matters.",
   },
   {
@@ -364,9 +389,9 @@ export const FLOW_DEFS: ReadonlyArray<{
     label: "Work-order status",
     section: "10",
     wording:
-      "I can't see the live status of a work order from this call. I'll pass your question to the right team member. They will get back to you.",
+      "Once I've found your unit, I can tell you the recorded status of your request. If a technician visit is scheduled, your asset manager will confirm the exact time with you. If the lookup isn't working: I can't see the live status of a work order from this call. I'll pass your question to the right team member. They will get back to you.",
     confirm:
-      "Live work-order lookup is not built. Until it is, Sarah takes the details and routes the question, and never states a status.",
+      "Pat to approve the wording. Live lookup is built (Sarah v13): an exact address and unit is enough for the recorded status. A caller verified against the unit (caller ID or a resident's name) also hears the visit day and time; the name never blocks anything.",
   },
   {
     key: "renewal",
@@ -390,7 +415,7 @@ export const FLOW_DEFS: ReadonlyArray<{
     label: "Neighbor disputes",
     section: "2",
     wording:
-      "I'm sorry you're dealing with that. Property Pro can't step in on arguments or noise between neighbors. For those, please contact your local police non-emergency line, or 911 if anyone is in danger.",
+      "I'm sorry you're dealing with that. Arguments, loud or offensive behavior and similar neighbor disputes should be directed to your local law enforcement.",
     confirm: "Pat must approve the exact response before it is activated.",
   },
 ];
@@ -440,7 +465,7 @@ export function defaultConfig(): SarahConfig {
       broken_item: ["what is broken", "where it is", "how long it has been broken", "for a photo, if they can"],
     },
     tenantResponsibility: {
-      items: ["light bulbs", "blinds", "taking trash to the curb"],
+      items: ["expired lightbulbs", "broken window blinds", "trash that needs to be taken to the curb"],
       wording: TENANT_RESPONSIBILITY_DRAFT,
       approved: false,
     },
@@ -573,37 +598,37 @@ export function cleanText(s: string): string {
  * Shape and limit checks that the validator cannot express. Throws a message fit for a person.
  * Does NOT check approvals: those depend on stored state, see sarahConfig.saveDraft.
  */
-export function validateConfigShape(c: SarahConfig): void {
+export function validateConfigShape(c: SarahConfig, opts: RoutingCheckOptions = {}): void {
   const text = (s: string, what: string, max = MAX_TEXT) => {
-    if (s.length > max) throw new Error(`${what} is too long.`);
+    if (s.length > max) throw new ConvexError(`${what} is too long.`);
   };
   text(c.identity.companyName, "Company name", 100);
-  if (!c.identity.companyName.trim()) throw new Error("Company name cannot be empty.");
+  if (!c.identity.companyName.trim()) throw new ConvexError("Company name cannot be empty.");
   text(c.identity.firstMessage, "First message");
-  if (!c.identity.firstMessage.trim()) throw new Error("First message cannot be empty.");
+  if (!c.identity.firstMessage.trim()) throw new ConvexError("First message cannot be empty.");
 
   const seen = new Set<string>();
   for (const t of c.callTypes) {
-    if (!CALL_TYPE_KEYS.includes(t.key)) throw new Error("Unknown call type.");
-    if (seen.has(t.key)) throw new Error("Each call type can only appear once.");
+    if (!CALL_TYPE_KEYS.includes(t.key)) throw new ConvexError("That call type is not recognized. Refresh the page and try again.");
+    if (seen.has(t.key)) throw new ConvexError("Each call type can only appear once.");
     seen.add(t.key);
     text(t.notes ?? "", "Call type notes");
   }
 
   for (const list of Object.values(c.maintenanceQuestions)) {
-    if (list.length > MAX_LIST) throw new Error("Too many questions in one list.");
+    if (list.length > MAX_LIST) throw new ConvexError("Too many questions in one list.");
     for (const q of list) {
       text(q, "A question", 400);
-      if (!q.trim()) throw new Error("Questions cannot be empty.");
+      if (!q.trim()) throw new ConvexError("Questions cannot be empty.");
     }
   }
-  if (c.tenantResponsibility.items.length > MAX_LIST) throw new Error("Too many tenant-responsibility items.");
+  if (c.tenantResponsibility.items.length > MAX_LIST) throw new ConvexError("Too many tenant-responsibility items.");
   for (const i of c.tenantResponsibility.items) text(i, "A tenant-responsibility item", 200);
   text(c.tenantResponsibility.wording, "Tenant-responsibility wording");
 
   const levels = new Set<string>();
   for (const s of c.severityLevels) {
-    if (levels.has(s.level)) throw new Error("Each severity level can only appear once.");
+    if (levels.has(s.level)) throw new ConvexError("Each severity level can only appear once.");
     levels.add(s.level);
     text(s.definition, "A severity definition");
     text(s.examples, "Severity examples");
@@ -612,34 +637,26 @@ export function validateConfigShape(c: SarahConfig): void {
 
   const incidents = new Set<string>();
   for (const s of c.emergencyScripts) {
-    if (incidents.has(s.incident)) throw new Error("Each incident can only have one script.");
+    if (incidents.has(s.incident)) throw new ConvexError("Each incident can only have one script.");
     incidents.add(s.incident);
     text(s.wording, "An emergency script");
     if (s.phone !== undefined && s.phone.trim() !== "" && !isValidPhone(s.phone)) {
-      throw new Error(`"${s.phone}" is not a valid phone number. Use 911 or a full number like 518-365-0996.`);
+      throw new ConvexError(`"${s.phone}" is not a valid phone number. Use 911 or a full number like 518-365-0996.`);
     }
   }
 
   for (const e of c.escalationContacts) {
-    if (e.userIds.length > 20 || e.externalPhones.length > 10) throw new Error("Too many escalation contacts.");
+    if (e.userIds.length > 20 || e.externalPhones.length > 10) throw new ConvexError("Too many escalation contacts.");
     for (const p of e.externalPhones) {
-      if (!isValidPhone(p) || p.trim() === "911") throw new Error(`"${p}" is not a valid phone number.`);
+      if (!isValidPhone(p) || p.trim() === "911") throw new ConvexError(`"${p}" is not a valid phone number.`);
     }
   }
 
-  if (c.routingDirectory.entries.length > 40) throw new Error("Too many routing entries.");
-  for (const e of c.routingDirectory.entries) {
-    text(e.label, "A routing label", 100);
-    text(e.hours ?? "", "Routing hours", 200);
-    if (e.phone.trim() !== "" && !isValidPhoneOrExt(e.phone)) {
-      throw new Error(`"${e.phone}" is not a valid phone number or extension.`);
-    }
-  }
-  text(c.routingDirectory.fallback ?? "", "Routing fallback", 1000);
-  text(c.routingDirectory.afterHours ?? "", "After-hours behavior", 1000);
-  if (c.routingDirectory.enabled && c.routingDirectory.entries.some((e) => e.phone.trim() === "")) {
-    throw new Error("The routing directory cannot be enabled while any entry has no phone number.");
-  }
+  // Owner call routing: one shared rule set (ownerRoutingLib.routingProblems), so the editor marks the
+  // same field with the same message the server would throw. The first problem is reported.
+  for (const e of c.routingDirectory.entries) text(e.hours ?? "", "Routing hours", 400);
+  const routingProblem = routingProblems(c.routingDirectory, opts)[0];
+  if (routingProblem) throw new ConvexError(routingProblem.message);
 
   for (const key of TENANT_MESSAGE_KEYS) {
     const m = c.tenantMessages?.[key];
@@ -649,8 +666,8 @@ export function validateConfigShape(c: SarahConfig): void {
 
   const flowSeen = new Set<string>();
   for (const f of c.flows ?? []) {
-    if (!isFlowKey(f.key)) throw new Error("Unknown call-type wording.");
-    if (flowSeen.has(f.key)) throw new Error("Each call type can only have one wording.");
+    if (!isFlowKey(f.key)) throw new ConvexError("That call-type wording is not recognized. Refresh the page and try again.");
+    if (flowSeen.has(f.key)) throw new ConvexError("Each call type can only have one wording.");
     flowSeen.add(f.key);
     text(f.wording, "Call-type wording");
   }
@@ -662,10 +679,10 @@ export function validateConfigShape(c: SarahConfig): void {
 
   const l = c.leasing;
   const inRange = (n: number, lo: number, hi: number) => Number.isInteger(n) && n >= lo && n <= hi;
-  if (!inRange(l.tourMinutes, 15, 240)) throw new Error("Tour length must be 15 to 240 minutes.");
-  if (!inRange(l.bufferMinutes, 0, 120)) throw new Error("Buffer must be 0 to 120 minutes.");
-  if (![15, 20, 30, 60].includes(l.slotStepMinutes)) throw new Error("Slot step must be 15, 20, 30 or 60 minutes.");
-  if (!inRange(l.minLeadMinutes, 0, 7 * 24 * 60)) throw new Error("Minimum lead time is out of range.");
+  if (!inRange(l.tourMinutes, 15, 240)) throw new ConvexError("Tour length must be 15 to 240 minutes.");
+  if (!inRange(l.bufferMinutes, 0, 120)) throw new ConvexError("Buffer must be 0 to 120 minutes.");
+  if (![15, 20, 30, 60].includes(l.slotStepMinutes)) throw new ConvexError("Slot step must be 15, 20, 30 or 60 minutes.");
+  if (!inRange(l.minLeadMinutes, 0, 7 * 24 * 60)) throw new ConvexError("Minimum lead time is out of range.");
 }
 
 // --- Prompt composition ----------------------------------------------------------------------
@@ -693,6 +710,29 @@ function live(c: SarahConfig, key: CallTypeKey): boolean {
 /** Exported for the policy document and the "Missing from Pat" panel. */
 export function isCallTypeLive(c: SarahConfig, key: CallTypeKey): boolean {
   return live(c, key);
+}
+
+/**
+ * The owner call menu while it is live: the owner_routing call type switched on AND approved, the
+ * routing directory enabled, and at least one person with a dialable number. null otherwise, and
+ * then Sarah gets no menu, no transfer tool and no keypad input. `blocked` numbers are never dialled.
+ */
+export function ownerRoutingMenu(c: SarahConfig, blocked: Array<string | null | undefined> = []): MenuEntry[] | null {
+  if (!live(c, "owner_routing") || !c.routingDirectory.enabled) return null;
+  const menu = menuOf(c.routingDirectory, blocked);
+  return menu.some((m) => m.phone) ? menu : null;
+}
+
+/** Why the owner menu is or is not live in this config, for the /sarah editor. */
+export function ownerRoutingStatus(c: SarahConfig): { live: boolean; reason: string } {
+  const t = c.callTypes.find((x) => x.key === "owner_routing");
+  if (!t?.enabled) return { live: false, reason: "The \"Owner call routing menu\" call type is switched off (Call types tab)." };
+  if (!t.approvedBy) return { live: false, reason: "The owner call routing menu is not approved yet." };
+  if (!c.routingDirectory.enabled) return { live: false, reason: "The routing directory is switched off." };
+  const menu = ownerRoutingMenu(c);
+  if (!menu) return { live: false, reason: "Nobody in the directory has a phone number yet." };
+  const n = menu.filter((m) => m.phone).length;
+  return { live: true, reason: `In this draft, existing owners can be put through to ${n} ${n === 1 ? "person" : "people"}.` };
 }
 
 export function approvedScript(c: SarahConfig, incident: EmergencyScript["incident"]): EmergencyScript | null {
@@ -765,14 +805,30 @@ instruction below are for non-emergency calls only.)`;
  * of pacing text in the prompt defers to these.
  */
 export const HARD_RULES = `HARD RULES FOR EVERY TURN (they override any other line in these instructions that sounds different):
+TURN RULE: A reply either calls a tool or speaks to the caller, never both. Tools run first, in
+silence. After the last result, speak once, and if that ends in a question, stop and wait. A tool
+result is never the caller's answer: if one arrives while your question is unanswered, call skip_turn
+and say nothing. Only a life-safety script is spoken before its tool call.
 1. Ask exactly ONE question per turn. Never join two questions with "and" or "also".
 2. Never list options unless the caller asks for them.
 3. After each answer, acknowledge in 3 to 6 words, then ask the next ONE question.
-4. Skip any question already answered or known (from lookup_caller, find_unit or something they said earlier).
+4. Never ask for what you already have. Before each question, check everything said in this call, the
+   caller's first sentence included, and what tools returned. Skip what is answered, and any step that
+   means the same as one already answered, however it is worded: one answer covers both. If only part
+   is given (an address, no unit), ask only for the missing part. What they already said is confirmed,
+   not asked: a phone number by rule 8; an address and unit by calling find_unit with them, then asking
+   its say line and waiting for a yes. That is the address and unit step.
 5. Max 25 words per turn.
 6. Never ask optional questions until the core (required) ones are done, and stop asking when the caller is done.
-7. If the caller gives several answers at once, accept them all and ask only for what is still missing.
-Only exception: a life-safety emergency script is read as written.
+7. Never say anything was logged, sent or passed on unless a tool result in this call said so.
+8. Read back every phone number in groups ("five one eight, five five five, zero one two three. Is
+   that right?") before using it, and after a correction. Not 10 digits (or 11 starting with 1)? Say
+   "I need a 10-digit US number, could you say it again?"; never guess digits. "Use this number":
+   read back {{system__caller_id}}, or ask if blank.
+Only exceptions: a life-safety emergency script is read as written, the unit or address options
+find_unit returns are read back as one question, and so are the other cities check_availability
+names when nothing is open in the caller's area and the request choices check_work_order_status
+returns (rule 2 does not forbid any of these).
 
 TURN FORMAT
 Good turn: "Got it, thanks. Which floor are you on?"
@@ -782,23 +838,30 @@ Questions in these instructions are written as numbered steps. A step is somethi
 
 /** Same rules, closing the prompt. */
 export const HARD_RULES_REMINDER = `FINAL REMINDER, SAME RULES (they win over anything above):
-Exactly ONE question per turn, never two joined by "and" or "also". Never list options unless asked. Acknowledge in 3 to 6 words, then the next ONE question. Skip what is already known or answered. Max 25 words per turn. No optional questions until the required ones are done; stop asking when the caller is done. If they give several answers at once, take them all and ask only for what is missing.`;
+Exactly ONE question per turn, never two joined by "and" or "also". Never list options unless asked (find_unit's unit or address options, the other cities check_availability names when nothing is open in the caller's area, and check_work_order_status's request choices are the only exceptions). Acknowledge in 3 to 6 words, then the next ONE question. Never ask for what the caller already said anywhere in the call, first sentence included: confirm it, and ask only for a missing part. Max 25 words per turn. No optional questions until the required ones are done; stop asking when the caller is done. Never say anything was logged or sent unless a tool result said so. Read back every phone number. A reply either calls a tool or speaks, never both; a question ends your turn; a tool result is never the caller's answer.`;
 
 /** Conversation style for every flow: leasing, maintenance and resident calls. */
 export function composeStyle(c: SarahConfig): string {
   return `CONVERSATION STYLE (applies to every call; the HARD RULES FOR EVERY TURN come first):
 - You are on a phone call, not filling in a form. One question, then stop and wait for the answer.
 - Never preview what you are going to ask and never say "I have a few questions".
-- Ask only for what is MISSING. Never ask for something the caller already told you, something a
-  tool already gave you (lookup_caller, find_unit) or something already logged.
-- Log early, then update. Call the logging tool as soon as you have the core of what they need plus
-  whatever identifying detail exists, even before everything is collected, then call it again as you
-  learn more. Never hold everything until the end of the call.
+- Log early, then update. Call the logging tool as soon as you have the core of what they need (for
+  maintenance, what is actually wrong, see STEP 2), ask your next question after its result, and call
+  it again as you learn more. Say it was logged once, when you close the call, never mid-intake, urgent
+  issues included. A life-safety emergency follows its own script.
+- Tone tags: only [calm] or [empathetic], and rarely. Never [happy], [excited] or any other tag, and
+  none at all in an emergency, in approved wording or in a say line.
 - Optional steps (pets, convenient technician times, photos, "anything else") come only AFTER the
   core issue is logged and the required steps are done, only if they are relevant, and never when
   the caller sounds rushed or upset.
 - If the caller asks you something, answer it in a sentence, then carry on with the next step.
-- Read back only what matters (a phone number, a tour time). Do not recap the whole call.
+- If what you hear is background noise, a fragment that makes no sense here, or speech not meant
+  for you (a TV, someone else in the room), do not answer it. Say "Sorry, as I was saying," and
+  repeat your last question or sentence. If you truly cannot tell whether the caller spoke to you,
+  say "Sorry, I didn't catch that. Could you say that again?", never twice in a row. Anything that
+  could be an emergency (fire, smoke, gas, flooding, "help") is never noise: follow LIFE-SAFETY
+  EMERGENCIES.
+- Do not recap the whole call.
 - ${companyOf(c)} is the only company name you use.
 - You never text or send the caller anything and never say you will. Never claim a text or an alert
   went out unless a tool result says team_alerted is true.
@@ -832,10 +895,21 @@ and never confirm or deny who lives in any unit or whether a name belongs to a u
  a. Call lookup_caller. If it matches, confirm it by asking its "say" line ("Am I speaking with
     [first_name] in unit [unit_label]?") and wait for a yes. On a yes you have their name and unit:
     do not ask for either again.
- b. If there is no match, or they say no: ask for the caller's NAME (one question), then the
-    property name or address (one question), then the unit number (one question), then call
-    find_unit and confirm what it returns.
- c. If find_unit still does not match: ask for a callback phone number (and an email if they
+ b. If there is no match, or they say no: get their NAME, then the property name or address, then
+    the unit number, one question each and only what they have not already said (HARD RULE 4),
+    then call find_unit and confirm what it returns. Once it matches, pass its property_address and
+    unit_label as spoken_address and spoken_unit to the logging tools.
+ b2. If find_unit does not match, do not give up straight away. If it returns options
+    (similar_units, all_units or address_options), read them as ONE question using its "say"
+    line, for example "Is that 182, 184 or 188 Remsen Street?" or "Did you mean unit B2?", and
+    let the caller choose. Never pick one for them. When they confirm one, call find_unit again
+    with exactly the address and unit they confirmed: only matched true identifies the unit. If it
+    returns no options, ask what its "say" line asks (repeat or spell the unit, or say the floor)
+    and call find_unit once more. Never offer buildings or units the tool did not give you, never
+    offer a list to a caller who has not named a building, and never say whether a unit is
+    occupied or who lives there.
+ c. If find_unit still does not match, or the caller says none of the options is theirs or is
+    unsure: ask for a callback phone number (and an email if they
     offer one) ONLY so it can be recorded. Never use them to look anyone up. Call
     log_unmatched_caller with a one-sentence summary of what they needed, tell them an asset
     manager will call them back, and end the call politely with end_call. Make no promise about
@@ -875,18 +949,18 @@ and never confirm or deny who lives in any unit or whether a name belongs to a u
     maint = `
 
 STEP 2, THE MAINTENANCE REQUEST (something is broken, leaking, not working or unsafe):
-Once they are identified, ask the one question "What's going on?" (or "What can I help with?") and
-listen. Decide the issue_type and the severity level from what they say.
-Then call log_maintenance_request RIGHT AWAY, with the issue, the severity and whatever unit
-detail you already have (spoken_address, spoken_unit, caller_name), even
-though most details are still missing. Do not wait for the rest.
+Once they are identified, ask the one question "What's going on?" (skip it if they already said what
+is wrong) and listen. Decide the issue_type and the severity level from what they say.
+Call log_maintenance_request only once the caller said yes to the unit in STEP 1 AND they have said what is actually
+wrong ("the kitchen sink is leaking"). "A maintenance issue" or "a complaint" is not a description:
+ask what's going on first. Then log it right away, with the issue, the severity and the unit
+details (spoken_address, spoken_unit, caller_name). Do not wait for the rest.
 After that, follow the flows below. Call log_maintenance_request again every time you learn
 something worth recording.
 
-${composeFlowSection("GENERAL INTAKE FLOW", "every maintenance call; steps already settled by STEP 1 or by their first answer are skipped", flows.maint_basic)}
-Put the best callback number in callback_phone: read it back digit by digit only if it is different
-from the number they are calling from; if they say to use the number they are calling from, leave
-callback_phone out.
+${composeFlowSection("GENERAL INTAKE FLOW", "every maintenance call; steps already answered anywhere in the call are skipped", flows.maint_basic)}
+Put the best callback number in callback_phone; if they say to use the number they are calling
+from, leave callback_phone out.
 ${
   kinds.length
     ? `
@@ -895,6 +969,11 @@ answer in the answers argument as a short key and a short value, for example
 {"breaker_checked": "yes, still no power"}:
 
 ${kinds.join("\n\n")}
+
+Some steps ask for the same fact, so one answer covers them all and you never ask the second: when
+they first noticed it and how long it has lasted; what the issue is and what is broken; where it is,
+if they already named the spot ("my front door knob", "under the sink"); an apartment above, if they
+said top floor. Put that answer in each step's field.
 
 These are the only things you ever ask them to do. Never suggest a fix, never guess at a cause, and
 never diagnose. Make no promise beyond what is written here.`
@@ -950,12 +1029,13 @@ between two levels, take the lower one. Never say the level out loud.
 
 Never pass "unknown" or a made-up value to satisfy a tool; leave the field out. It is safe to call
 log_maintenance_request many times in one call: each call updates the same request and changes only
-what you send. Never tell the caller something is recorded unless you actually called the tool.
+what you send. If it returns logged false, nothing was logged: do what its say and message tell you.
 
-Closing a maintenance call: say the request has been logged and goes to the property's asset
+Closing a maintenance call (only after log_maintenance_request returned logged true): say the request has been logged and goes to the property's asset
 manager for review, and the team will follow up. Never say it goes to Pat directly, never give a
 time frame or promise a technician visit, and never diagnose. Only escalate an emergency or urgent
-issue, with escalate after logging; routine requests are logged and the call closed.`;
+issue, with escalate after logging; routine requests are logged and the call closed. Escalating an
+urgent issue that is not life-safety does not end the intake: finish the steps, then close.`;
   } else {
     maint = `
 
@@ -985,15 +1065,15 @@ const FLOW_RULES: Record<FlowKey, { tool: string; how: string }> = {
   },
   non_renewal: {
     tool: "non_renewal",
-    how: "Ask, one at a time: 'May I ask why?', then their anticipated move-out date, then what days and times they are available for the move-out walkthrough. Put the answers in the log reason. Then give the process in the approved wording. Never promise any security-deposit outcome.",
+    how: "Ask, one at a time and skipping what they already said: 'May I ask why?', then their anticipated move-out date, then what days and times they are available for the move-out walkthrough. Put the answers in the log reason. Then give the process in the approved wording. Never promise any security-deposit outcome.",
   },
   work_order_status: {
     tool: "work_order_status",
-    how: "Ask, one at a time: their name, the address, the unit number, what the maintenance issue is, and when they first reported it. There is no live lookup, so never state a status; say a team member will follow up. Log it, and put the address, the issue and when it was first reported in the reason, because the tool has no fields for them.",
+    how: "Ask, one at a time and skipping what you already know: their name, the address, the unit number, what the maintenance issue is, and when they first reported it. Confirm the unit with find_unit (only matched true counts). Then call check_work_order_status with caller_name, find_unit's property_address and unit_label, issue_description and first_reported. Say only what it returns: the summary, the date it was reported and the status sentence. Never add a day, date, time, cause, name or promise, never read out a ref, and never mention identity checks or say a name did or did not match. If it returns choices, ask which one with its say line (one question), then call it again with request_ref and describe only that one. If it finds nothing, say you don't see an open request for their unit and offer to log one; if they want to, run the maintenance request flow. If the unit is not identified, never say whether a request exists: say you'll pass their question to the right team member. Say the 'can't see the live status' line only when the lookup itself fails. Always log the call with log_tenant_issue, and put the address, the issue and when it was first reported in the reason, because the tool has no fields for them. That only records their question: never tell the caller a request was logged or created.",
   },
   renewal: {
     tool: "renewal",
-    how: "Ask, one at a time: their name, address, unit number, when their lease expires and their current email address. Then explain the process in the approved wording. If they do not know who their asset manager is, say staff will pass it to the right person. Never say a lease has been generated or sent, and never say anything is binding until both signatures are in. Log it, and put the address, the lease expiry date and the email address in the reason, because the tool has no fields for them.",
+    how: "Ask, one at a time and skipping what they already said: their name, address, unit number, when their lease expires and their current email address. Then explain the process in the approved wording. If they do not know who their asset manager is, say staff will pass it to the right person. Never say a lease has been generated or sent, and never say anything is binding until both signatures are in. Log it, and put the address, the lease expiry date and the email address in the reason, because the tool has no fields for them.",
   },
   vendor_payment: {
     tool: "vendor_payment",
@@ -1020,26 +1100,16 @@ How to handle it: ${r.how}
 Log it with log_tenant_issue, call_type ${r.tool}.`;
   });
 
-  const dir = c.routingDirectory;
-  const routing =
-    live(c, "owner_routing") && dir.enabled
-      ? `
-
-OWNER CALL ROUTING:
-If an owner asks for a particular person or department, give only the number listed for them
-here, and only the hours listed. Never give a number that is not in this list, and never offer to
-transfer or "press 0" to anyone.
-${dir.entries
-  .filter((e) => e.phone.trim())
-  .map((e) => `- ${e.label}: ${e.phone.trim()}${e.hours?.trim() ? ` (${e.hours.trim()})` : ""}`)
-  .join("\n")}${
-        dir.fallback?.trim() ? `\nIf nobody answers: ${dir.fallback.trim()}` : ""
-      }${dir.afterHours?.trim() ? `\nAfter hours: ${dir.afterHours.trim()}` : ""}`
-      : "";
+  // Only while the owner menu is live and someone can be put through; otherwise nothing at all, so
+  // the prompt is unchanged while it is off.
+  const menu = ownerRoutingMenu(c);
+  const routing = menu
+    ? `\n\n${composeOwnerRoutingBlock(menu, companyOf(c))}\nIf a caller only says they are a property owner, ask once whether they already own a property with ${companyOf(c)} or want it to manage one: an existing owner goes to OWNER CALL ROUTING, one who wants management goes to route_owner_prospect.`
+    : "";
 
   const generic = `OTHER RESIDENT CALLS (anything that is not a maintenance issue and not described above):
-Get their name, unit and best callback number one at a time, and one plain sentence on why they
-called. Say you will pass it to the team, and call log_tenant_issue with call_type ${
+Get whichever of their name, unit and best callback number they have not already said, one at a
+time, and one plain sentence on why they called. Say you will pass it to the team, and call log_tenant_issue with call_type ${
     names.length ? `${names.join(", ")} or other` : "other"
   }. ${
     names.length === 0 ? "Use call_type other for every non-maintenance call. " : "Use call_type other for any topic not in that list. "
@@ -1053,8 +1123,10 @@ status of anything is unless a tool just told you.`;
 
 /** Short statement of which call flows are on. Anything not listed must be handed to staff. */
 export function composeCallTypes(c: SarahConfig): string {
-  const on = CALL_TYPES.filter((t) => live(c, t.key)).map((t) => `- ${t.label}`);
-  const off = CALL_TYPES.filter((t) => !live(c, t.key)).map((t) => t.label);
+  // The owner menu counts as handled only while it is really live (someone can be put through).
+  const handled = (key: CallTypeKey) => (key === "owner_routing" ? ownerRoutingMenu(c) !== null : live(c, key));
+  const on = CALL_TYPES.filter((t) => handled(t.key)).map((t) => `- ${t.label}`);
+  const off = CALL_TYPES.filter((t) => !handled(t.key)).map((t) => t.label);
   const b = c.behavior ?? defaultBehavior();
   return `CALL TYPES YOU HANDLE:
 ${on.join("\n") || "- none"}
@@ -1068,25 +1140,44 @@ Do not offer to connect anyone to Pat or "press 0": the team follows up on every
 }
 
 /** Leasing instructions for the 518 flow. They replace the older check_qualification steps. */
+/** How Sarah handles the city or area answer. Only when the leasing flow has a preferred_area step. */
+const AREA_RULES = `   CITY OR AREA (the step recorded in preferred_area):
+   - "Anywhere", "not sure", "the Capital Region" or anything like it is no preference: record
+     preferred_area as "no preference", do not ask again, and call check_availability without city.
+   - Once they name a city or area, call check_availability with it as city and offer only what it
+     returns for that city.
+   - If city_status is none_available or unknown_city, say its say line (or very close to it): there
+     is nothing open there, or we don't currently have properties there, then the cities that do have
+     openings, and ask if any of those would work. Never call a city nearby or close, and never say
+     how far away anything is.
+   - If they pick one of those cities, call check_availability again with it, and log both places in
+     preferred_area (for example "Clifton Park, open to Albany").`;
+
 export function composeLeasing(c: SarahConfig): string {
   const co = companyOf(c);
   const flows = flowsOf(c);
+  const asksArea = flows.leasing.some((n) => n.kind === "ask" && /\bpreferred_area\b/.test(n.field ?? ""));
   return `LEASING CALLS (${co}; this replaces any earlier leasing steps that mention check_qualification):
-1. Greet them and ask one open question: what are they looking for?
+1. Once they say they want to rent, go straight to the first step of the question flow below. Do not
+   ask a separate open question first.
 2. Run this question flow, ONE step per turn. Skip any step they have already answered and any
    question the property has switched off under WHAT TO ASK EVERY LEASING CALLER.
 
 ${composeFlowSection("LEASING QUESTION FLOW", "the caller wants to rent an apartment", flows.leasing)}
-
+${asksArea ? `\n${AREA_RULES}\n` : ""}
 3. Call log_lead as soon as you have the first useful answer, and again after every one or two new
-   answers, always with everything you know so far. bedrooms as studio, 1br, 2br or 3br+; budget as
-   a number; pets_wanted, pet_type and pet_count; third_party_payer with payer_name, payer_phone and
-   payer_email; preferred_communities and avoid_communities; move_in_date; other_info;
-   caller_name and caller_phone. Do not wait until the end. (Only if EXTRA SCREENING QUESTIONS
-   are listed, also record those answers with check_qualification.)
+   answers, always with everything you know so far. preferred_area (the city or area, in their
+   words, or "no preference") and avoid_communities; bedrooms as studio, 1br, 2br or 3br+; budget as
+   a number; third_party_payer with payer_name, payer_phone and payer_email; pets_wanted, pet_type
+   and pet_count; move_in_date; caller_name and caller_phone; other_info. Do not wait until the end.
+   (Only if EXTRA SCREENING QUESTIONS are listed, also record those answers with check_qualification.)
 4. Availability: answer only from check_availability or the available_units log_lead returns.
-   Never offer a unit or size that is not in a result. If nothing matches, offer the closest
-   available option or to note their interest.
+   Never offer a unit or size that is not in a result. Once you know their city or area, always
+   pass it to check_availability as city. If nothing matches, offer the closest available option
+   or to note their interest.
+   If they ask about bathrooms, the floor, laundry, heat or who pays for utilities for a unit they
+   like, call get_unit_details with the building. Only those questions, never every field
+   unprompted, and for any null say you don't have that detail and the team will follow up.
 5. You only RECORD. Never say or hint that they do or do not qualify, are approved, eligible or
    turned down. If asked, say the team reviews every inquiry and will follow up.
 6. Tours: offer one, then run this flow, ONE step per turn.
@@ -1109,6 +1200,10 @@ ${composeFlowSection("TOUR REQUEST FLOW", "the caller wants a tour", flows.tour)
  * The whole Sarah-config contribution: what replaces the hard-coded LIFE_SAFETY_BLOCK and
  * RESIDENT_TRIAGE_BLOCK, plus the style rules, leasing flow, call-type list and wording flows.
  */
+/** The find_unit example in composeResidentCalls, and what it reads while the owner menu is live. */
+const REAL_ADDRESS_EXAMPLE = '"Is that 182, 184 or 188 Remsen Street?"';
+const PLACEHOLDER_ADDRESS_EXAMPLE = '"Is that 12, 14 or 16 Example Street?"';
+
 export function composeSarahSections(c: SarahConfig): {
   top: string;
   lifeSafety: string;
@@ -1116,11 +1211,26 @@ export function composeSarahSections(c: SarahConfig): {
   extra: string;
   bottom: string;
 } {
+  // The owner phone menu is a list read past 25 words, so while it is live it joins the exceptions
+  // to rules 2 and 5. Off: the HARD RULES are byte-identical to the constants.
+  const menuLive = ownerRoutingMenu(c) !== null;
   return {
-    top: HARD_RULES,
-    bottom: HARD_RULES_REMINDER,
+    top: menuLive
+      ? HARD_RULES.replace(
+          "returns (rule 2 does not forbid any of these).",
+          "returns, and the OWNER CALL ROUTING phone menu is read once as written (rules 2 and 5 do not\nforbid any of these).",
+        )
+      : HARD_RULES,
+    bottom: menuLive
+      ? HARD_RULES_REMINDER.replace(
+          "and check_work_order_status's request choices are the only exceptions",
+          "check_work_order_status's request choices and the owner phone menu are the only exceptions",
+        )
+      : HARD_RULES_REMINDER,
     lifeSafety: composeLifeSafety(c),
-    resident: composeResidentCalls(c),
+    // While live, the find_unit example names no real street: a real call copied one into
+    // verify_owner (conv_5201m6gvmsxafxssy2xrjzjgxten). Off: unchanged, so the prompt is byte-identical.
+    resident: menuLive ? composeResidentCalls(c).replace(REAL_ADDRESS_EXAMPLE, PLACEHOLDER_ADDRESS_EXAMPLE) : composeResidentCalls(c),
     extra: [
       composeFlows(c),
       composeCallTypes(c),
@@ -1273,7 +1383,13 @@ export function itemFingerprint(c: SarahConfig, id: string, wf?: WorkflowRow): s
   } else if (id === "delia-contact") {
     basis = c.routingDirectory.entries.find(isDelia) ?? null;
   } else if (id === "routing-phones" || id === "owner-routing") {
-    basis = { e: c.routingDirectory.entries, f: c.routingDirectory.fallback ?? "", a: c.routingDirectory.afterHours ?? "" };
+    // m is undefined (and so left out of the hash) until a main office number is entered, so older approvals hold.
+    basis = {
+      e: c.routingDirectory.entries,
+      f: c.routingDirectory.fallback ?? "",
+      a: c.routingDirectory.afterHours ?? "",
+      m: c.routingDirectory.mainOfficeNumber || undefined,
+    };
   } else if (id.startsWith("escalation-")) {
     basis = c.escalationContacts.find((x) => x.level === id.slice(11)) ?? null;
   } else if (id === "am-fallback" || id === "pilot-flows") {
@@ -1304,7 +1420,10 @@ function contactDone(c: SarahConfig, id: string, extra: ItemExtra): boolean | nu
     return extra.properties.length > 0 && extra.properties.every((p) => p.phone.trim() !== "");
   }
   if (id === "delia-contact") return !!entries.find(isDelia)?.phone.trim();
-  if (id === "routing-phones") return entries.filter((e) => !isDelia(e)).every((e) => e.phone.trim() !== "");
+  // A shared (test) number keeps the item open, so "replace with real numbers" stays on the list.
+  if (id === "routing-phones") {
+    return entries.filter((e) => !isDelia(e)).every((e) => e.phone.trim() !== "") && routingWarnings(c.routingDirectory).length === 0;
+  }
   if (id.startsWith("escalation-")) {
     const e = c.escalationContacts.find((x) => x.level === id.slice(11));
     return !!e && (e.userIds.length > 0 || e.externalPhones.length > 0);
@@ -1393,6 +1512,7 @@ export function allItems(c: SarahConfig, extra?: Partial<ItemExtra>): MissingIte
     fallback: "Sarah takes a message for Delia and gives no number.",
   });
   const missingPhones = c.routingDirectory.entries.filter((e) => !e.phone.trim() && !isDelia(e));
+  const sharedNumbers = routingWarnings(c.routingDirectory);
   add({
     id: "routing-phones",
     area: "routing",
@@ -1402,9 +1522,12 @@ export function allItems(c: SarahConfig, extra?: Partial<ItemExtra>): MissingIte
     approval: false,
     label: missingPhones.length
       ? `Phone numbers or extensions for ${missingPhones.map((e) => e.label).join(", ")}`
-      : "Phone numbers or extensions for the routing menu",
+      : sharedNumbers.length
+        ? "Routing menu: real phone numbers (test number in use)"
+        : "Phone numbers or extensions for the routing menu",
     detail:
-      "The owner call routing menu (press 1 Pat, 2 Alex, 3 Nikki, 4 Nina, 5 Delia, 6 Alyssa) stays off until every number is entered.",
+      "The owner call routing menu (press 1 Pat, 2 Alex, 3 Nikki, 4 Nina, 5 Delia, 6 Alyssa) offers only the people with a number. For the others Sarah takes a message." +
+      (sharedNumbers.length ? ` ${sharedNumbers.join(" ")}` : ""),
     fallback: ROUTING_MENU_FALLBACK,
   });
   add({
@@ -1416,7 +1539,7 @@ export function allItems(c: SarahConfig, extra?: Partial<ItemExtra>): MissingIte
     approval: true,
     label: "Owner call routing: approval and rules",
     detail:
-      "Conflict to resolve: the PRD says no general press-0 route to Pat unless Alex and Pat approve. Also needed: after-hours behavior and what happens if someone does not answer.",
+      "Conflict to resolve: the PRD says no general press-0 route to Pat unless Alex and Pat approve. Also needed: each person's hours, after-hours behavior and what happens if someone does not answer. The menu is offered to existing property owners only.",
     fallback: ROUTING_MENU_FALLBACK,
   });
   for (const level of ["emergency", "urgent"] as const) {

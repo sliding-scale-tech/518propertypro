@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { MapPin, PawPrint } from "lucide-react";
+import { AlertTriangle, MapPin, PawPrint } from "lucide-react";
 import { Pill, SevChip } from "@/components/ui";
 import { PRIORITY_BAR, STATUS_LABEL, formatDate, mapsUrl } from "./lib";
 
@@ -17,6 +17,7 @@ export type TechJob = {
   unitNumber?: string;
   propertyName?: string;
   isOverdue: boolean;
+  actionRequired?: { kind: "sent_back" | "info_requested" } | null;
 };
 
 export function JobCard({ job }: { job: TechJob }) {
@@ -57,6 +58,11 @@ export function JobCard({ job }: { job: TechJob }) {
         )}
         <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
           <Pill>{STATUS_LABEL[job.status] ?? job.status}</Pill>
+          {job.actionRequired ? (
+            <Pill tone="warn" className="font-semibold">
+              <AlertTriangle className="h-3 w-3" /> Action required
+            </Pill>
+          ) : null}
           {job.window ? <Pill tone="warn">{job.window}</Pill> : null}
           {job.dueDate !== undefined && (
             <span className={job.isOverdue ? "font-semibold text-danger-ink" : ""}>

@@ -10,6 +10,7 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { LiveWaveform } from "@/components/ui/live-waveform";
 import { RequireView } from "@/components/require-view";
 import { PageHeader } from "@/components/ui";
+import { errorMessage } from "@/components/ui/toast";
 
 function CallPageInner() {
   return (
@@ -147,7 +148,10 @@ function CallScreen() {
     setTranscriptCleared(false);
     try {
       const { token } = await mintToken();
-      if (!agent) throw new Error("Agent is still being created — try again in a moment.");
+      if (!agent) {
+        setError("Agent is still being created — try again in a moment.");
+        return;
+      }
 
       const id = await startConversation({ agentId: agent._id });
       setConversationId(id);
@@ -155,11 +159,7 @@ function CallScreen() {
 
       startSession({ conversationToken: token, connectionType: "webrtc" });
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Could not start the call. Check the microphone permission.",
-      );
+      setError(errorMessage(err, "Could not start the call. Check the microphone permission."));
       setConversationId(null);
     } finally {
       setStarting(false);

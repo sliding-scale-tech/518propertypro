@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import {
   action,
   internalAction,
@@ -22,8 +22,19 @@ import { coreBlock } from "./coreQuestions";
 import { withTourBooking } from "./tourPrompt";
 import { currentOrg, isAdminView, requireOrgId } from "./authz";
 import { writeAudit } from "./audit";
-import { composeSarahSections, defaultConfig, normalizeConfig } from "./sarahConfigLib";
+import { composeSarahSections, defaultConfig, normalizeConfig, ownerRoutingMenu } from "./sarahConfigLib";
 import type { SarahConfig } from "./sarahConfigLib";
+import {
+  OWNER_ADDRESS_RULE,
+  OWNER_TRANSFER_DIGITS_VAR,
+  OWNER_TRANSFER_VAR,
+  TRANSFER_DESTINATION_MODE,
+  TRANSFER_MECHANISM,
+  transferPlaceholders,
+  transferToolConfig,
+} from "./ownerRoutingLib";
+import type { MenuEntry } from "./ownerRoutingLib";
+import { ownLines } from "./ownerRouting";
 
 // Jessica — premade, American, female, "conversational" use case. Premade rather than a
 // professional clone on purpose: a PVC run at the wrong similarity_boost is what made the
@@ -54,6 +65,12 @@ const VOICE_TUNING: el.VoiceTuning = {
   speed: 1.0,
   // The reason we are on eleven_v3_conversational at all.
   expressiveMode: true,
+  // Sarah handles complaints, emergencies and legal topics, so nothing upbeat. This is only a
+  // suggestion (the API lets the agent use other tags): the rule in composeStyle enforces it.
+  suggestedAudioTags: [
+    { tag: "calm", description: "The default for routine questions and information." },
+    { tag: "empathetic", description: "When the caller is upset or reporting a problem." },
+  ],
 };
 
 const TURN_TUNING: el.TurnTuning = {
@@ -62,8 +79,15 @@ const TURN_TUNING: el.TurnTuning = {
   // The qualification flow collects a name and a callback number digit by digit, which is
   // the documented case for "patient" — "eager" clips people mid-number.
   eagerness: "patient",
-  softTimeoutSeconds: 3,
-  fillerMessages: ["Just a sec…", "One moment…", "Let me pull that up…"],
+  // conv_7301m6e31kq8fs8razf5mys7t6wj: a turn with one tool reaches its first real words about 2.8-3.7s
+  // after the turn starts, so 3s put a filler on four of the five, under a second before the reply.
+  // Two tools in a row (log, then escalate) take about 5s. 4.5s clears the slowest one-tool turn that
+  // call's LLM timings allow (about 4.3s) and still covers the long wait.
+  softTimeoutSeconds: 4.5,
+  maxSoftTimeoutsPerGeneration: 1,
+  // No "Let me pull that up…": tools run silently since v17, so it played before replies that pulled
+  // nothing up ("Let me pull that up…. I'm sorry to hear that.").
+  fillerMessages: ["Just a sec…", "One moment…"],
   interruptionIgnoreTerms: [
     "okay",
     "ok",
@@ -75,7 +99,41 @@ const TURN_TUNING: el.TurnTuning = {
     "sure",
     "got it",
   ],
+  // Our list above stays; ElevenLabs' curated English backchannels are added on top of it.
+  mergeWithDefaultIgnoreTerms: true,
+  interruptionIgnoreTermLanguages: ["en"],
+  // Callers often ring from noisy places; a cough or a TV should not cut off the greeting.
+  disableFirstMessageInterruptions: true,
 };
+
+/**
+ * The LLM behind Sarah. Switched 2026-11-02 from "gemini-3.1-flash-lite" to
+ * "gemini-3-flash-preview" after the simulated eval in docs/llm-eval-2026-11-02.md (best rule
+ * following, lowest and steadiest latency, no backup-LLM takeovers).
+ *
+ * TO REVERT: set `model` back to "gemini-3.1-flash-lite" and publish. (The previous config sent
+ * reasoningEffort null; if the API rejects "minimal" for flash-lite, set that to null too.)
+ *
+ * Cost: about $0.08 per call minute vs about $0.045 on flash-lite. This is a preview model, so
+ * Google may change or retire it without much notice.
+ *
+ * reasoningEffort "minimal" is the lowest the API accepts for this model and is exactly what
+ * the eval ran (scripts/probes/llm_eval.py, reasoning_fields). Temperature 0 and max_tokens 160
+ * are unchanged. The backup LLM cascade is not set here and is left as configured on the agent.
+ */
+const LLM_TUNING: el.LlmTuning = {
+  model: "gemini-3-flash-preview",
+  temperature: 0,
+  reasoningEffort: "minimal",
+  maxTokens: 160,
+};
+
+const VAD_TUNING: el.VadTuning = {
+  // Filters voices that aren't the caller's (a TV, someone else in the room) before they count
+  // as speech. User approved 2026-11-02 (Sarah v15); still needs a real phone test.
+  backgroundVoiceDetection: true,
+};
+// turn.noisy_environment_detection stays off on purpose: it would ask callers, including ones reporting emergencies, to "move somewhere quieter".
 
 
 /**
@@ -135,12 +193,12 @@ YOUR JOB, IN ORDER:
 
 LEASING QUESTIONS WE ONLY RECORD:
 These are approved for ${COMPANY_NAME} and are the only questions allowed besides the list above.
-They are OPTIONAL: ask them one at a time, only after the required questions are done, and send the
+Ask them one at a time, in the order the LEASING QUESTION FLOW gives, and send the
 answers to log_lead with the argument named in brackets. Include every answer you have each time you call it.
 - Whether someone else, such as an agency, an employer or a family member, will be paying part or
   all of the rent [third_party_payer, true or false]. If yes, ask for that payer's name
   [payer_name], phone number [payer_phone] and email address [payer_email].
-- Which communities they'd prefer in the Capital Region [preferred_communities], and any they
+- Which city or area they want to rent in [preferred_area], asked first, and any communities they
   want to avoid [avoid_communities].
 - How many pets, as a number [pet_count], on top of the type of pet.
 - Anything else they'd like us to know [other_info].
@@ -182,9 +240,8 @@ WHEN TO ESCALATE — call the escalate tool, don't try to handle it yourself:
   themselves twice without understanding, stop trying a third time — escalate instead of
   looping.
 
-Before calling escalate, quickly get their full name, a callback number, and their living
-area or which unit this is about — ask for these directly ("Can I get your name and a
-number to reach you, and which unit or area this is about?") rather than skipping it. Once
+Before calling escalate, get their full name, a callback number, and their living area or
+which unit this is about: one question each, only for what they have not already said. Once
 you've escalated, tell them plainly that someone will be in touch with them soon, then move
 to closing the call.
 
@@ -197,17 +254,14 @@ to note their interest for when something matching opens up. Always leave them w
 
 TONE FOR VOICE:
 Short sentences. No lists, no markdown, nothing that only makes sense written down. Confirm
-you understood something before moving to the next question. Before checking availability,
-looking someone up, logging a request, or anything else that takes a moment, say a short
-natural phrase first — "let me check that," "one sec, pulling that up," "give me just a
-moment" — never go silent while you look something up.
+you understood something before moving to the next question. Tools run in silence (TURN RULE).
 
 WHAT YOU DO NOT DO:
 Negotiate rent. Discuss lease terms or legal questions, or give legal advice. Diagnose a
 maintenance issue or make commitments beyond what is written in these instructions. Guess at
 facts you don't have. Speak a language other than English.`;
 
-export const DEFAULT_FIRST_MESSAGE = `Thanks for calling ${COMPANY_NAME}, this is Sarah! Are you calling about renting an apartment, a maintenance issue, or something else?`;
+export const DEFAULT_FIRST_MESSAGE = `Thanks for calling ${COMPANY_NAME}, this is Sarah! Are you calling about renting an apartment, a maintenance issue, as a property owner, or something else?`;
 
 /**
  * Renders the property manager's own questions into the prompt.
@@ -255,6 +309,41 @@ question out just because you think you know what they would say.`;
  * rather than only when non-empty — an agent with no WHAT TO ASK section would have nothing
  * telling it what to collect at all.
  */
+// The stored prompt's older leasing-record lines (before the city or area question moved to the
+// start of the leasing intake, 2026-10-30), whitespace-tolerant so re-wrapped text still matches.
+// Rewritten at compose time, like withTourBooking, so every agent picks the change up on its next
+// push and a manager's own edits elsewhere in Settings stay untouched.
+const OLD_RECORD_OPTIONAL =
+  /They are OPTIONAL: ask them one at a time, only after the required questions are done, and send the\s+answers to log_lead/;
+const NEW_RECORD_ORDER =
+  "Ask them one at a time, in the order the LEASING QUESTION FLOW gives, and send the\nanswers to log_lead";
+const OLD_COMMUNITIES_LINE =
+  /- Which communities they'd prefer in the Capital Region \[preferred_communities\], and any they\s+want to avoid \[avoid_communities\]\./;
+const NEW_AREA_LINE =
+  "- Which city or area they want to rent in [preferred_area], asked first, and any communities they\n  want to avoid [avoid_communities].";
+
+// The stored prompt's older pre-escalation line asked for three things in one question "rather than
+// skipping it", against HARD RULES 1 and 4 (a caller re-asked for a name and unit they had given,
+// 2026-11-02). Rewritten at compose time the same way.
+const OLD_ESCALATE_ASK =
+  /Before calling escalate, quickly get their full name, a callback number, and their living\s+area or which unit this is about — ask for these directly \("Can I get your name and a\s+number to reach you, and which unit or area this is about\?"\) rather than skipping it\./;
+const NEW_ESCALATE_ASK =
+  "Before calling escalate, get their full name, a callback number, and their living area or\nwhich unit this is about: one question each, only for what they have not already said.";
+
+// The stored prompt told Sarah to speak before every tool, which put questions in the same step as
+// tool calls (see pre_tool_speech in elevenLabsApi.ts). Rewritten at compose time the same way.
+const OLD_TOOL_SPEECH =
+  /Before checking availability,\s+looking someone up, logging a request, or anything else that takes a moment, say a short\s+natural phrase first — "let me check that," "one sec, pulling that up," "give me just a\s+moment" — never go silent while you look something up\./;
+const NEW_TOOL_SPEECH = "Tools run in silence (TURN RULE).";
+
+export function withAreaFirst(prompt: string): string {
+  return prompt
+    .replace(OLD_RECORD_OPTIONAL, NEW_RECORD_ORDER)
+    .replace(OLD_COMMUNITIES_LINE, NEW_AREA_LINE)
+    .replace(OLD_ESCALATE_ASK, NEW_ESCALATE_ASK)
+    .replace(OLD_TOOL_SPEECH, NEW_TOOL_SPEECH);
+}
+
 export function composePrompt(
   prompt: string,
   questions: ScreeningQuestion[],
@@ -263,7 +352,7 @@ export function composePrompt(
 ): string {
   // First, so the old "confirmation text is on its way" step is rewritten before anything else
   // is spliced in around it — see convex/tourPrompt.ts.
-  prompt = withTourBooking(prompt);
+  prompt = withAreaFirst(withTourBooking(prompt));
   let next = prompt.includes(CORE_PLACEHOLDER)
     ? prompt.replace(CORE_PLACEHOLDER, coreBlock(disabledCore))
     : `${prompt}\n\n${coreBlock(disabledCore)}`;
@@ -407,9 +496,13 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
     description:
       "Looks up current rent and availability for a bedroom type, or the whole property, " +
       "with no lead capture and no qualification decision. Call this any time someone asks " +
-      "a standalone question like 'what's the rent for a 2BR' or 'do you allow pets', even " +
+      "a standalone question like 'what's the rent for this type of unit' or 'do you allow pets', even " +
       "before you've gathered the five qualification fields. Returns only units that are " +
-      "available right now: never offer a unit type that is not in the result.",
+      "available right now: never offer a unit type that is not in the result. Once the caller " +
+      "has said which city or area they want, always pass it as city: the result then holds " +
+      "only units in that city. If city_status is none_available or unknown_city, nothing may " +
+      "be offered there: use its say line and name only cities from cities_with_availability, " +
+      "never calling them nearby or saying how far away they are.",
     url: `${siteUrl}/tools/check-availability`,
     // conversation_id isn't required from the model — it's a dynamic_variable the platform
     // fills in regardless — but declaring it is what lets the webhook resolve *whose*
@@ -425,6 +518,41 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
         type: "string",
         description:
           "The bedroom count asked about: 'studio', '1br', '2br', or '3br+'. Omit to get all units.",
+      },
+      city: {
+        type: "string",
+        description:
+          "The city or area the caller wants to rent in, in their own words (it may name more than one place). " +
+          "Only a place they want, never one they want to avoid. Omit it when they have no " +
+          "preference ('anywhere', 'not sure', 'the Capital Region') or have not said yet.",
+      },
+    },
+  },
+  {
+    name: "get_unit_details",
+    description:
+      "Looks up the details of an AVAILABLE unit a caller is interested in: bathrooms, floor, laundry, " +
+      "heating fuel and who pays for gas, electric and heat. Call it only when the caller asks about " +
+      "one of those, with the building they named; do not read every field unprompted. It returns only " +
+      "units that are available right now, never anything about residents or owners. A null field is " +
+      "not known: say you don't have that detail and the team will follow up, never guess. If it asks " +
+      "which building, use its say line, or let the caller choose from its candidates.",
+    url: `${siteUrl}/tools/get-unit-details`,
+    required: ["conversation_id", "spoken_building"],
+    properties: {
+      conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
+      agent_id: { type: "string", dynamicVariable: "system__agent_id" },
+      spoken_building: {
+        type: "string",
+        description: "The building the caller is asking about, as they said it: a street address or a community name.",
+      },
+      bedrooms: {
+        type: "string",
+        description: "The bedroom count they asked about: 'studio', '1br', '2br' or '3br+'. Omit it if they did not say.",
+      },
+      spoken_unit: {
+        type: "string",
+        description: "The unit or apartment number they asked about, exactly as the caller said it. Omit it if they did not say one.",
       },
     },
   },
@@ -694,7 +822,7 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       unit: {
         type: "string",
         description:
-          "Their unit or apartment number, e.g. '4B'. Ask for it before calling this rather " +
+          "The unit or apartment number exactly as the caller said it. Ask for it before calling this rather " +
           "than leaving it out.",
       },
       caller_phone: {
@@ -708,8 +836,7 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       reason: {
         type: "string",
         description:
-          "One plain sentence: why they called, in their words. E.g. 'No hot water in the " +
-          "shower since last night.'",
+          "One plain sentence: why they called, in their words.",
       },
       category: {
         type: "string",
@@ -730,7 +857,7 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       severity_reason: {
         type: "string",
         description:
-          "A few words on why that number, e.g. 'no hot water, unlivable but not dangerous'.",
+          "A few words on why that number, in terms of how the problem affects the home and its occupants.",
       },
     },
   },
@@ -740,8 +867,8 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       "Looks up the caller's phone number (caller ID) against the resident list. Call it at the " +
       "start of a resident or maintenance call. If it matches, you get a first name and a unit " +
       "label: use them only to CONFIRM ('Am I speaking with Sam in unit 4B?'), never to assume. " +
-      "It returns nothing else about the resident. If it does not match, ask the caller's name, " +
-      "then the property and unit, and use find_unit.",
+      "It returns nothing else about the resident. If it does not match, ask only for what the " +
+      "caller has not already said (name, then property, then unit) and use find_unit.",
     url: `${siteUrl}/tools/lookup-caller`,
     required: ["conversation_id"],
     properties: {
@@ -754,12 +881,19 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
     name: "find_unit",
     description:
       "Checks whether the property name or address and the unit number a caller said match a unit " +
-      "in our records. Returns only whether it matched and the unit's label; it never returns " +
-      "anything about who lives there. Use it after lookup_caller did not match, once you have the " +
-      "caller's name, the property and the unit. It is the last lookup: if it does not match, take " +
-      "a callback number or email only to record it and use log_unmatched_caller.",
+      "in our records. It returns only unit labels and building street addresses, never anything " +
+      "about who lives anywhere or whether a unit is occupied. Use it after lookup_caller did not " +
+      "match, once you have the property and the unit, asked or already said (then call it right " +
+      "away, in silence, and ask its say line only after the result). Only matched true " +
+      "identifies the unit. When matched is false it may return options for the caller to choose " +
+      "from: similar_units or all_units (property_matched true: the building matched, the unit did " +
+      "not) or address_options (several or close buildings). Read the options as one question, let " +
+      "the caller pick, never pick for them, then call find_unit again with exactly what they " +
+      "confirmed. With no options, follow its say line (repeat, spell or give the floor). If the " +
+      "caller says none of them or it still does not match, take a callback number or email only to " +
+      "record it and use log_unmatched_caller.",
     url: `${siteUrl}/tools/find-unit`,
-    required: ["conversation_id", "spoken_unit"],
+    required: ["conversation_id"],
     properties: {
       conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
       agent_id: { type: "string", dynamicVariable: "system__agent_id" },
@@ -767,7 +901,51 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
         type: "string",
         description: "The street address the caller said, as they said it. Leave out if they did not give one.",
       },
-      spoken_unit: { type: "string", description: "The unit or apartment number the caller said, e.g. '4B'." },
+      spoken_unit: {
+        type: "string",
+        description:
+          "The unit or apartment number exactly as the caller said it. Leave it out only if they say the " +
+          "home has no unit number (a house).",
+      },
+    },
+  },
+  {
+    name: "check_work_order_status",
+    description:
+      "Looks up the recorded status of a resident's existing maintenance request or work order. Use it " +
+      "when a resident asks about something they already reported, once you have their name, the address and " +
+      "the unit, and after find_unit returned matched true for that address and unit (a suggestion or similar " +
+      "unit is not enough). Pass the name they gave and the issue if they said it. If it returns choices, ask " +
+      "which one using its say line, then call it again with request_ref. Say only what it returns; never " +
+      "mention identity checks or whether a name matched.",
+    url: `${siteUrl}/tools/check-work-order-status`,
+    required: ["conversation_id"],
+    properties: {
+      conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
+      agent_id: { type: "string", dynamicVariable: "system__agent_id" },
+      caller_id: { type: "string", dynamicVariable: "system__caller_id" },
+      caller_name: { type: "string", description: "The caller's full name, exactly as they gave it." },
+      spoken_address: {
+        type: "string",
+        description: "The property_address find_unit returned with matched true (else the address as they said it).",
+      },
+      spoken_unit: {
+        type: "string",
+        description: "The unit_label find_unit returned with matched true. Leave out only for a house with no unit label.",
+      },
+      issue_description: {
+        type: "string",
+        description: "What the maintenance issue is, in the caller's words. Optional.",
+      },
+      first_reported: {
+        type: "string",
+        description: "When they say they first reported it, in their words. Optional.",
+      },
+      request_ref: {
+        type: "string",
+        description:
+          "Only on a second call: the ref of the choice the caller picked from this tool's choices. Never read it out.",
+      },
     },
   },
   {
@@ -778,23 +956,33 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       "blinds, trash to the curb) with issue_type tenant_responsibility. A matched resident's " +
       "question that is not a repair (a lease question, a package, parking) is also logged here, " +
       "with issue_type other, severity informational and a description that begins 'Question, not " +
-      "a repair:'; the asset manager reviews it. Ask for their name, " +
-      "address, unit and a callback number first and pass them here, EXCEPT in a life-safety " +
-      "emergency, where you log immediately with whatever you have. Never pass a placeholder " +
+      "a repair:'; the asset manager reviews it. Call it only once the unit is identified " +
+      "(the caller said yes to lookup_caller's or find_unit's match) AND the caller has said what is actually " +
+      "wrong, EXCEPT in a life-safety emergency, where you log immediately with whatever you have. " +
+      "'A maintenance issue' or 'a complaint' is not a description: ask what's going on first; a " +
+      "call without a real description is refused with logged false. Say it was logged only when " +
+      "a result had logged true, once, when you close the call (a life-safety result's say line is " +
+      "the only exception). Never pass a placeholder " +
       "like 'unknown' for anything — leave the field out instead. Safe to call more than once " +
       "in the same call: each call updates the same request, so if you learn or correct " +
       "anything afterwards, call it again: only the fields you send are updated. Log it as soon " +
-      "as you know the issue, then update as you learn more. For an emergency or urgent " +
+      "as you know what is wrong, then update as you learn more. For an emergency or urgent " +
       "issue, call escalate after logging it.",
     url: `${siteUrl}/tools/log-maintenance-request`,
     // Only what an emergency can supply with nothing else known. caller_name and the rest are
     // deliberately optional: when they were required for log_tenant_issue the agent satisfied the
     // schema by inventing "unknown" (2026-08-24).
-    required: ["conversation_id", "issue_type", "description", "severity"],
+    required: ["conversation_id", "issue_type", "description", "severity", "unit_confirmed"],
     properties: {
       conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
       agent_id: { type: "string", dynamicVariable: "system__agent_id" },
       caller_id: { type: "string", dynamicVariable: "system__caller_id" },
+      unit_confirmed: {
+        type: "boolean",
+        description:
+          "True only if the caller said yes, in their own words, after you read the unit back. A tool " +
+          "result is not a yes. Without it the request is refused, except in a life-safety emergency.",
+      },
       caller_name: {
         type: "string",
         description:
@@ -802,7 +990,7 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
           "'unknown' — if you don't have it yet, ask, or leave it out.",
       },
       caller_email: { type: "string", description: "The caller's email address, only if they gave one." },
-      title: { type: "string", description: "A short title for the request, e.g. 'Kitchen ceiling leak'." },
+      title: { type: "string", description: "A short title for the issue, in the caller's own words." },
       callback_phone: {
         type: "string",
         description:
@@ -810,7 +998,7 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
           "out if they decline or say to use the number they called from; never invent one.",
       },
       spoken_address: { type: "string", description: "The property address the caller said, as they said it." },
-      spoken_unit: { type: "string", description: "Their unit or apartment number, e.g. '4B'." },
+      spoken_unit: { type: "string", description: "The unit or apartment number exactly as the caller said it." },
       issue_type: {
         type: "string",
         description:
@@ -819,17 +1007,19 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       },
       description: {
         type: "string",
-        description: "One or two plain sentences on what is wrong, in the caller's words.",
+        description:
+          "One or two plain sentences on what is wrong and where, in the caller's words. " +
+          "Never a generic 'maintenance issue' or 'complaint'.",
       },
       first_noticed: { type: "string", description: "When they first noticed it, in their words." },
       answers: {
         type: "string",
         description:
           "JSON object of the issue-specific answers, short key to short string value, e.g. " +
-          '{"breaker_checked": "yes, still no power", "actively_flowing": "yes", ' +
-          '"top_floor": "no"}. Include every answer you were given; omit if there are none.',
+          '{"<question key>": "<the caller\'s answer in their words>"}. ' +
+          "Include every answer you were given; omit if there are none.",
       },
-      pets: { type: "string", description: "Pets in the unit: type and how many, e.g. '1 dog'." },
+      pets: { type: "string", description: "Pets in the unit: their type and how many, as the caller described them; omit if none." },
       preferred_access_times: {
         type: "string",
         description: "Times that suit the caller for a technician to come by, in their words.",
@@ -848,7 +1038,7 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       },
       severity_reason: {
         type: "string",
-        description: "A few words on why that level, e.g. 'no heat, unlivable but not dangerous'.",
+        description: "A few words on why that level, in terms of how the problem affects the home and its occupants.",
       },
     },
   },
@@ -886,7 +1076,7 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       "nothing to the caller: it records the offer on the maintenance request logged on this call and " +
       "tells their asset manager, who decides what to do and follows up. Call it only after " +
       "log_maintenance_request has run. Put the caller's own words, limits or caveats in note (for " +
-      "example 'can send photos tonight, no video'). Never tell the caller you will text them a link; " +
+      "for example what they can and cannot send, and when). Never tell the caller you will text them a link; " +
       "say what the tool's say line says.",
     url: `${siteUrl}/tools/send-photo-link`,
     required: ["conversation_id"],
@@ -934,7 +1124,17 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       payer_name: { type: "string", description: "That payer's name, only if third_party_payer is true." },
       payer_phone: { type: "string", description: "That payer's phone number, as digits." },
       payer_email: { type: "string", description: "That payer's email address." },
-      preferred_communities: { type: "string", description: "Communities in the Capital Region they would prefer." },
+      preferred_area: {
+        type: "string",
+        description:
+          "The city or area they want to rent in, in their words, or 'no preference' for 'anywhere', " +
+          "'not sure' or 'the Capital Region'. If they settle on another city after hearing what is " +
+          "open, include every place they named, in their words.",
+      },
+      preferred_communities: {
+        type: "string",
+        description: "Older name for preferred_area. Send preferred_area instead.",
+      },
       avoid_communities: { type: "string", description: "Communities in the Capital Region they want to avoid." },
       other_info: { type: "string", description: "Anything else the caller wants the team to know." },
     },
@@ -970,6 +1170,174 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
 ];
 
 /**
+ * The owner call menu's three tools (Sarah Configuration section 13). Attached ONLY while the menu is
+ * live (see routingForPush): while it is off the agent has none of them, so its tool list is unchanged.
+ */
+const ROUTING_TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
+  {
+    name: "verify_owner",
+    description:
+      "Owner call menu only. Verifies an EXISTING property owner before any transfer: the property they own " +
+      "(matched like find_unit) and the email address on file for it. " + OWNER_ADDRESS_RULE + " Call it first " +
+      "with the address only, and say its say line to confirm the property. Then, after reading the email back and " +
+      "the caller confirming it, call it again with the confirmed address and the email. Returns ask_property, " +
+      "verified, needs_property_confirmation, not_verified or no_match_take_message. Read the phone menu only after " +
+      "verified. Never for tenants, prospects or anyone else.",
+    url: `${siteUrl}/tools/verify-owner`,
+    // Not required: a required field pushes the model to fill it before the caller has said one.
+    // Missing or empty returns ask_property (no attempt counted).
+    required: ["conversation_id"],
+    properties: {
+      conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
+      agent_id: { type: "string", dynamicVariable: "system__agent_id" },
+      spoken_property_address: {
+        type: "string",
+        description:
+          "The street address of the property the caller owns, in the caller's own words from this call, or the " +
+          "option they confirmed. Never an example or a guess; leave it out if they have not said one.",
+      },
+      email: {
+        type: "string",
+        description:
+          "The email address on file, exactly as the caller confirmed it after your read-back, written out or as " +
+          "spoken (letters, 'at', 'dot'). Leave it out on the first call, while confirming the property.",
+      },
+      caller_name: {
+        type: "string",
+        description: "The owner's name, if they gave it. Optional, for the record only; never used to verify. Leave it out if they did not say.",
+      },
+    },
+  },
+  {
+    name: "check_staff_availability",
+    description:
+      "Owner call menu only. Checks whether the staff member a VERIFIED existing property owner asked for can be " +
+      "put through right now; their number and hours come from the directory, in New York time. Call it only " +
+      "after verify_owner returned verified in this call, with who they asked for: a name, a role such as " +
+      "the department they named, or the key they pressed. " +
+      (TRANSFER_MECHANISM === "twilio_dial"
+        ? "If available is true, call transfer_owner_call with the same person straight away. "
+        : "If available is true, call transfer_to_number with its transfer_number and its say line as client_message. ") +
+      "Otherwise say its say line and take a message with take_staff_message. Never for tenants, prospects, vendors or anyone else.",
+    url: `${siteUrl}/tools/check-staff-availability`,
+    required: ["conversation_id", "person"],
+    properties: {
+      conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
+      agent_id: { type: "string", dynamicVariable: "system__agent_id" },
+      person: {
+        type: "string",
+        description:
+          "Who the owner asked for, as they said it: a name, a role or department, or the key they pressed.",
+      },
+    },
+    // Dynamic mode only (ownerRoutingLib.TRANSFER_DESTINATION_MODE): the transfer destination is these
+    // variables, which only this tool's result sets. In static mode none ([] clears old ones on PATCH).
+    assignments:
+      TRANSFER_DESTINATION_MODE === "dynamic"
+        ? [
+            { dynamicVariable: OWNER_TRANSFER_VAR, valuePath: "transfer_number" },
+            { dynamicVariable: OWNER_TRANSFER_DIGITS_VAR, valuePath: "transfer_digits" },
+          ]
+        : [],
+  },
+  // Our own transfer (ownerRoutingLib.TRANSFER_MECHANISM "twilio_dial"): the server rings the staff
+  // member through Twilio and keeps the caller on the line if nobody picks up.
+  ...(TRANSFER_MECHANISM === "twilio_dial"
+    ? [
+        {
+          name: "transfer_owner_call",
+          description:
+            "Owner call menu only. Puts a VERIFIED existing property owner through to the staff member " +
+            "check_staff_availability just returned available for. Call it straight away after that, with the " +
+            "same person, then say its say line and nothing else. If it does not return connecting, say its say " +
+            "line and take a message with take_staff_message. Never for tenants, prospects, vendors or anyone else.",
+          url: `${siteUrl}/tools/transfer-owner-call`,
+          required: ["conversation_id", "call_sid", "person"],
+          properties: {
+            conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
+            agent_id: { type: "string", dynamicVariable: "system__agent_id" },
+            call_sid: { type: "string", dynamicVariable: "system__call_sid" },
+            person: {
+              type: "string",
+              description: "The same person you passed to check_staff_availability (a name, a role or the key they pressed).",
+            },
+          },
+        } satisfies el.ToolDefinition,
+      ]
+    : []),
+  {
+    name: "take_staff_message",
+    description:
+      "Owner call menu only. Saves a message for a staff member an existing owner could not be put through " +
+      "to, so that person can call them back. Ask for their name, the best callback number (read it back) " +
+      "and what it is about first. Never say the message was passed on unless this returns logged true.",
+    url: `${siteUrl}/tools/take-staff-message`,
+    required: ["conversation_id", "person", "message"],
+    properties: {
+      conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
+      agent_id: { type: "string", dynamicVariable: "system__agent_id" },
+      caller_id: { type: "string", dynamicVariable: "system__caller_id" },
+      person: { type: "string", description: "Who the message is for, as in check_staff_availability's person." },
+      caller_name: { type: "string", description: "The owner's name, as they gave it. Leave it out if they did not say." },
+      callback_phone: {
+        type: "string",
+        description:
+          "The best number to call them back on, as digits, read back and confirmed. Leave it out if they " +
+          "said to use the number they are calling from.",
+      },
+      message: { type: "string", description: "One or two plain sentences: what the message is about, in their words." },
+    },
+  },
+];
+
+/** Every webhook tool the agent gets: the routing tools only while the owner menu is live. Exported for the tests. */
+export function toolDefsFor(siteUrl: string, routing: boolean): el.ToolDefinition[] {
+  return [...TOOL_DEFS(siteUrl), ...(routing ? ROUTING_TOOL_DEFS(siteUrl) : [])];
+}
+
+/**
+ * The owner call menu for a push, or null while it is off (then the agent gets no transfer tool, no
+ * routing tools and no keypad input). Numbers that ring Sarah herself are never transfer targets:
+ * her line from env and, as a second check, every number ElevenLabs has assigned to this agent.
+ */
+async function routingForPush(sarah: SarahConfig | null, elevenLabsAgentId: string | null): Promise<MenuEntry[] | null> {
+  if (!sarah || !ownerRoutingMenu(sarah)) return null;
+  const blocked: string[] = [...ownLines()];
+  try {
+    for (const n of await el.listPhoneNumbers()) {
+      if (n.phone_number && (!elevenLabsAgentId || n.assigned_agent?.agent_id === elevenLabsAgentId)) blocked.push(n.phone_number);
+    }
+  } catch (err) {
+    console.error("[agents] could not list phone numbers; only the env line is excluded from transfers:", err);
+  }
+  return ownerRoutingMenu(sarah, blocked);
+}
+
+/**
+ * The keypad setting for a push. On with the menu. With the menu off it is switched off explicitly
+ * only if the agent still has it on; otherwise it is left out of the request, so an off menu sends
+ * nothing new to the live agent.
+ */
+/**
+ * The agent's dynamic-variable placeholders for a push: the transfer variables only for a live menu in
+ * dynamic mode, otherwise {} (always sent, so ones left by an earlier push are cleared).
+ */
+function placeholdersForPush(menuLive: boolean): Record<string, string> {
+  return menuLive && TRANSFER_DESTINATION_MODE === "dynamic" ? transferPlaceholders() : {};
+}
+
+async function dtmfForPush(menuLive: boolean, elevenLabsAgentId: string | null): Promise<boolean | undefined> {
+  if (menuLive) return true;
+  if (!elevenLabsAgentId) return undefined;
+  try {
+    return (await el.getAgentDtmfEnabled(elevenLabsAgentId)) ? false : undefined;
+  } catch (err) {
+    console.error("[agents] could not read the keypad setting; switching it off explicitly:", err);
+    return false;
+  }
+}
+
+/**
  * Idempotently creates the server tools this agent needs, checking for existing tools
  * first so re-running (e.g. after a deploy) doesn't create duplicates.
  *
@@ -983,8 +1351,9 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
  * on it means each deployment finds, and can only overwrite, its own copies.
  */
 export const ensureTools = internalAction({
-  args: {},
-  handler: async (): Promise<string[]> => {
+  // routing: also the owner call menu's tools (only while the menu is live).
+  args: { routing: v.optional(v.boolean()) },
+  handler: async (_ctx, args): Promise<string[]> => {
     const siteUrl = process.env.CONVEX_SITE_URL;
     if (!siteUrl) throw new Error("CONVEX_SITE_URL is not set on this deployment.");
 
@@ -997,7 +1366,7 @@ export const ensureTools = internalAction({
           "so the tools are re-published with the x-simplr-tool-secret header.",
       );
     }
-    const defs = TOOL_DEFS(siteUrl).map((d) => ({
+    const defs = toolDefsFor(siteUrl, !!args.routing).map((d) => ({
       ...d,
       requestHeaders: { "x-simplr-tool-secret": toolSecret },
     }));
@@ -1046,7 +1415,9 @@ async function buildAgentConfig(
     internal.docs.syncedEntries,
     { orgId },
   );
-  const toolIds: string[] = await ctx.runAction(internal.agents.ensureTools, {});
+  const sarah: SarahConfig | null = await ctx.runQuery(internal.sarahConfig.publishedForOrg, { orgId });
+  const menu = await routingForPush(sarah, existing?.elevenLabsAgentId ?? null);
+  const toolIds: string[] = await ctx.runAction(internal.agents.ensureTools, { routing: menu !== null });
   const questions: ScreeningQuestion[] = await ctx.runQuery(
     internal.screening.activeForOrg,
     { orgId },
@@ -1056,7 +1427,6 @@ async function buildAgentConfig(
     { orgId },
   );
   const sourcePrompt = overrides.prompt ?? existing?.prompt ?? LEASING_PROMPT;
-  const sarah: SarahConfig | null = await ctx.runQuery(internal.sarahConfig.publishedForOrg, { orgId });
 
   const config: el.AgentConfig = {
     name: overrides.name ?? existing?.name ?? "Sarah",
@@ -1067,6 +1437,11 @@ async function buildAgentConfig(
     toolIds,
     voice: VOICE_TUNING,
     turn: TURN_TUNING,
+    vad: VAD_TUNING,
+    llm: LLM_TUNING,
+    transfer: menu && TRANSFER_MECHANISM === "elevenlabs_system" ? transferToolConfig(menu) : null,
+    dtmfInput: await dtmfForPush(menu !== null, existing?.elevenLabsAgentId ?? null),
+    dynamicVariablePlaceholders: placeholdersForPush(menu !== null),
   };
   return { config, sourcePrompt };
 }
@@ -1081,7 +1456,7 @@ export const saveAgent = action({
   },
   handler: async (ctx, args): Promise<string> => {
     const org = await requireOrgId(ctx);
-    if (!isAdminView(org)) throw new Error("You don't have access to that.");
+    if (!isAdminView(org)) throw new ConvexError("You don't have access to that.");
     const { orgId, userId } = org;
     // A no-op if this user already has an agent. Guarantees that even someone who opens
     // Settings and hits Save before ever placing a call still starts from the same seeded
@@ -1091,7 +1466,7 @@ export const saveAgent = action({
     const existing = await ctx.runQuery(internal.agents.currentInternal, { orgId });
     // Still none means another setup run is mid-flight. Creating one here would give the team a
     // second ElevenLabs agent, so ask them to retry once that run has finished.
-    if (!existing) throw new Error("Your assistant is still being set up. Try saving again in a few seconds.");
+    if (!existing) throw new ConvexError("Your assistant is still being set up. Try saving again in a few seconds.");
     const { config, sourcePrompt } = await buildAgentConfig(ctx, orgId, {
       name: args.name,
       prompt: args.prompt,
@@ -1351,7 +1726,14 @@ export const pushKnowledgeBase = internalAction({
       }
     }
     knowledgeBase = alive;
-    const toolIds: string[] = await ctx.runAction(internal.agents.ensureTools, {});
+    const sarah: SarahConfig | null = await ctx.runQuery(internal.sarahConfig.publishedForOrg, {
+      orgId: args.orgId,
+    });
+    // The owner call menu: transfer tool, its two webhook tools and keypad input only while it is live.
+    const menu = await routingForPush(sarah, agent.elevenLabsAgentId);
+    const transfer = menu && TRANSFER_MECHANISM === "elevenlabs_system" ? transferToolConfig(menu) : null;
+    const dtmfInput = await dtmfForPush(menu !== null, agent.elevenLabsAgentId);
+    const toolIds: string[] = await ctx.runAction(internal.agents.ensureTools, { routing: menu !== null });
     const questions: ScreeningQuestion[] = await ctx.runQuery(
       internal.screening.activeForOrg,
       { orgId: args.orgId },
@@ -1360,9 +1742,6 @@ export const pushKnowledgeBase = internalAction({
       internal.screening.disabledBuiltinsForOrg,
       { orgId: args.orgId },
     );
-    const sarah: SarahConfig | null = await ctx.runQuery(internal.sarahConfig.publishedForOrg, {
-      orgId: args.orgId,
-    });
     const prompt = composePrompt(agent.prompt, questions, disabledCore, sarah);
     // Belt and braces: a doc can still vanish between the check and the PATCH. On a
     // document_not_found 404 drop that id, queue its re-upload, and retry.
@@ -1377,6 +1756,11 @@ export const pushKnowledgeBase = internalAction({
           toolIds,
           voice: VOICE_TUNING,
           turn: TURN_TUNING,
+          vad: VAD_TUNING,
+          llm: LLM_TUNING,
+          transfer,
+          dtmfInput,
+          dynamicVariablePlaceholders: placeholdersForPush(menu !== null),
         });
         return { resynced };
       } catch (err) {
@@ -1437,10 +1821,10 @@ export const mintToken = action({
       agent = await ctx.runQuery(internal.agents.currentInternal, { orgId });
     }
     if (!agent) {
-      throw new Error(
+      throw new ConvexError(
         orgId
           ? "Your assistant is still being set up. Try again in a few seconds."
-          : "Could not create an agent.",
+          : "We couldn't start the assistant for this call. Try again in a moment.",
       );
     }
 
@@ -1549,6 +1933,8 @@ async function bootstrapTeam(
     toolIds,
     voice: VOICE_TUNING,
     turn: TURN_TUNING,
+    vad: VAD_TUNING,
+    llm: LLM_TUNING,
   });
   await ctx.runMutation(internal.agents.upsert, {
     orgId: args.orgId,

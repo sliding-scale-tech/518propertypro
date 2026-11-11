@@ -8,9 +8,10 @@ import { Suspense, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { RequireView } from "@/components/require-view";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import type { WoPriority } from "@/components/work-orders/shared";
-import { WindowField } from "@/components/work-orders/window-field";
+import { TenantPreferredTime, WindowPicker, type WindowValue } from "@/components/work-orders/window-picker";
+import { browserTimeZone } from "@/components/dashboard/format";
 import { Btn, Card, CardHead, DatePicker, PageHeader, Select } from "@/components/ui";
 
 const inputClass =
@@ -29,12 +30,6 @@ const ISSUE_TYPES = [
 ];
 const label = (s: string) => s.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 
-function errorText(err: unknown): string {
-  if (err && typeof err === "object" && "data" in err && typeof err.data === "string") return err.data;
-  if (err instanceof Error) return (err.message.match(/Uncaught Error: (.*?)(?:\n|$)/)?.[1] ?? err.message).slice(0, 200);
-  return "Something went wrong. Try again.";
-}
-
 type Initial = {
   requestId?: Id<"maintenanceRequests">;
   unitId: string;
@@ -43,7 +38,8 @@ type Initial = {
   scope: string;
   priority: WoPriority;
   accessNotes: string;
-  window: string;
+  /** The tenant's preferred times, shown beside the window picker. */
+  preferredTimes?: string;
 };
 
 function NewWorkOrderInner() {
@@ -68,9 +64,6 @@ function NewWorkOrderInner() {
     const r = detail.request;
     const sev = r.severity;
     const scopeLines = [r.description, ...r.answers.map((a) => `${a.question}: ${a.value}`)];
-    const access = [r.pets ? `Pets: ${r.pets}` : "", r.preferredAccessTimes ? `Preferred times: ${r.preferredAccessTimes}` : ""]
-      .filter(Boolean)
-      .join("\n");
     const initial: Initial = {
       requestId: r._id,
       unitId: r.unitId ?? "",
@@ -78,16 +71,15 @@ function NewWorkOrderInner() {
       title: `${label(r.issueType)}: ${r.description.replace(/\s+/g, " ").slice(0, 80)}`,
       scope: scopeLines.join("\n"),
       priority: sev === "emergency" ? "emergency" : sev === "urgent" ? "urgent" : "routine",
-      accessNotes: access,
-      // Prefilled from the tenant's preferred times; Pat can pick a preset or type another.
-      window: r.preferredAccessTimes ?? "",
+      accessNotes: r.pets ? `Pets: ${r.pets}` : "",
+      preferredTimes: r.preferredAccessTimes ?? undefined,
     };
     return <Form initial={initial} />;
   }
 
   return (
     <Form
-      initial={{ unitId: "", issueType: "other", title: "", scope: "", priority: "routine", accessNotes: "", window: "" }}
+      initial={{ unitId: "", issueType: "other", title: "", scope: "", priority: "routine", accessNotes: "" }}
     />
   );
 }
@@ -119,7 +111,7 @@ function Form({ initial }: { initial: Initial }) {
   const [technician, setTechnician] = useState("");
   const [req, setReq] = useState({ photos: true, hours: true, receipts: false, notes: false });
   const [due, setDue] = useState("");
-  const [windowText, setWindowText] = useState(initial.window);
+  const [windowValue, setWindowValue] = useState<WindowValue | null>(null);
   const [techTouched, setTechTouched] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -145,12 +137,12 @@ function Form({ initial }: { initial: Initial }) {
         accessNotes: accessNotes.trim() || undefined,
         requiredOnSubmit: req,
         dueDate: due ? new Date(`${due}T12:00:00`).getTime() : undefined,
-        window: windowText.trim() || undefined,
+        ...(windowValue ? { windowStart: windowValue.start, windowEnd: windowValue.end, fallbackTimeZone: browserTimeZone() } : {}),
       });
       toast("Work order created");
       router.push(`/work-orders/${id}`);
     } catch (err) {
-      toast(errorText(err), "error");
+      toast(errorMessage(err), "error");
       setBusy(false);
     }
   };
@@ -247,7 +239,8 @@ function Form({ initial }: { initial: Initial }) {
 
         <div className={field}>
           <span className={cap}>Time window</span>
-          <WindowField value={windowText} onChange={setWindowText} />
+          <WindowPicker variant="input" value={windowValue} onChange={setWindowValue} />
+          <TenantPreferredTime value={initial.preferredTimes} />
         </div>
       </Card>
 

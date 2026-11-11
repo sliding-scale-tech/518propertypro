@@ -28,6 +28,8 @@ export type CoreQuestion = {
   affectsQualification: boolean;
 };
 
+// In the client document's leasing order (bedrooms, budget, pets, move-in), then contact, so the
+// WHAT TO COLLECT block never pulls Sarah away from the LEASING QUESTION FLOW's order.
 export const CORE_QUESTIONS: CoreQuestion[] = [
   {
     key: "bedrooms",
@@ -38,14 +40,6 @@ export const CORE_QUESTIONS: CoreQuestion[] = [
     lockedReason:
       "This is how availability and rent are looked up. Without it every caller would be turned away.",
     affectsQualification: true,
-  },
-  {
-    key: "move_in_date",
-    label: "Move-in timeline",
-    asks: "When they are looking to move in.",
-    promptLine: "their move-in timeline",
-    canDisable: true,
-    affectsQualification: false,
   },
   {
     key: "budget",
@@ -62,6 +56,14 @@ export const CORE_QUESTIONS: CoreQuestion[] = [
     promptLine: "whether they have pets, and what kind if they do",
     canDisable: true,
     affectsQualification: true,
+  },
+  {
+    key: "move_in_date",
+    label: "Move-in timeline",
+    asks: "When they are looking to move in.",
+    promptLine: "their move-in timeline",
+    canDisable: true,
+    affectsQualification: false,
   },
   {
     key: "contact",

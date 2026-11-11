@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import { internalQuery } from "./_generated/server";
 import type { ActionCtx, QueryCtx, MutationCtx } from "./_generated/server";
@@ -30,7 +30,7 @@ export async function currentUser(ctx: QueryCtx | MutationCtx): Promise<Doc<"use
  */
 export async function requireUser(ctx: QueryCtx | MutationCtx): Promise<Doc<"users">> {
   const user = await currentUser(ctx);
-  if (!user) throw new Error("Not signed in.");
+  if (!user) throw new ConvexError("Sign in to continue.");
   return user;
 }
 
@@ -44,9 +44,9 @@ export async function requireUser(ctx: QueryCtx | MutationCtx): Promise<Doc<"use
  */
 export async function requireUserId(ctx: ActionCtx): Promise<Id<"users">> {
   const identity = await ctx.auth.getUserIdentity();
-  if (!identity) throw new Error("Not signed in.");
+  if (!identity) throw new ConvexError("Sign in to continue.");
   const user = await ctx.runQuery(internal.users.byClerkId, { clerkId: identity.subject });
-  if (!user) throw new Error("User record not found — try again in a moment.");
+  if (!user) throw new ConvexError("Your account is still being set up. Try again in a moment.");
   return user._id;
 }
 
@@ -107,7 +107,7 @@ export async function requireJobRole(
   ...roles: JobRole[]
 ): Promise<OrgContext> {
   const org = await requireOrg(ctx);
-  if (!hasJobRole(org, ...roles)) throw new Error("You don't have access to that.");
+  if (!hasJobRole(org, ...roles)) throw new ConvexError("You don't have access to that.");
   return org;
 }
 
@@ -136,7 +136,7 @@ export function viewFor(isAdmin: boolean, jobRoles: JobRole[]): AppView {
 /** Server-side gate on the admin view, the query/mutation counterpart of requireOrgAdmin. */
 export async function requireAdminView(ctx: QueryCtx | MutationCtx): Promise<OrgContext> {
   const org = await requireOrg(ctx);
-  if (!isAdminView(org)) throw new Error("You don't have access to that.");
+  if (!isAdminView(org)) throw new ConvexError("Only admins can do this.");
   return org;
 }
 
@@ -151,7 +151,7 @@ export function canManageMaintenance(org: { jobRoles: JobRole[]; isAdmin: boolea
 /** Action-context equivalent of requireAdminView. */
 export async function requireAdminViewId(ctx: ActionCtx): Promise<Awaited<ReturnType<typeof requireOrgId>>> {
   const org = await requireOrgId(ctx);
-  if (!isAdminView(org)) throw new Error("You don't have access to that.");
+  if (!isAdminView(org)) throw new ConvexError("Only admins can do this.");
   return org;
 }
 
@@ -181,7 +181,7 @@ export async function currentOrg(ctx: QueryCtx | MutationCtx): Promise<OrgContex
 
 export async function requireOrg(ctx: QueryCtx | MutationCtx): Promise<OrgContext> {
   const org = await currentOrg(ctx);
-  if (!org) throw new Error("No team found for this account. Try signing in again.");
+  if (!org) throw new ConvexError("No team found for this account. Try signing in again.");
   return org;
 }
 
@@ -192,7 +192,7 @@ export async function requireOrg(ctx: QueryCtx | MutationCtx): Promise<OrgContex
  */
 export async function requireOrgAdmin(ctx: QueryCtx | MutationCtx): Promise<OrgContext> {
   const org = await requireOrg(ctx);
-  if (!isAdminView(org)) throw new Error("You don't have access to that.");
+  if (!isAdminView(org)) throw new ConvexError("Only admins can do this.");
   return org;
 }
 
@@ -223,12 +223,12 @@ export async function requireOrgId(ctx: ActionCtx): Promise<{
   userId: Id<"users">;
 }> {
   const identity = await ctx.auth.getUserIdentity();
-  if (!identity) throw new Error("Not signed in.");
+  if (!identity) throw new ConvexError("Sign in to continue.");
 
   const resolved = await ctx.runQuery(internal.authz.orgForClerkId, {
     clerkId: identity.subject,
   });
-  if (!resolved) throw new Error("No team found for this account. Try signing in again.");
+  if (!resolved) throw new ConvexError("No team found for this account. Try signing in again.");
 
   return {
     orgId: resolved.orgId,

@@ -75,6 +75,11 @@ export type VoiceTuning = {
   speed: number;
   /** Only has an effect on eleven_v3_conversational, where it is the whole point. */
   expressiveMode: boolean;
+  /**
+   * The tags offered to the LLM in expressive mode. Only a suggestion: the API says the agent can
+   * still use other tags, so the tone rule in composeStyle is what forbids upbeat ones.
+   */
+  suggestedAudioTags: Array<{ tag: string; description: string }>;
 };
 
 /** Turn-taking. Governs dead air and how readily the agent talks over the caller. */
@@ -85,10 +90,60 @@ export type TurnTuning = {
   eagerness: "eager" | "normal" | "patient";
   /** Seconds of LLM/tool delay before speaking a filler instead of going silent. */
   softTimeoutSeconds: number;
-  /** Rotated at random so the same filler isn't repeated within one call. */
+  /** Most fillers in one wait. The timer repeats every softTimeoutSeconds up to this limit. */
+  maxSoftTimeoutsPerGeneration: number;
+  /** Shuffled once per turn by ElevenLabs (randomize_fillers). */
   fillerMessages: string[];
   /** Backchannels that should not count as an interruption. */
   interruptionIgnoreTerms: string[];
+  /**
+   * Also apply ElevenLabs' curated backchannel list for `interruptionIgnoreTermLanguages`, on
+   * top of ours. It has no effect while that language list is empty.
+   */
+  mergeWithDefaultIgnoreTerms: boolean;
+  /** Languages whose curated ignore terms are merged in (see above). */
+  interruptionIgnoreTermLanguages: string[];
+  /**
+   * Stops background noise cutting off the opening greeting. Sent under
+   * conversation_config.agent (not turn), where the API keeps it.
+   */
+  disableFirstMessageInterruptions: boolean;
+};
+
+/** Voice activity detection: what counts as the caller speaking. */
+export type VadTuning = {
+  /** Ignore background voices (a TV, other people) so they don't interrupt or become turns. */
+  backgroundVoiceDetection: boolean;
+};
+
+/** The LLM behind the voice agent. The values live in agents.ts (LLM_TUNING). */
+export type LlmTuning = {
+  /** ElevenLabs `llm` enum value. */
+  model: string;
+  temperature: number;
+  /** null clears the field (models without reasoning_effort support). */
+  reasoningEffort: "minimal" | "low" | "medium" | "high" | null;
+  maxTokens: number;
+};
+
+/** The transfer_to_number system tool body (built by ownerRoutingLib.transferToolConfig). */
+export type TransferToolConfig = {
+  type: "system";
+  name: string;
+  description: string;
+  pre_tool_speech: "off";
+  params: {
+    system_tool_type: "transfer_to_number";
+    transfers: Array<{
+      // phone_dynamic_variable: the number comes from a dynamic variable at transfer time (the owner
+      // menu's server gate, see ownerRoutingLib.TRANSFER_DESTINATION_MODE).
+      transfer_destination: { type: "phone"; phone_number: string } | { type: "phone_dynamic_variable"; phone_number: string };
+      condition: string;
+      transfer_type: "blind";
+      post_dial_digits?: { type: "static"; value: string } | { type: "dynamic"; value: string };
+    }>;
+    enable_client_message: boolean;
+  };
 };
 
 export type AgentConfig = {
@@ -100,7 +155,28 @@ export type AgentConfig = {
   toolIds: string[];
   voice: VoiceTuning;
   turn: TurnTuning;
+  vad: VadTuning;
+  llm: LlmTuning;
+  /**
+   * The owner call menu's transfer tool. null = no transfer tool (sent as null, so switching the
+   * menu off really removes it: PATCH merges). Absent counts as null.
+   */
+  transfer?: TransferToolConfig | null;
+  /**
+   * Keypad (DTMF) input for the owner call menu. true = on, false = explicitly off (null), undefined =
+   * leave the agent's current setting alone, so a push while the menu is off sends nothing new.
+   */
+  dtmfInput?: boolean;
+  /**
+   * Defaults for custom dynamic variables (conversation_config.agent.dynamic_variables). Sent when
+   * given; {} clears them. ElevenLabs uses these for dashboard tests only: they are NOT applied on
+   * phone calls, so a {{variable}} the agent needs on a call must come from the initiation webhook.
+   */
+  dynamicVariablePlaceholders?: Record<string, string>;
 };
+
+/** ElevenLabs' documented defaults: a key press completes after 2s, or at once on #. */
+const DTMF_INPUT_SETTINGS = { dtmf_input_timeout: 2.0, hash_terminator: true, redact_input: false };
 
 /**
  * The shared body for create and update. These two used to be near-identical copies that
@@ -112,22 +188,27 @@ function conversationConfigBody(input: AgentConfig) {
 
   return {
     agent: {
+      ...(input.dynamicVariablePlaceholders
+        ? { dynamic_variables: { dynamic_variable_placeholders: input.dynamicVariablePlaceholders } }
+        : {}),
       first_message: input.firstMessage,
+      disable_first_message_interruptions: input.turn.disableFirstMessageInterruptions,
       language: "en",
       prompt: {
         prompt: input.prompt,
-        // Benchmarked 2026-07-30 against the alternatives: ~1.3s vs ~3.5s for
-        // gemini-3.5-flash. Response latency dominates the feel of a voice call.
-        llm: "gemini-3.1-flash-lite",
-        temperature: 0,
-        // Explicitly cleared: PATCH merges rather than replaces, so a stale
-        // reasoning_effort left over from a different (auto-routed) model can otherwise
-        // persist and 400 against gemini-2.0-flash, which doesn't support that field.
-        reasoning_effort: null,
+        // Model, temperature, reasoning and token cap all come from LLM_TUNING in agents.ts, so
+        // create and update can never drift apart. Change the model there, not here.
+        llm: input.llm.model,
+        temperature: input.llm.temperature,
+        // Always sent, null included: PATCH merges rather than replaces, so a stale
+        // reasoning_effort left over from a different model can otherwise persist and 400
+        // against a model that doesn't support that field (gemini-2.0-flash, for one).
+        // null clears it; a value sets it.
+        reasoning_effort: input.llm.reasoningEffort,
         // Voice replies are one acknowledgement plus ONE question (25 words at most, see the HARD
         // RULES in the prompt); a lower cap backs that up and keeps latency down. Tool-call
         // arguments still fit: the largest, log_maintenance_request, is well under this.
-        max_tokens: 160,
+        max_tokens: input.llm.maxTokens,
         knowledge_base: input.knowledgeBase,
         tool_ids: input.toolIds,
         // We pay to RAG-index every synced doc (see computeRagIndex); leaving this off
@@ -139,22 +220,46 @@ function conversationConfigBody(input: AgentConfig) {
             description:
               "Ends the call once the purpose is accomplished and there is nothing more to help with.",
           },
+          // ElevenLabs runs another LLM generation after every tool result, and without this tool
+          // the model has no way to stay silent in it, so a result that lands after a question
+          // makes Sarah speak again without the caller having answered. The wait matches
+          // turnTimeout, so a silent caller still gets a check-in.
+          skip_turn: {
+            type: "system",
+            name: "skip_turn",
+            description:
+              "Stay silent and wait for the caller. Use it when a tool result arrives while your " +
+              "last question is still unanswered, or when the caller asks for a moment.",
+            pre_tool_speech: "off",
+            params: { system_tool_type: "skip_turn", wait_timeout_secs: input.turn.turnTimeout },
+          },
+          // Owner call menu only (see ownerRoutingLib.transferToolConfig). Always sent, null included:
+          // PATCH merges, so leaving it out would keep a transfer tool after the menu is switched off.
+          transfer_to_number: input.transfer ?? null,
         },
       },
     },
+    ...(input.dtmfInput !== undefined
+      ? { conversation: { dtmf_input_settings: input.dtmfInput ? DTMF_INPUT_SETTINGS : null } }
+      : {}),
     turn: {
       turn_timeout: input.turn.turnTimeout,
       turn_eagerness: input.turn.eagerness,
       interruption_ignore_terms: input.turn.interruptionIgnoreTerms,
-      merge_with_default_ignore_terms: true,
+      merge_with_default_ignore_terms: input.turn.mergeWithDefaultIgnoreTerms,
+      interruption_ignore_term_languages: input.turn.interruptionIgnoreTermLanguages,
       soft_timeout_config: {
         timeout_seconds: input.turn.softTimeoutSeconds,
+        max_soft_timeouts_per_generation: input.turn.maxSoftTimeoutsPerGeneration,
         message: primaryFiller,
         additional_soft_timeout_messages: extraFillers,
         randomize_fillers: true,
         // An LLM-generated filler would add exactly the latency the filler exists to cover.
         use_llm_generated_message: false,
       },
+    },
+    vad: {
+      background_voice_detection: input.vad.backgroundVoiceDetection,
     },
     tts: {
       voice_id: input.voiceId,
@@ -163,6 +268,7 @@ function conversationConfigBody(input: AgentConfig) {
       similarity_boost: input.voice.similarityBoost,
       speed: input.voice.speed,
       expressive_mode: input.voice.expressiveMode,
+      suggested_audio_tags: input.voice.suggestedAudioTags,
       // 3 is "max latency optimizations" with the text normalizer still running. 4 is the
       // same but switches the normalizer off, which mispronounces exactly what a leasing
       // agent says all day — rents, dates, phone numbers. 3 buys correctness for ~nothing.
@@ -179,10 +285,10 @@ export function createAgent(input: AgentConfig) {
     method: "POST",
     body: {
       name: input.name,
-      conversation_config: {
-        ...conversationConfigBody(input),
-        conversation: { text_only: false },
-      },
+      conversation_config: (() => {
+        const body = conversationConfigBody(input);
+        return { ...body, conversation: { ...("conversation" in body ? body.conversation : {}), text_only: false } };
+      })(),
     },
   });
 }
@@ -216,6 +322,11 @@ export type ToolDefinition = {
   required: string[];
   // Static headers ElevenLabs sends with every call to this webhook tool (e.g. a shared secret).
   requestHeaders?: Record<string, string>;
+  /**
+   * Dynamic variables set from this tool's JSON result (ElevenLabs "assignments", source response,
+   * dot-notation value_path). A path missing from the result leaves the variable unchanged.
+   */
+  assignments?: Array<{ dynamicVariable: string; valuePath: string }>;
 };
 
 function toApiProperty(p: ToolProperty) {
@@ -231,9 +342,18 @@ function toolConfigBody(def: ToolDefinition) {
     name: def.name,
     description: def.description,
     response_timeout_secs: 20,
-    // Forces the agent to speak (e.g. "let me check that") before every call to this tool
-    // instead of going silent while it waits — verified enum: 'auto' | 'force' | 'off'.
-    pre_tool_speech: "force",
+    // "off": tools run silently around one spoken reply. "force" asked the LLM to speak with every
+    // tool call, so a real reply, often a question, went out in the same step as the tool, and the
+    // tool's result then made Sarah speak again with no caller turn (conv_9001m6dzykqte399btbs28d2z4ss
+    // and conv_8201m670crm2fvcsaa3cs48pn1h8). The soft-timeout fillers in TURN_TUNING cover a slow
+    // tool. Verified enum: 'auto' | 'force' | 'off'.
+    pre_tool_speech: "off",
+    // Always sent ([] when none): the tool PATCH merges, so omitting it would keep old assignments.
+    assignments: (def.assignments ?? []).map((a) => ({
+      source: "response",
+      dynamic_variable: a.dynamicVariable,
+      value_path: a.valuePath,
+    })),
     api_schema: {
       url: def.url,
       method: "POST",
@@ -311,6 +431,15 @@ export function missingKbDocId(err: unknown): string | null {
   if (!err.message.includes("document_not_found")) return null;
   const m = /Document with id ([A-Za-z0-9_-]+) not found/.exec(err.message);
   return m ? m[1] : null;
+}
+
+/** Read-only: whether keypad (DTMF) input is currently switched on for the agent. */
+export async function getAgentDtmfEnabled(agentId: string): Promise<boolean> {
+  const a = await request<{ conversation_config?: { conversation?: { dtmf_input_settings?: unknown } } }>(
+    `/convai/agents/${agentId}`,
+  );
+  const d = a.conversation_config?.conversation?.dtmf_input_settings;
+  return d !== null && d !== undefined;
 }
 
 /** Read-only: the knowledge-base ids the live agent currently references. */

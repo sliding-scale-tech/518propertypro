@@ -25,8 +25,9 @@ import type { WeekView } from "@/convex/calendarView";
 import * as sched from "@/convex/tourSchedule";
 import { AvailabilityModal } from "@/components/asset-managers/availability-modal";
 import type { TourHours } from "@/components/tour-hours-editor";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import { RequireView } from "@/components/require-view";
+import { areaLabel } from "@/components/dashboard/format";
 import { DatePicker, Modal, PageHeader, Select } from "@/components/ui";
 
 // What googleCalendar.handleOAuthCallback sends back in `?google=` after the consent redirect.
@@ -128,7 +129,7 @@ function CalendarPageInner() {
         : loadMonth({ month: monthKey, userId: userId ?? undefined, fallbackTimeZone: browserTimeZone() });
     promise
       .then((view) => !stale && setResult({ key, view }))
-      .catch((err) => !stale && setResult({ key, error: err instanceof Error ? err.message : "Could not load the calendar." }));
+      .catch((err) => !stale && setResult({ key, error: errorMessage(err, "Could not load the calendar.") }));
     return () => {
       stale = true;
     };
@@ -170,7 +171,7 @@ function CalendarPageInner() {
       await disconnect();
       toast("Google Calendar disconnected");
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Could not disconnect.", "error");
+      toast(errorMessage(err, "Could not disconnect."), "error");
     } finally {
       setDisconnecting(false);
     }
@@ -408,7 +409,7 @@ function ConnectCalendarCard({ needsReconnect }: { needsReconnect: boolean }) {
       const { url } = await startConnect();
       window.location.assign(url);
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Could not start connecting.", "error");
+      toast(errorMessage(err, "Could not start connecting."), "error");
       setBusy(false);
     }
   };
@@ -502,7 +503,7 @@ function DaysOffModal({
       setDate("");
       onChanged();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Could not turn that day off.", "error");
+      toast(errorMessage(err, "Could not turn that day off."), "error");
     } finally {
       setBusy(false);
     }
@@ -515,7 +516,7 @@ function DaysOffModal({
       toast(`${formatDate(day, { weekday: "long", month: "long", day: "numeric" })} turned back on`);
       onChanged();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Could not change that day.", "error");
+      toast(errorMessage(err, "Could not change that day."), "error");
     } finally {
       setBusy(false);
     }
@@ -999,7 +1000,7 @@ function TourModal({
       toast("Tour cancelled");
       onCancelled();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Could not cancel the tour.", "error");
+      toast(errorMessage(err, "Could not cancel the tour."), "error");
       setBusy(false);
       setConfirming(false);
     }
@@ -1048,6 +1049,12 @@ function TourModal({
                     What they told Sarah
                   </h3>
                   <div className="space-y-2 text-sm">
+                    {areaLabel(details.fromCall.preferredArea, details.fromCall.preferredCities) ? (
+                      <Row
+                        label="Area"
+                        value={areaLabel(details.fromCall.preferredArea, details.fromCall.preferredCities)!}
+                      />
+                    ) : null}
                     {details.fromCall.bedrooms ? (
                       <Row label="Looking for" value={BEDROOM_LABELS[details.fromCall.bedrooms] ?? details.fromCall.bedrooms} />
                     ) : null}

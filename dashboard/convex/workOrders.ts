@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import { mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
@@ -9,6 +9,7 @@ import type { OrgContext } from "./authz";
 import { nextNumber } from "./counters";
 import { checkStorageUsable, markWorkOrderCreated } from "./maintenance";
 import { scheduleNotify, staffRecipientIds } from "./notify";
+import { resolveTimeZone, tenantPreferredTimeText, windowLabel, windowProblem } from "./workOrderWindow";
 
 /**
  * Work orders (F5): the formal job a technician performs. Created by Pat (from a validated
@@ -71,7 +72,7 @@ const TRANSITIONS: Record<Status, Status[]> = {
 
 export function assertWorkOrderTransition(from: Status, to: Status): void {
   if (!TRANSITIONS[from].includes(to)) {
-    throw new Error(`A work order that is "${from.replace(/_/g, " ")}" can't be moved to "${to.replace(/_/g, " ")}".`);
+    throw new ConvexError(`A work order that is "${from.replace(/_/g, " ")}" can't be moved to "${to.replace(/_/g, " ")}".`);
   }
 }
 
@@ -149,16 +150,39 @@ export const suggestTechnician = query({
 
 function requireText(raw: string, label: string, max: number): string {
   const out = raw.trim();
-  if (!out) throw new Error(`${label} is required.`);
-  if (out.length > max) throw new Error(`${label} is too long.`);
+  if (!out) throw new ConvexError(`${label} is required.`);
+  if (out.length > max) throw new ConvexError(`${label} is too long (at most ${max} characters).`);
   return out;
 }
 
 function optText(raw: string | undefined, max: number): string | undefined {
   const out = raw?.trim();
   if (!out) return undefined;
-  if (out.length > max) throw new Error("That text is too long.");
+  if (out.length > max) throw new ConvexError(`That text is too long (at most ${max} characters).`);
   return out;
+}
+
+type WindowFields = Pick<Doc<"workOrders">, "window" | "windowStart" | "windowEnd">;
+const NO_WINDOW: WindowFields = { window: undefined, windowStart: undefined, windowEnd: undefined };
+
+/**
+ * The stored window for a picked start/end: validated here (never trust the client), labelled in
+ * the team's time zone (the browser's zone only when the team hasn't set one).
+ */
+async function windowFields(
+  ctx: MutationCtx,
+  org: OrgContext,
+  start: number | undefined,
+  end: number | undefined,
+  fallbackTimeZone: string | undefined,
+): Promise<WindowFields | null> {
+  if (start === undefined && end === undefined) return null;
+  if (start === undefined || end === undefined) throw new ConvexError("Pick both a start and an end time.");
+  const now = Date.now();
+  const problem = windowProblem(start, end, now);
+  if (problem) throw new ConvexError(problem);
+  const timeZone = resolveTimeZone((await ctx.db.get(org.orgId))?.timeZone, fallbackTimeZone);
+  return { window: windowLabel(start, end, timeZone, now), windowStart: start, windowEnd: end };
 }
 
 /** A technician must be on THIS team and hold the technician role (no admin fallback). */
@@ -168,7 +192,7 @@ async function assertTechnician(ctx: QueryCtx | MutationCtx, orgId: string, user
     .withIndex("by_user", (q) => q.eq("userId", userId))
     .first();
   if (!membership || membership.orgId !== orgId || !(membership.jobRoles ?? []).includes("technician")) {
-    throw new Error("That person is not a technician on this team.");
+    throw new ConvexError("That person is not a technician on this team.");
   }
 }
 
@@ -195,6 +219,11 @@ export async function readable(
   return null;
 }
 
+/** Accountants read finished work for the books; when the tenant wanted a visit isn't part of that. */
+function visibleWo(wo: Doc<"workOrders">, view: ReturnType<typeof viewFor>): Doc<"workOrders"> {
+  return view === "accountant" ? { ...wo, tenantPreferredTime: undefined } : wo;
+}
+
 /**
  * May this person change the work order's scope/assignment/cancel it? Pat powers always; an AM
  * only the manual work orders they created on units they manage.
@@ -209,8 +238,8 @@ export function canManageWo(org: OrgContext, wo: Doc<"workOrders">, unit: Doc<"u
 async function managedWo(ctx: MutationCtx, id: Id<"workOrders">) {
   const org = await requireOrg(ctx);
   const found = await readable(ctx, org, id);
-  if (!found) throw new Error("Work order not found.");
-  if (!canManageWo(org, found.wo, found.unit)) throw new Error("You don't have access to that.");
+  if (!found) throw new ConvexError("Work order not found.");
+  if (!canManageWo(org, found.wo, found.unit)) throw new ConvexError("You don't have access to that.");
   return { org, ...found };
 }
 
@@ -219,7 +248,7 @@ async function ownJob(ctx: MutationCtx, id: Id<"workOrders">) {
   const org = await requireOrg(ctx);
   const wo = await ctx.db.get(id);
   if (!wo || wo.orgId !== org.orgId || wo.technicianUserId !== org.user._id) {
-    throw new Error("Work order not found.");
+    throw new ConvexError("Work order not found.");
   }
   return { org, wo };
 }
@@ -228,15 +257,15 @@ async function ownJob(ctx: MutationCtx, id: Id<"workOrders">) {
 export async function workableJob(ctx: MutationCtx, id: Id<"workOrders">) {
   const org = await requireOrg(ctx);
   const found = await readable(ctx, org, id);
-  if (!found) throw new Error("Work order not found.");
+  if (!found) throw new ConvexError("Work order not found.");
   const isTech = found.wo.technicianUserId === org.user._id && viewFor(org.isAdmin, org.jobRoles) === "technician";
   const manager = canManageWo(org, found.wo, found.unit);
-  if (!isTech && !manager) throw new Error("You don't have access to that.");
+  if (!isTech && !manager) throw new ConvexError("You don't have access to that.");
   if (isTech && !manager && found.wo.status !== "in_progress") {
-    throw new Error("Start the job before adding to it.");
+    throw new ConvexError("Start the job before adding to it.");
   }
   if (!ACTIVE.includes(found.wo.status) && found.wo.status !== "completed") {
-    throw new Error("This work order is closed.");
+    throw new ConvexError("This work order is closed.");
   }
   return { org, ...found };
 }
@@ -258,9 +287,9 @@ export function canAttachWoMedia(org: OrgContext, wo: Doc<"workOrders">, opts?: 
 export async function attachableJob(ctx: MutationCtx, id: Id<"workOrders">, opts?: { receipt?: boolean }) {
   const org = await requireOrg(ctx);
   const found = await readable(ctx, org, id);
-  if (!found) throw new Error("Work order not found.");
+  if (!found) throw new ConvexError("Work order not found.");
   if (viewFor(org.isAdmin, org.jobRoles) === "admin") {
-    if (!canAttachWoMedia(org, found.wo, opts)) throw new Error("This work order is closed.");
+    if (!canAttachWoMedia(org, found.wo, opts)) throw new ConvexError("This work order is closed.");
     return { org, ...found };
   }
   return await workableJob(ctx, id);
@@ -342,9 +371,9 @@ export const removeOwnFile = mutation({
     const org = await requireOrg(ctx);
     const found = await readable(ctx, org, args.workOrderId);
     const f = await ctx.db.get(args.fileId);
-    if (!found || !f || f.workOrderId !== found.wo._id || f.orgId !== org.orgId) throw new Error("File not found.");
-    if (viewFor(org.isAdmin, org.jobRoles) !== "technician") throw new Error("You don't have access to that.");
-    if (!canRemoveWoFile(org, found.wo, f, false)) throw new Error("You can only remove your own photos while the job is in progress.");
+    if (!found || !f || f.workOrderId !== found.wo._id || f.orgId !== org.orgId) throw new ConvexError("File not found.");
+    if (viewFor(org.isAdmin, org.jobRoles) !== "technician") throw new ConvexError("You don't have access to that.");
+    if (!canRemoveWoFile(org, found.wo, f, false)) throw new ConvexError("You can only remove your own photos while the job is in progress.");
     await removeWoFileRow(ctx, org, found.wo, f, "technician");
     return { ok: true };
   },
@@ -380,40 +409,43 @@ export const create = mutation({
     accessNotes: v.optional(v.string()),
     requiredOnSubmit: requiredOnSubmitValidator,
     dueDate: v.optional(v.number()),
-    window: v.optional(v.string()), // appointment window, e.g. "Today 2-4pm"
+    windowStart: v.optional(v.number()), // appointment window, epoch ms; both or neither
+    windowEnd: v.optional(v.number()),
+    fallbackTimeZone: v.optional(v.string()), // the browser's zone, used only if the team has none
   },
   handler: async (ctx, args): Promise<Id<"workOrders">> => {
     const org = await requireOrg(ctx);
     const unit = await ctx.db.get(args.unitId);
-    if (!unit || unit.orgId !== org.orgId) throw new Error("Unit not found.");
+    if (!unit || unit.orgId !== org.orgId) throw new ConvexError("Unit not found.");
 
     let request: Doc<"maintenanceRequests"> | null = null;
     if (args.requestId) {
       // Turning a request into a work order is Pat's decision; an AM can only forward it.
-      if (!canManageMaintenance(org)) throw new Error("You don't have access to that.");
+      if (!canManageMaintenance(org)) throw new ConvexError("You don't have access to that.");
       request = await ctx.db.get(args.requestId);
-      if (!request || request.orgId !== org.orgId) throw new Error("Request not found.");
-      if (request.unitId !== unit._id) throw new Error("Resolve the request's unit first.");
+      if (!request || request.orgId !== org.orgId) throw new ConvexError("Request not found.");
+      if (request.unitId !== unit._id) throw new ConvexError("The unit you picked doesn't match this request's unit. Set the request's unit first.");
       const existing = await ctx.db
         .query("workOrders")
         .withIndex("by_request", (q) => q.eq("requestId", request!._id))
         .collect();
       // A reopened request may get a new work order once every earlier one is closed or cancelled.
       if (existing.some((w) => w.status !== "cancelled" && w.status !== "reviewed_closed")) {
-        throw new Error("This request already has a work order.");
+        throw new ConvexError("This request already has a work order.");
       }
     } else {
       const adminView = viewFor(org.isAdmin, org.jobRoles) === "admin";
       if (!adminView && !canManageMaintenance(org)) {
         if (org.jobRoles.includes("asset_manager")) {
-          throw new Error("Asset managers create a request for Pat to review instead.");
+          throw new ConvexError("Asset managers create a request for Pat to review instead.");
         }
-        throw new Error("You don't have access to that.");
+        throw new ConvexError("You don't have access to that.");
       }
     }
 
     if (args.technicianUserId) await assertTechnician(ctx, org.orgId, args.technicianUserId);
-    if (args.dueDate !== undefined && !(args.dueDate > 0)) throw new Error("Pick a valid due date.");
+    if (args.dueDate !== undefined && !(args.dueDate > 0)) throw new ConvexError("Pick a valid due date.");
+    const window = await windowFields(ctx, org, args.windowStart, args.windowEnd, args.fallbackTimeZone);
 
     const now = Date.now();
     const number = await nextNumber(ctx, org.orgId, "workOrder");
@@ -432,7 +464,10 @@ export const create = mutation({
       requiredOnSubmit: args.requiredOnSubmit,
       status: args.technicianUserId ? "assigned" : "created",
       dueDate: args.dueDate,
-      window: optText(args.window, 100),
+      ...(window ?? {}),
+      // Copied from the request, never taken from the client. The scheduled window above stays
+      // whatever staff picked; this is only what the tenant asked for.
+      tenantPreferredTime: tenantPreferredTimeText(request?.preferredAccessTimes),
       createdBy: org.user._id,
       createdAt: now,
       updatedAt: now,
@@ -463,6 +498,42 @@ export const create = mutation({
     return id;
   },
 });
+
+/**
+ * "Action required" for the technician: Pat's latest "Sent back:" / "Info requested:" note, while
+ * the job is still active and the technician has done nothing since (no later note by them, and
+ * not marked complete again). Derived from existing notes and fields; nothing is stored.
+ */
+type ActionRequired = { kind: "sent_back" | "info_requested"; note: string; at: number; byName?: string };
+const ACTION_PREFIXES = [
+  { prefix: "Sent back:", kind: "sent_back" },
+  { prefix: "Info requested:", kind: "info_requested" },
+] as const;
+
+async function actionRequiredFor(
+  ctx: QueryCtx,
+  wo: Doc<"workOrders">,
+  notes: Doc<"workOrderNotes">[],
+): Promise<ActionRequired | null> {
+  if (!ACTIVE.includes(wo.status) || !wo.technicianUserId) return null;
+  let latest: { kind: ActionRequired["kind"]; note: string; row: Doc<"workOrderNotes"> } | null = null;
+  for (const n of notes) {
+    // Only the manager's notes count; the technician cannot raise this on their own job.
+    if (n.authorUserId === wo.technicianUserId) continue;
+    const hit = ACTION_PREFIXES.find((p) => n.body.startsWith(p.prefix));
+    if (!hit) continue;
+    if (!latest || n.createdAt > latest.row.createdAt) {
+      latest = { kind: hit.kind, note: n.body.slice(hit.prefix.length).trim(), row: n };
+    }
+  }
+  if (!latest) return null;
+  const at = latest.row.createdAt;
+  if (notes.some((n) => n.authorUserId === wo.technicianUserId && n.createdAt > at)) return null;
+  if (wo.completedAt !== undefined && wo.completedAt > at) return null;
+  const author = await ctx.db.get(latest.row.authorUserId);
+  const byName = author ? [author.firstName, author.lastName].filter(Boolean).join(" ").trim() || undefined : undefined;
+  return { kind: latest.kind, note: latest.note, at, byName };
+}
 
 // --- Reads ------------------------------------------------------------------------
 
@@ -568,13 +639,26 @@ export const list = query({
         technicianName = users.get(w.technicianUserId);
       }
       const request = w.requestId && view !== "technician" ? await ctx.db.get(w.requestId) : null;
+      const actionRequired =
+        view === "technician" && ACTIVE.includes(w.status)
+          ? await actionRequiredFor(
+              ctx,
+              w,
+              await ctx.db
+                .query("workOrderNotes")
+                .withIndex("by_work_order", (q) => q.eq("workOrderId", w._id))
+                .order("desc")
+                .take(50),
+            )
+          : null;
       out.push({
-        ...w,
+        ...visibleWo(w, view),
         unitNumber: units.get(w.unitId),
         propertyName: properties.get(w.propertyId),
         technicianName,
         requestNumber: request?.number,
         isOverdue: ACTIVE.includes(w.status) && w.dueDate !== undefined && w.dueDate < Date.now(),
+        actionRequired,
       });
     }
     return out;
@@ -693,7 +777,7 @@ export const get = query({
         : [];
 
     return {
-      workOrder: wo,
+      workOrder: visibleWo(wo, view),
       unit: { _id: unit._id, unitNumber: unit.unitNumber, floor: unit.floor },
       property: property ? { _id: property._id, name: property.name, address: property.address } : null,
       technicianName: technician
@@ -720,6 +804,7 @@ export const get = query({
       time,
       expenses,
       notes,
+      actionRequired: view === "technician" ? await actionRequiredFor(ctx, wo, notes) : null,
       expensesTab: view === "technician" ? null : await expensesTabFor(ctx, wo, fileRows, time, expenses, notes, org),
       totals: {
         hours: time.reduce((sum, t) => sum + t.hours, 0),
@@ -745,29 +830,13 @@ export const assign = mutation({
   args: {
     workOrderId: v.id("workOrders"),
     technicianUserId: v.id("users"),
-    window: v.optional(v.string()), // "" clears the appointment window
   },
   handler: async (ctx, args) => {
     const { org, wo, unit } = await managedWo(ctx, args.workOrderId);
-    if (!ACTIVE.includes(wo.status)) throw new Error("This work order can no longer be reassigned.");
+    if (!ACTIVE.includes(wo.status)) throw new ConvexError("This work order can no longer be reassigned.");
     await assertTechnician(ctx, org.orgId, args.technicianUserId);
-    const window = args.window === undefined ? undefined : optText(args.window, 100);
-    if (wo.technicianUserId === args.technicianUserId) {
-      // Same technician: only the window can have changed.
-      if (args.window !== undefined && window !== wo.window) {
-        await ctx.db.patch(wo._id, { window, updatedAt: Date.now() });
-        await writeAudit(ctx, {
-          orgId: org.orgId,
-          entity: "work_order",
-          entityId: wo._id,
-          action: "scope_edited",
-          actorUserId: org.user._id,
-          note: "window",
-        });
-        await notifyTech(ctx, wo, unit, wo.technicianUserId, "wo_changed", org.user._id);
-      }
-      return;
-    }
+    // The appointment window is changed through editScope.
+    if (wo.technicianUserId === args.technicianUserId) return;
 
     const to: Status = wo.status === "created" ? "assigned" : wo.status;
     if (to !== wo.status) assertWorkOrderTransition(wo.status, to);
@@ -775,7 +844,6 @@ export const assign = mutation({
       technicianUserId: args.technicianUserId,
       status: to,
       updatedAt: Date.now(),
-      ...(args.window !== undefined ? { window } : {}),
     });
     await writeAudit(ctx, {
       orgId: org.orgId,
@@ -801,12 +869,15 @@ export const editScope = mutation({
     accessNotes: v.optional(v.string()),
     dueDate: v.optional(v.number()),
     clearDueDate: v.optional(v.boolean()),
-    window: v.optional(v.string()), // "" clears the appointment window
+    windowStart: v.optional(v.number()), // appointment window, epoch ms; both or neither
+    windowEnd: v.optional(v.number()),
+    clearWindow: v.optional(v.boolean()),
+    fallbackTimeZone: v.optional(v.string()), // the browser's zone, used only if the team has none
     requiredOnSubmit: v.optional(requiredOnSubmitValidator),
   },
   handler: async (ctx, args) => {
     const { org, wo, unit } = await managedWo(ctx, args.workOrderId);
-    if (!ACTIVE.includes(wo.status)) throw new Error("This work order is no longer editable.");
+    if (!ACTIVE.includes(wo.status)) throw new ConvexError("This work order is no longer editable.");
 
     const patch: Partial<Doc<"workOrders">> = { updatedAt: Date.now() };
     const changed: string[] = [];
@@ -830,13 +901,28 @@ export const editScope = mutation({
       patch.dueDate = undefined;
       changed.push("due date");
     } else if (args.dueDate !== undefined) {
-      if (!(args.dueDate > 0)) throw new Error("Pick a valid due date.");
+      if (!(args.dueDate > 0)) throw new ConvexError("Pick a valid due date.");
       patch.dueDate = args.dueDate;
       changed.push("due date");
     }
-    if (args.window !== undefined) {
-      patch.window = optText(args.window, 100);
-      changed.push("window");
+    if (args.clearWindow) {
+      if (args.windowStart !== undefined || args.windowEnd !== undefined) {
+        throw new ConvexError("Either clear the time window or pick one, not both.");
+      }
+      if (wo.window !== undefined || wo.windowStart !== undefined) {
+        Object.assign(patch, NO_WINDOW);
+        changed.push("window");
+      }
+    } else if (
+      // Re-sending the window already stored is not a change (and skips the past-window check).
+      args.windowStart !== wo.windowStart ||
+      args.windowEnd !== wo.windowEnd
+    ) {
+      const window = await windowFields(ctx, org, args.windowStart, args.windowEnd, args.fallbackTimeZone);
+      if (window) {
+        Object.assign(patch, window);
+        changed.push("window");
+      }
     }
     if (args.requiredOnSubmit) {
       patch.requiredOnSubmit = args.requiredOnSubmit;
@@ -883,9 +969,9 @@ export const reviewClose = mutation({
   args: { workOrderId: v.id("workOrders"), note: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
-    if (!canManageMaintenance(org)) throw new Error("You don't have access to that.");
+    if (!canManageMaintenance(org)) throw new ConvexError("You don't have access to that.");
     const found = await readable(ctx, org, args.workOrderId);
-    if (!found) throw new Error("Work order not found.");
+    if (!found) throw new ConvexError("Work order not found.");
     assertWorkOrderTransition(found.wo.status, "reviewed_closed");
     const now = Date.now();
     await ctx.db.patch(found.wo._id, { status: "reviewed_closed", closedAt: now, updatedAt: now });
@@ -907,9 +993,9 @@ export const sendBack = mutation({
   args: { workOrderId: v.id("workOrders"), note: v.string() },
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
-    if (!canManageMaintenance(org)) throw new Error("You don't have access to that.");
+    if (!canManageMaintenance(org)) throw new ConvexError("You don't have access to that.");
     const found = await readable(ctx, org, args.workOrderId);
-    if (!found) throw new Error("Work order not found.");
+    if (!found) throw new ConvexError("Work order not found.");
     const { wo, unit } = found;
     const note = requireText(args.note, "A note for the technician", 1000);
     assertWorkOrderTransition(wo.status, "in_progress");
@@ -947,11 +1033,11 @@ export const requestInfo = mutation({
   args: { workOrderId: v.id("workOrders"), note: v.string() },
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
-    if (!canManageMaintenance(org)) throw new Error("You don't have access to that.");
+    if (!canManageMaintenance(org)) throw new ConvexError("You don't have access to that.");
     const found = await readable(ctx, org, args.workOrderId);
-    if (!found) throw new Error("Work order not found.");
+    if (!found) throw new ConvexError("Work order not found.");
     const { wo, unit } = found;
-    if (!ACTIVE.includes(wo.status)) throw new Error("This work order isn't in progress.");
+    if (!ACTIVE.includes(wo.status)) throw new ConvexError("This work order isn't in progress.");
     const note = requireText(args.note, "A note for the technician", 1000);
     const now = Date.now();
     await ctx.db.patch(wo._id, { updatedAt: now });
@@ -999,10 +1085,10 @@ export const addTime = mutation({
   handler: async (ctx, args) => {
     const { org, wo } = await workableJob(ctx, args.workOrderId);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(args.date) || Number.isNaN(Date.parse(args.date))) {
-      throw new Error("Date must look like 2026-11-03.");
+      throw new ConvexError("Date must look like 2026-11-03.");
     }
     if (!Number.isFinite(args.hours) || args.hours <= 0 || args.hours > 24) {
-      throw new Error("Hours must be between 0 and 24.");
+      throw new ConvexError("Hours must be between 0 and 24.");
     }
     await ctx.db.insert("workOrderTime", {
       orgId: org.orgId,
@@ -1038,14 +1124,14 @@ export const addExpense = mutation({
     const { org, wo } = await workableJob(ctx, args.workOrderId);
     // Integer cents only: a float here would corrupt every later statement total.
     if (!Number.isSafeInteger(args.amountCents) || args.amountCents < 0 || args.amountCents > MAX_EXPENSE_CENTS) {
-      throw new Error("Amount must be a whole number of cents.");
+      throw new ConvexError("Amount must be a whole number of cents.");
     }
     if (args.quantity !== undefined && !(Number.isFinite(args.quantity) && args.quantity > 0)) {
-      throw new Error("Quantity must be more than zero.");
+      throw new ConvexError("Quantity must be more than zero.");
     }
     if (args.receiptFileId) {
       const file = await ctx.db.get(args.receiptFileId);
-      if (!file || file.workOrderId !== wo._id) throw new Error("Receipt not found.");
+      if (!file || file.workOrderId !== wo._id) throw new ConvexError("Receipt not found.");
     }
     await ctx.db.insert("workOrderExpenses", {
       orgId: org.orgId,
@@ -1216,7 +1302,7 @@ export const submitCompleted = mutation({
     if (wo.requiredOnSubmit.notes && !notes.some((n) => n.authorUserId === org.user._id)) {
       missing.push("a note");
     }
-    if (missing.length) throw new Error(`Can't submit yet. Missing: ${missing.join(", ")}.`);
+    if (missing.length) throw new ConvexError(`Can't submit yet. Missing: ${missing.join(", ")}.`);
 
     const now = Date.now();
     await ctx.db.patch(wo._id, { status: "completed", completedAt: now, updatedAt: now });

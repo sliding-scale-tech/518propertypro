@@ -4,7 +4,7 @@ import { useMutation } from "convex/react";
 import { useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import { Dropdown } from "@/components/ui/dropdown";
 import {
   Field,
@@ -13,7 +13,6 @@ import {
   UnitPicker,
   btnOutline,
   btnPrimary,
-  cleanError,
   inputClass,
   type Severity,
 } from "./shared";
@@ -58,7 +57,7 @@ export function NewRequestModal({
             onCreated?.(id);
             onClose();
           } catch (err) {
-            toast(cleanError(err), "error");
+            toast(errorMessage(err), "error");
             setBusy(false);
           }
         }}

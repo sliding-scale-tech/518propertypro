@@ -1,6 +1,7 @@
 "use client";
 
 import { useMutation, useQuery } from "convex/react";
+import { errorMessage } from "@/components/ui/toast";
 import { Camera, CheckCircle2, Loader2, LinkIcon } from "lucide-react";
 import { useParams } from "next/navigation";
 import { useRef, useState } from "react";
@@ -60,10 +61,20 @@ export default function TenantUploadPage() {
       try {
         const isVideo = file.type.startsWith("video/");
         const isImage = file.type.startsWith("image/");
-        if (!isVideo && !isImage) throw new Error("Only photos and videos can be sent.");
-        if (isVideo && file.size > VIDEO_MAX_BYTES) throw new Error("Videos can be at most 50 MB.");
+        const reject = (error: string) => patch(i, { state: "error", error });
+        if (!isVideo && !isImage) {
+          reject("Only photos and videos can be sent.");
+          continue;
+        }
+        if (isVideo && file.size > VIDEO_MAX_BYTES) {
+          reject("Videos can be at most 50 MB.");
+          continue;
+        }
         const blob = isImage ? await compressImage(file) : file;
-        if (isImage && blob.size > IMAGE_MAX_BYTES) throw new Error("That photo is too large.");
+        if (isImage && blob.size > IMAGE_MAX_BYTES) {
+          reject("That photo is too large.");
+          continue;
+        }
         const res = await getUrl({ token });
         if (!res.ok) {
           setExpired(true);
@@ -76,11 +87,12 @@ export default function TenantUploadPage() {
             setExpired(true);
             return;
           }
-          throw new Error(done.error);
+          reject(done.error);
+          continue;
         }
         patch(i, { state: "done", pct: 100 });
       } catch (e) {
-        patch(i, { state: "error", error: e instanceof Error ? e.message : "Upload failed." });
+        patch(i, { state: "error", error: errorMessage(e, "Upload failed.") });
       }
     }
     if (inputRef.current) inputRef.current.value = "";

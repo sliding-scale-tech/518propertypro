@@ -4,7 +4,7 @@ import { useMutation, useQuery } from "convex/react";
 import { Loader2, Users } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { api } from "@/convex/_generated/api";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 
 /**
  * Explains a team-less dashboard instead of quietly rendering an empty one.
@@ -31,7 +31,7 @@ export function TeamGate({ children }: { children: ReactNode }) {
       const result = await accept({});
       toast(`You have joined ${result.orgName}`);
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Could not join that team.", "error");
+      toast(errorMessage(err, "Could not join that team."), "error");
     } finally {
       setBusy(false);
     }

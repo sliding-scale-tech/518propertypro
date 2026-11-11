@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
@@ -8,9 +8,10 @@ import { requireE164 } from "./phone";
 import { propertyAddressValidator } from "./placesApi";
 import { amScope } from "./amScope";
 import { applyDefaultAssetManager } from "./units";
+import { cleanOwnerEmails, MAX_OWNER_EMAILS, ownerEmailProblems, ownerEmailsOf } from "./ownerVerifyLib";
 
 const DEFAULT_PROPERTY = {
-  name: "Maple Court Apartments",
+  name: "518 Property Pro",
   units: [
     { bedrooms: "studio", rentMin: 1400, rentMax: 1400, available: true },
     { bedrooms: "1br", rentMin: 1650, rentMax: 1650, available: true },
@@ -192,6 +193,7 @@ export const list = query({
         // Owner contact details and override counts are admin-only.
         ownerName: scope ? undefined : p.ownerName,
         ownerEmail: scope ? undefined : p.ownerEmail,
+        ownerEmails: scope ? undefined : ownerEmailsOf(p),
         unitCount: units.length,
         // Units in this building the viewer manages or covers (all of them outside the AM view).
         yourUnits,
@@ -210,8 +212,8 @@ export const list = query({
 
 function cleanName(raw: string): string {
   const name = raw.trim();
-  if (!name) throw new Error("Enter a property name.");
-  if (name.length > 120) throw new Error("Property name is too long.");
+  if (!name) throw new ConvexError("Enter a property name.");
+  if (name.length > 120) throw new ConvexError("Property name is too long.");
   return name;
 }
 
@@ -228,10 +230,9 @@ export const create = mutation({
       orgId: org.orgId,
       userId: org.user._id,
       name: cleanName(args.name),
-      // Legacy leasing fields are required by the schema; a new building starts neutral.
+      // Legacy per-type summary (required by the schema). Pets and move-in window stay unset
+      // until someone enters them, so no policy is stated for the building by default.
       units: [],
-      petsAllowed: false,
-      moveInWindowDays: 60,
       address: args.address,
       isPilot: args.isPilot ?? false,
       utilityGasPhone: args.utilityGasPhone ? requireE164(args.utilityGasPhone, "Gas phone") : undefined,
@@ -260,11 +261,14 @@ export const updateProfile = mutation({
     clearGasPhone: v.optional(v.boolean()),
     ownerName: v.optional(v.string()), // "" clears it
     ownerEmail: v.optional(v.string()), // "" clears it
+    // Every owner email, in order (the first is also stored as ownerEmail). [] clears them all.
+    // Owners are verified against these before Sarah puts them through to staff (B36).
+    ownerEmails: v.optional(v.array(v.string())),
   },
   handler: async (ctx, args) => {
     const org = await requireAdminView(ctx);
     const property = await ctx.db.get(args.propertyId);
-    if (!property || property.orgId !== org.orgId) throw new Error("Property not found.");
+    if (!property || property.orgId !== org.orgId) throw new ConvexError("Property not found.");
 
     const patch: Partial<Doc<"properties">> = { updatedAt: Date.now() };
     if (args.name !== undefined) patch.name = cleanName(args.name);
@@ -276,23 +280,46 @@ export const updateProfile = mutation({
     }
     if (args.ownerName !== undefined) {
       const name = args.ownerName.trim();
-      if (name.length > 120) throw new Error("Owner name is too long.");
+      if (name.length > 120) throw new ConvexError("Owner name is too long.");
       patch.ownerName = name === "" ? undefined : name;
     }
     if (args.ownerEmail !== undefined) {
       const email = args.ownerEmail.trim();
       if (email.length > 200 || (email !== "" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
-        throw new Error("Enter a valid owner email.");
+        throw new ConvexError("Enter a valid owner email.");
       }
       patch.ownerEmail = email === "" ? undefined : email;
+      // Keep ownerEmails (every owner address, lowercase; the roster can give two) in step with
+      // the one address this form edits: a changed address replaces the first and keeps the
+      // others; clearing it clears them all. An unchanged address leaves the list alone.
+      const lower = email.toLowerCase();
+      const current = property.ownerEmails ?? (property.ownerEmail ? [property.ownerEmail.toLowerCase()] : []);
+      if (lower !== (current[0] ?? "")) {
+        patch.ownerEmails = lower === "" ? undefined : [lower, ...current.slice(1).filter((e) => e !== lower)];
+      }
     }
+    if (args.ownerEmails !== undefined) {
+      if (args.ownerEmails.length > 20) throw new ConvexError(`A property can have at most ${MAX_OWNER_EMAILS} owner emails.`);
+      const problem = ownerEmailProblems(args.ownerEmails)[0];
+      if (problem) throw new ConvexError(problem.message);
+      const list = cleanOwnerEmails(args.ownerEmails);
+      patch.ownerEmails = list.length ? list : undefined;
+      patch.ownerEmail = list[0];
+    }
+    const before = ownerEmailsOf(property);
     await ctx.db.patch(property._id, patch);
+    const after = ownerEmailsOf({ ...property, ...patch });
     await writeAudit(ctx, {
       orgId: org.orgId,
       entity: "property",
       entityId: property._id,
       action: "property_profile_updated",
       actorUserId: org.user._id,
+      // Counts only: owner emails never go into the audit trail.
+      note:
+        after.length !== before.length || after.some((e, i) => e !== before[i])
+          ? `Owner emails changed (${before.length} before, ${after.length} now).`
+          : undefined,
     });
   },
 });
@@ -311,7 +338,7 @@ export const setDefaultAssetManager = mutation({
   handler: async (ctx, args): Promise<{ changed: number; total: number }> => {
     const org = await requireAdminView(ctx);
     const property = await ctx.db.get(args.propertyId);
-    if (!property || property.orgId !== org.orgId) throw new Error("Property not found.");
+    if (!property || property.orgId !== org.orgId) throw new ConvexError("Property not found.");
     return await applyDefaultAssetManager(ctx, org, property, args.userId, args.applyTo);
   },
 });

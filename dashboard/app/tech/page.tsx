@@ -14,7 +14,12 @@ function MyJobs() {
   const [tab, setTab] = useState<Tab>("open");
   const jobs = useQuery(api.workOrders.list, {});
 
-  const open = (jobs ?? []).filter((j) => ["created", "assigned", "in_progress"].includes(j.status));
+  // Jobs Pat sent back or asked about come first; the server's order is kept within each group.
+  const open = (jobs ?? [])
+    .filter((j) => ["created", "assigned", "in_progress"].includes(j.status))
+    .map((j, i) => ({ j, i }))
+    .sort((a, b) => Number(!!b.j.actionRequired) - Number(!!a.j.actionRequired) || a.i - b.i)
+    .map(({ j }) => j);
   const done = (jobs ?? []).filter((j) => ["completed", "reviewed_closed"].includes(j.status));
   const shown = tab === "open" ? open : done;
 

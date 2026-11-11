@@ -49,6 +49,8 @@ export type ParsedCall = {
   summary?: string;
   summaryTitle?: string;
   terminationReason?: string;
+  /** Any sign the call was handed to a phone by transfer_to_number (a span or attribute naming it). */
+  transferred?: boolean;
   transcript: Array<{ role: "user" | "agent"; text: string; index: number }>;
 };
 
@@ -78,6 +80,12 @@ export function parseOtlp(payload: unknown): ParsedCall | null {
 
   for (const span of spans) {
     const attrs = attrMap(span);
+    if (
+      (span.name ?? "").includes("transfer_to_number") ||
+      Object.values(attrs).some((v) => typeof v === "string" && v.includes("transfer_to_number"))
+    ) {
+      result.transferred = true;
+    }
 
     // The root conversation span carries the call-level metadata.
     if (span.name === "elevenlabs.conversation") {

@@ -1,10 +1,12 @@
 /**
- * Tour scheduling rules and time-zone arithmetic. Pure functions, no Convex imports, so the
+ * Tour scheduling rules and time-zone arithmetic. Pure functions (only the ConvexError class is imported), so the
  * same rules run in the booking webhook, the Availability page and a quick local check.
  *
  * All instants are epoch milliseconds (UTC). "Local" always means the team's time zone, which
  * an admin sets — a tour at "2pm" is 2pm where the property is, not where the server runs.
  */
+
+import { ConvexError } from "convex/values";
 
 export const TOUR_MINUTES = 45;
 // Kept clear on BOTH sides of a tour, so a 45-minute tour needs a 75-minute gap in the calendar.
@@ -65,12 +67,12 @@ export function isValidTimeZone(timeZone: string): boolean {
 export function validateWeeklyHours(hours: DayHours[]): DayHours[] {
   const seen = new Set<number>();
   for (const h of hours) {
-    if (!Number.isInteger(h.day) || h.day < 0 || h.day > 6) throw new Error("Unknown day of the week.");
-    if (seen.has(h.day)) throw new Error("Each day can only have one set of hours.");
+    if (!Number.isInteger(h.day) || h.day < 0 || h.day > 6) throw new ConvexError("Pick a valid day of the week.");
+    if (seen.has(h.day)) throw new ConvexError("Each day can only have one set of hours.");
     seen.add(h.day);
-    if (!TIME_RE.test(h.start) || !TIME_RE.test(h.end)) throw new Error("Times must look like 09:00.");
+    if (!TIME_RE.test(h.start) || !TIME_RE.test(h.end)) throw new ConvexError("Enter times like 09:00.");
     if (toMinutes(h.end) - toMinutes(h.start) < TOUR_MINUTES) {
-      throw new Error(`Each day's hours need room for at least one ${TOUR_MINUTES}-minute tour.`);
+      throw new ConvexError(`Each day's hours need room for at least one ${TOUR_MINUTES}-minute tour.`);
     }
   }
   return [...hours].sort((a, b) => a.day - b.day);

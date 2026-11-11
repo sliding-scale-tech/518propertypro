@@ -8,12 +8,13 @@
  *   toast.success / .error / .info / .warning(message, opts?)
  *   toast.promise(promise, { loading, success, error })
  *   toast.dismiss(id?)
- *   errorMessage(err)                    // human-readable text from a thrown Convex/JS error
+ *   errorMessage(err, fallback?)         // ConvexError message, else the generic fallback
  *
  * `useToast()` returns the same `toast` object (kept so older call sites `toast(msg, "error")`
- * keep working). Error toasts always pass their text through errorMessage().
+ * keep working). Passing a caught error to toast.error() runs it through errorMessage().
  */
 
+import { ConvexError } from "convex/values";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { AlertTriangle, CheckCircle2, Info, Loader2, XCircle, X } from "lucide-react";
 import { useSyncExternalStore, type ReactNode } from "react";
@@ -27,28 +28,24 @@ const DEFAULT_MS = 4000;
 const ERROR_MS = 6000;
 const MAX_VISIBLE = 4;
 
-/** Turns a thrown value into a short sentence a person can read (no Convex prefixes or stacks). */
+/**
+ * The one place client code turns a caught error into text for a person. Only a ConvexError (the
+ * server's deliberate, user-facing message) is shown. Anything else (a plain Error, a network
+ * failure, a redacted "Server Error", a string) is unexpected, so it gets the generic `fallback`;
+ * `error.message` of a non-ConvexError is never displayed.
+ */
 export function errorMessage(e: unknown, fallback = "Something went wrong. Please try again."): string {
-  let raw = "";
-  if (typeof e === "string") raw = e;
-  else if (e && typeof e === "object") {
+  let raw: string | undefined;
+  // `instanceof` can miss across bundles, so also accept the ConvexError shape ({ data }).
+  if (e instanceof ConvexError || (e && typeof e === "object" && "data" in e)) {
     const data = (e as { data?: unknown }).data;
     if (typeof data === "string") raw = data;
     else if (data && typeof data === "object" && typeof (data as { message?: unknown }).message === "string") {
       raw = (data as { message: string }).message;
-    } else if (typeof (e as { message?: unknown }).message === "string") raw = (e as { message: string }).message;
+    }
   }
-  if (!raw) return fallback;
-  const uncaught = raw.indexOf("Uncaught Error:");
-  if (uncaught >= 0) raw = raw.slice(uncaught + "Uncaught Error:".length);
-  raw = raw
-    .replace(/\[CONVEX [^\]]*\]\s*/g, "")
-    .replace(/\[Request ID: [^\]]*\]\s*/g, "")
-    .replace(/^\s*Server Error\s*/i, "");
-  // Drop stack frames and the trailing "Called by client".
-  raw = raw.split(/\n\s+at\s/)[0].split(/Called by (client|server)/)[0];
-  const text = raw.replace(/^(Error:\s*)+/, "").trim();
-  if (!text || text.toLowerCase() === "server error") return fallback;
+  const text = raw?.trim();
+  if (!text) return fallback;
   return text.length > 240 ? `${text.slice(0, 237)}...` : text;
 }
 
@@ -84,7 +81,8 @@ function schedule(id: number, ms: number) {
 }
 
 function push(kind: Kind, input: unknown, opts: Options = {}): number {
-  const message = kind === "error" ? errorMessage(input) : typeof input === "string" ? input : String(input ?? "");
+  // A string is text the caller wrote; anything else (a caught error) goes through errorMessage().
+  const message = typeof input === "string" ? input : kind === "error" ? errorMessage(input) : String(input ?? "");
   const duration = kind === "loading" ? 0 : (opts.duration ?? (kind === "error" ? ERROR_MS : DEFAULT_MS));
   const id = opts.id ?? nextId++;
   const item: ToastItem = { id, message, kind, duration };

@@ -21,6 +21,7 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Dropdown } from "@/components/ui/dropdown";
 import { RequireView } from "@/components/require-view";
+import { areaLabel } from "@/components/dashboard/format";
 import { ConversationTranscript } from "@/components/transcript";
 import { Btn, Card, CardHead, Chips, Kpi, KpiRow, PageHeader, Pill, type Tone } from "@/components/ui";
 import {
@@ -96,6 +97,8 @@ type Qualification = {
   petType?: string;
   callerName?: string;
   callerPhone?: string;
+  preferredArea?: string;
+  preferredCities?: string[];
   qualifies?: boolean;
   leadClass?: string;
   disqualifyReason?: string;
@@ -591,6 +594,7 @@ function ExpandedDetail({
       {summary ? <p className="text-sm italic text-muted-foreground">{summary}</p> : null}
       {qualification ? (
         <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm sm:grid-cols-3">
+          <Field label="Area" value={areaLabel(qualification.preferredArea, qualification.preferredCities)} />
           <Field label="Bedrooms" value={qualification.bedrooms} />
           <Field label="Move-in" value={qualification.moveInDate} />
           <Field label="Budget" value={qualification.budget ? `$${qualification.budget}` : undefined} />

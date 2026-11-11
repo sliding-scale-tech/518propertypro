@@ -9,8 +9,7 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Dialog } from "@/components/properties/dialog";
 import { PropertyForm } from "@/components/properties/property-form";
-import { useToast } from "@/components/toast";
-import { errorMessage } from "@/components/units/types";
+import { errorMessage, useToast } from "@/components/toast";
 import { UnitInventory } from "@/components/units/unit-inventory";
 import { useManagers } from "@/components/units/use-managers";
 import { Avatar, Btn, Card, CardHead, Chips, PageHeader, Select } from "@/components/ui";
@@ -97,7 +96,7 @@ export function PropertyPage() {
       {adding ? (
         <Dialog title="Add property" onClose={() => setAdding(false)}>
           <PropertyForm
-            initial={{ name: "", address: null, isPilot: false, gasPhone: "", ownerName: "", ownerEmail: "" }}
+            initial={{ name: "", address: null, isPilot: false, gasPhone: "", ownerName: "", ownerEmails: [] }}
             submitLabel="Add property"
             busy={busy}
             showOwner={false}
@@ -181,7 +180,7 @@ function PropertyBody({
             isPilot: property.isPilot,
             gasPhone: property.utilityGasPhone ?? "",
             ownerName: property.ownerName ?? "",
-            ownerEmail: property.ownerEmail ?? "",
+            ownerEmails: property.ownerEmails ?? (property.ownerEmail ? [property.ownerEmail] : []),
           }}
           submitLabel="Save"
           busy={busy}
@@ -196,7 +195,7 @@ function PropertyBody({
                 isPilot: v.isPilot,
                 ...(v.gasPhone ? { utilityGasPhone: v.gasPhone } : { clearGasPhone: true }),
                 ownerName: v.ownerName,
-                ownerEmail: v.ownerEmail,
+                ownerEmails: v.ownerEmails,
               });
               toast("Profile saved");
             } catch (err) {

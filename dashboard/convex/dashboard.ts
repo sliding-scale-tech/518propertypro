@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { query } from "./_generated/server";
 import type { Doc } from "./_generated/dataModel";
 import { currentOrg, requireOrg, viewFor as viewOf } from "./authz";
@@ -7,6 +7,7 @@ import type { Id } from "./_generated/dataModel";
 import { maintenanceOverview, scopedByStatus } from "./maintenance";
 import { isLeasingLead } from "./conversations";
 import { localDateKey, startOfLocalDay, addDays, isValidTimeZone, weekBounds } from "./tourSchedule";
+import { windowIsToday, windowTimeRange } from "./workOrderWindow";
 import { loadScope, makeLookups, requestCard, requestLane, requestStatusKey, STATUS_LABEL, workOrderCard, workOrderLane, workOrderStatusKey } from "./board";
 import type { Card } from "./board";
 
@@ -317,13 +318,18 @@ export const overview = query({
       .sort((a, b) => rank[a.severity] - rank[b.severity] || a.createdAt - b.createdAt)
       .slice(0, 12);
 
-    // Today's schedule: tours (admin: the team's, asset manager: their own) and work orders
-    // whose window starts with "Today".
+    // Today's schedule: tours (admin: the team's, asset manager: their own) and work orders whose
+    // window starts today in the team's zone. Older rows have only free text, so for them "Today ..."
+    // is the best signal there is.
     const scheduleTours =
       view === "admin" || view === "asset_manager"
         ? todaysTours.filter((t) => view === "admin" || booked.find((b) => b._id === t.id)?.assignedUserId === org.user._id)
         : [];
-    const todayWos = wos.filter((w) => w.window !== undefined && /^today\b/i.test(w.window.trim()));
+    const todayWos = wos.filter((w) =>
+      w.windowStart !== undefined
+        ? windowIsToday(w.windowStart, now, timeZone)
+        : w.window !== undefined && /^today\b/i.test(w.window.trim()),
+    );
     const todaySchedule = [
       ...scheduleTours.map((t) => ({
         kind: "tour" as const,
@@ -337,7 +343,7 @@ export const overview = query({
         todayWos.map(async (w) => ({
           kind: "work_order" as const,
           id: String(w._id),
-          start: null as number | null,
+          start: (w.windowStart ?? null) as number | null,
           label: `WO-${w.number} · ${w.title}`,
           sub: `${(await L.property(w.propertyId)) ?? ""} · ${(await L.unit(w.unitId))?.unitNumber ?? ""}`.trim(),
           window: w.window ?? null,
@@ -389,14 +395,25 @@ export const overview = query({
         title: `Tour – ${t.propertyName}`,
         sub: [bedroomLabel(t.bedrooms), t.propertyName].filter(Boolean).join(" • "),
       }));
-      const woItems = todayWos.map((w) => ({
-        id: String(w._id),
-        kind: "work_order" as const,
-        start: null as number | null,
-        time: w.window ?? "Today",
-        title: `WO-${w.number} – ${w.title}`,
-        sub: w.window ?? "",
-      }));
+      const woItems = todayWos.map((w) =>
+        w.windowStart !== undefined && w.windowEnd !== undefined
+          ? {
+              id: String(w._id),
+              kind: "work_order" as const,
+              start: w.windowStart as number | null,
+              time: clock.format(new Date(w.windowStart)),
+              title: `WO-${w.number} – ${w.title}`,
+              sub: windowTimeRange(w.windowStart, w.windowEnd, timeZone),
+            }
+          : {
+              id: String(w._id),
+              kind: "work_order" as const,
+              start: null as number | null,
+              time: w.window ?? "Today",
+              title: `WO-${w.number} – ${w.title}`,
+              sub: w.window ?? "",
+            },
+      );
 
       // Open work orders: active work orders plus requests waiting on the admin (forwarded).
       const rankOf = { emergency: 0, urgent: 1, routine: 2, informational: 3 } as const;
@@ -517,7 +534,7 @@ export const amOverview = query({
   args: { fallbackTimeZone: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
-    if (viewOf(org.isAdmin, org.jobRoles) !== "asset_manager") throw new Error("You don't have access to that.");
+    if (viewOf(org.isAdmin, org.jobRoles) !== "asset_manager") throw new ConvexError("You don't have access to that.");
 
     const organization = await ctx.db.get(org.orgId);
     const timeZone =

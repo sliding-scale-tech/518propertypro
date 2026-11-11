@@ -1,6 +1,7 @@
 "use client";
 
 import { useAction, useMutation, useQuery } from "convex/react";
+import { ConvexError } from "convex/values";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   ChevronRight,
@@ -16,7 +17,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import { RequireView } from "@/components/require-view";
 import { Btn, Modal, PageHeader } from "@/components/ui";
 
@@ -214,14 +215,14 @@ function KnowledgeModal({
         headers: { "Content-Type": file.type || "application/octet-stream" },
         body: file,
       });
-      if (!uploaded.ok) throw new Error("Could not upload the file.");
+      if (!uploaded.ok) throw new ConvexError("The file could not be uploaded. Check your connection and try again.");
       const { storageId } = (await uploaded.json()) as { storageId: Id<"_storage"> };
       const extracted = await extractFile({ storageId, fileName: file.name });
       setTitle((current) => current.trim() || extracted.title);
       setBody(extracted.body);
       toast("Extracted the file text — review it and save");
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Could not read that file.", "error");
+      toast(errorMessage(err, "Could not read that file."), "error");
     } finally {
       setReadingFile(false);
       if (fileInputRef.current) fileInputRef.current.value = "";

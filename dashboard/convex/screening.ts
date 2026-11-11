@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { internal } from "./_generated/api";
 import { internalQuery, mutation, query } from "./_generated/server";
 import { currentOrg, requireAdminView } from "./authz";
@@ -132,14 +132,14 @@ export const save = mutation({
   handler: async (ctx, args) => {
     const { orgId, user } = await requireAdminView(ctx);
     const question = args.question.trim();
-    if (!question) throw new Error("Give the question some text.");
+    if (!question) throw new ConvexError("Give the question some text.");
 
     const choices = args.choices?.map((c) => c.trim()).filter(Boolean);
     validate(args.answerKind, choices, args.criterion);
 
     const existing = args.id ? await ctx.db.get(args.id) : null;
     if (args.id && (!existing || existing.orgId !== orgId)) {
-      throw new Error("Question not found.");
+      throw new ConvexError("Question not found.");
     }
 
     const siblings = await ctx.db
@@ -148,7 +148,7 @@ export const save = mutation({
       .collect();
 
     if (!existing && siblings.length >= MAX_QUESTIONS) {
-      throw new Error(
+      throw new ConvexError(
         `That's the ${MAX_QUESTIONS}-question limit. Remove one before adding another — a caller will not sit through more.`,
       );
     }
@@ -206,7 +206,7 @@ export const setBuiltin = mutation({
   handler: async (ctx, args) => {
     const { orgId, user } = await requireAdminView(ctx);
     if (!DISABLEABLE_KEYS.includes(args.key as CoreKey)) {
-      throw new Error("That question is required and cannot be switched off.");
+      throw new ConvexError("That question is required and cannot be switched off.");
     }
 
     const row = await ctx.db
@@ -260,29 +260,29 @@ function validate(
   criterion: { kind: string; allowed?: string[]; value?: number } | undefined,
 ) {
   if (answerKind === "choice" && (!choices || choices.length < 2)) {
-    throw new Error("Give the caller at least two options to choose between.");
+    throw new ConvexError("Give the caller at least two options to choose between.");
   }
   if (!criterion) return;
 
   if (answerKind === "text") {
-    throw new Error(
+    throw new ConvexError(
       "A free-text answer can be recorded but cannot decide qualification — there is nothing for the rules to compare. Use Yes/No, a number, or a list of options.",
     );
   }
   if (criterion.kind !== answerKind) {
-    throw new Error("That requirement does not match the kind of answer this question expects.");
+    throw new ConvexError("That requirement does not match the kind of answer this question expects.");
   }
   if (criterion.kind === "number" && !Number.isFinite(criterion.value)) {
-    throw new Error("Give the requirement a real number.");
+    throw new ConvexError("Give the requirement a real number.");
   }
   if (criterion.kind === "choice") {
     const allowed = criterion.allowed ?? [];
     if (allowed.length === 0) {
-      throw new Error("Pick at least one answer that passes, or this question fails everyone.");
+      throw new ConvexError("Pick at least one answer that passes, or this question fails everyone.");
     }
     const known = new Set((choices ?? []).map((c) => c.toLowerCase()));
     if (allowed.some((a) => !known.has(a.trim().toLowerCase()))) {
-      throw new Error("Every passing answer has to be one of the options you listed.");
+      throw new ConvexError("Every passing answer has to be one of the options you listed.");
     }
   }
 }

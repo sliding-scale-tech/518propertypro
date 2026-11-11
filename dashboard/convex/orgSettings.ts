@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import type { MutationCtx } from "./_generated/server";
@@ -129,18 +129,18 @@ export const forwardingSave = mutation({
       if (existing?.forwardingNumber) await clearForwarding(ctx, existing._id, org);
       return { cleared: true, warnings: [] };
     }
-    if (raw.length > 40) throw new Error("That is not a valid phone number.");
+    if (raw.length > 40) throw new ConvexError("That is not a valid phone number.");
 
     if (EMERGENCY_DIGITS.has(raw.replace(/\D/g, ""))) {
-      throw new Error("Emergency numbers can never be forwarded to Sarah.");
+      throw new ConvexError("Emergency numbers can never be forwarded to Sarah.");
     }
     const e164 = toE164(raw);
-    if (!e164) throw new Error("That is not a valid phone number. Use 10 digits, for example 518 555 0100.");
+    if (!e164) throw new ConvexError("That is not a valid phone number. Use 10 digits, for example 518 555 0100.");
     if (isTollFreeOrPremium(e164)) {
-      throw new Error("Toll-free and premium-rate numbers (800, 833, 844, 855, 866, 877, 888, 900) cannot be used here.");
+      throw new ConvexError("Toll-free and premium-rate numbers (800, 833, 844, 855, 866, 877, 888, 900) cannot be used here.");
     }
     if (e164 === ourTwilioNumber()) {
-      throw new Error("That is Sarah's own number. Forwarding it to itself would loop.");
+      throw new ConvexError("That is Sarah's own number. Forwarding it to itself would loop.");
     }
 
     const warnings: string[] = [];
@@ -182,7 +182,7 @@ export const forwardingConfirm = mutation({
   handler: async (ctx) => {
     const org = await requireAdminView(ctx);
     const row = await ctx.db.query("orgSettings").first();
-    if (!row?.forwardingNumber) throw new Error("Save your office number first.");
+    if (!row?.forwardingNumber) throw new ConvexError("Save your office number first.");
     await ctx.db.patch(row._id, { forwardingConfirmedAt: Date.now() });
     await writeAudit(ctx, {
       orgId: org.orgId as string,

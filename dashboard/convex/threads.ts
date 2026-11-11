@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import {
   action,
   internalAction,
@@ -250,7 +250,7 @@ export const staffReply = action({
   args: { threadId: v.id("threads"), text: v.string() },
   handler: async (ctx): Promise<void> => {
     await requireAdminViewId(ctx);
-    throw new Error("Texting is turned off for now except emergency alerts.");
+    throw new ConvexError("Texting is turned off for now except emergency alerts.");
   },
 });
 
@@ -260,7 +260,7 @@ export const resumeBot = mutation({
   handler: async (ctx, args) => {
     const org = await requireAdminView(ctx);
     const thread = await ctx.db.get(args.threadId);
-    if (!thread || thread.orgId !== org.orgId) throw new Error("Thread not found.");
+    if (!thread || thread.orgId !== org.orgId) throw new ConvexError("Thread not found.");
     await ctx.db.patch(args.threadId, { status: "bot", escalationReason: undefined });
   },
 });

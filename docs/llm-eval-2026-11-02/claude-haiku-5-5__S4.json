@@ -1,0 +1,804 @@
+{
+ "model": "claude-haiku-5-5",
+ "scenario": "S4",
+ "test_agent_id_deleted": "agent_8701m6dwk0beecz8zrbtn7bjfz98",
+ "status_llm_judge": "passed",
+ "judge_rationale": {
+  "messages": [
+   "The check_work_order_status tool returned summary 'Broken window', reported 'Friday, October 30', and status sentence about waiting for asset manager review. Sarah relayed exactly these details and added no invented dates, timelines, or promises. When asked about timing she only repeated the status, so no invented details were introduced.",
+   "The agent ended the conversation."
+  ],
+  "summary": "Evaluation succeeded"
+ },
+ "credits_used": 841,
+ "charging": {
+  "llm_price": 0.14488113549999998,
+  "llm_charge": 721,
+  "platform_charge": 120,
+  "platform_usage": {
+   "category_usage": {
+    "text_message": {
+     "credits": 120,
+     "price": 0.023999999999999997,
+     "quantity": 8.0
+    }
+   }
+  }
+ },
+ "llm_usage_by_model": {
+  "claude-haiku-5-5": {
+   "input": {
+    "tokens": 91710,
+    "price": 0.010088100000000001
+   },
+   "input_cache_read": {
+    "tokens": 7173,
+    "price": 7.890299999999999e-05
+   },
+   "input_cache_write": {
+    "tokens": 326407,
+    "price": 0.0448809625
+   },
+   "output_total": {
+    "tokens": 2037,
+    "price": 0.0011203500000000002
+   }
+  },
+  "gemini-2.5-flash": {
+   "input": {
+    "tokens": 75902,
+    "price": 0.022770600000000002
+   },
+   "input_cache_read": {
+    "tokens": 7324,
+    "price": 0.00021972
+   },
+   "input_cache_write": {
+    "tokens": 0,
+    "price": 0.0
+   },
+   "output_total": {
+    "tokens": 549,
+    "price": 0.0013725
+   }
+  },
+  "gpt-4o": {
+   "input": {
+    "tokens": 25464,
+    "price": 0.06366
+   },
+   "input_cache_read": {
+    "tokens": 0,
+    "price": 0.0
+   },
+   "input_cache_write": {
+    "tokens": 0,
+    "price": 0.0
+   },
+   "output_total": {
+    "tokens": 69,
+    "price": 0.00069
+   }
+  }
+ },
+ "simulated_user_prompt": "You are a caller phoning 518 Property Pro, a property management company, and talking to its receptionist Sarah. This is a phone call: speak naturally and briefly, one or two short sentences per reply, no lists, no stage directions. The receptionist speaks first. Your FIRST reply must be exactly this sentence, word for word, and nothing else: \"Hi, Mary Sermic, 1 Washington Avenue unit 5, I reported a broken window a few hours ago, any update?\" After that, answer only what you are asked, using ONLY the facts below; never volunteer other details unprompted. If she reads back a phone number, check it digit by digit against yours: if correct say \"Yes, that's right.\", if wrong, give the correct number again. If she asks you to confirm an address or unit that matches yours, say yes. If she asks something not covered by the facts, give a short, plausible, neutral answer. When she asks if there is anything else, say \"No, that's all. Thanks, bye.\" and stop. Keep the call short: once she has done what you called for, end politely.\nFACTS:\n- Your name: Mary Sermic. Address: 1 Washington Avenue, unit 5. You are a current resident.\n- You reported a broken window in the balcony-side room recently and want to know its status. You do not want to report anything new.\n- Callback number, only if asked: \"five one eight, five five five, zero one five five\" (518-555-0155).",
+ "transcript": [
+  {
+   "role": "agent",
+   "message": "Thanks for calling 518 Property Pro, this is Sarah! Are you calling about renting an apartment, a maintenance issue, or something else?",
+   "producing_llm": "claude-haiku-5-5",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 0.0018729401053860784
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "user",
+   "message": "Hi, Mary Sermic, 1 Washington Avenue unit 5, I reported a broken window a few hours ago, any update?",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "One moment, let me look that up.",
+   "producing_llm": "claude-haiku-5-5",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.6674078620271757
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 1.6690165110630915
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 1.8657073890790343
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": "claude-haiku-5-5",
+   "tool_calls": [
+    {
+     "tool": "lookup_caller",
+     "params": "{\"system__message_to_speak\": \"One moment, let me look that up.\"}"
+    }
+   ],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.6674078620271757
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 1.6690165110630915
+    }
+   },
+   "llm_usage": {
+    "claude-haiku-5-5": {
+     "input": {
+      "tokens": 7732,
+      "price": 0.00085052
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 31519,
+      "price": 0.0043338625000000006
+     },
+     "output_total": {
+      "tokens": 136,
+      "price": 7.480000000000002e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [
+    {
+     "tool": "lookup_caller",
+     "is_error": false,
+     "result": "{\"matched\": false, \"message\": \"No match. Do not guess. Ask only for what the caller has not already said in this call: their name, then the property name or address, then the unit number. Once you have the address and unit, call find_unit (right away if they already said them). If that does not match either, take a callback phone or e-mail only to record it and use log_unmatched_caller.\"}"
+    }
+   ],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Mary has given her name, address, and unit already, so I'll check them with find_unit.",
+   "producing_llm": "claude-haiku-5-5",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 0.6802981509827077
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 0.5591845229500905
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 0.7692515678936616
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": "claude-haiku-5-5",
+   "tool_calls": [
+    {
+     "tool": "find_unit",
+     "params": "{\"spoken_address\": \"1 Washington Avenue\", \"spoken_unit\": \"5\", \"system__message_to_speak\": \"Let me check that unit.\"}"
+    }
+   ],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 0.6802981509827077
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 0.5591845229500905
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 0.2854079050011933
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 0.7692515678936616
+    }
+   },
+   "llm_usage": {
+    "claude-haiku-5-5": {
+     "input": {
+      "tokens": 7995,
+      "price": 0.00087945
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 31519,
+      "price": 0.0043338625000000006
+     },
+     "output_total": {
+      "tokens": 149,
+      "price": 8.195e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [
+    {
+     "tool": "find_unit",
+     "is_error": false,
+     "result": "{\"matched\": true, \"unit_label\": \"5\", \"property_name\": \"1 Washington Avenue\", \"property_address\": \"1 Washington Avenue\", \"confirm_required\": true, \"say\": \"Thanks, I have unit 5 at 1 Washington Avenue. Is that right?\", \"message\": \"Unit found. Confirm it with the caller. From now on pass unit_label as spoken_unit and property_address as spoken_address to the logging tools (for a house with no unit label, leave spoken_unit out). Never say anything about who lives there; you are told nothing about residents here.\"}"
+    }
+   ],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Thanks, I have unit 5 at 1 Washington Avenue. Is that right?",
+   "producing_llm": "claude-haiku-5-5",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 0.5745903990464285
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 0.49730667006224394
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 0.5745845390483737
+    }
+   },
+   "llm_usage": {
+    "claude-haiku-5-5": {
+     "input": {
+      "tokens": 8334,
+      "price": 0.00091674
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 31519,
+      "price": 0.0043338625000000006
+     },
+     "output_total": {
+      "tokens": 31,
+      "price": 1.705e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "Yes, that's right.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Just a sec…. Okay, great.",
+   "producing_llm": "gemini-2.5-flash",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 3.7269789000274613
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 2.019853848963976
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 3.7269711600383744
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 3.988059782073833
+    },
+    "agents_llm_service_failed_attempts_latency": {
+     "elapsed_time": 2.1872631249716505
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": "gemini-2.5-flash",
+   "tool_calls": [
+    {
+     "tool": "check_work_order_status",
+     "params": "{\"spoken_address\": \"1 Washington Avenue\", \"spoken_unit\": \"5\", \"caller_name\": \"Mary Sermic\", \"system__message_to_speak\": \"Checking the status now.\", \"issue_description\": \"broken window\"}"
+    }
+   ],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 3.7269789000274613
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 2.019853848963976
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 0.09861282398924232
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 3.7269711600383744
+    },
+    "agents_llm_service_failed_attempts_latency": {
+     "elapsed_time": 2.1872631249716505
+    }
+   },
+   "llm_usage": {
+    "claude-haiku-5-5": {
+     "input": {
+      "tokens": 8377,
+      "price": 0.0009214700000000001
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 31519,
+      "price": 0.0043338625000000006
+     },
+     "output_total": {
+      "tokens": 160,
+      "price": 8.8e-05
+     }
+    },
+    "gemini-2.5-flash": {
+     "input": {
+      "tokens": 20525,
+      "price": 0.0061575
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 112,
+      "price": 0.00028
+     }
+    }
+   }
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [
+    {
+     "tool": "check_work_order_status",
+     "is_error": false,
+     "result": "{\"unit_identified\": true, \"request_count\": 1, \"request\": {\"summary\": \"Broken window\", \"reported\": \"Friday, October 30\", \"status\": \"We've received it, and it's waiting for your asset manager to review.\"}, \"say\": \"I see the request about Broken window, reported on Friday, October 30. We've received it, and it's waiting for your asset manager to review.\", \"message\": \"Say only what this result gives you: the summary, the date it was reported and the status sentence. Never add a day, date, time, reason, cause, name or promise that is not in it, never read out ref, and never mention identity checks or whether a name matched. Then log the call with log_tenant_issue, call_type work_order_status (that only records the question; never say a request was logged).\"}"
+    }
+   ],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "user",
+   "message": "Okay, so what's the status on the window? Is someone coming out to fix it?",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Let me pull that up…. I see the request about the broken window, reported on Friday, October 30. We've received it, and it's waiting for your asset manager to review.",
+   "producing_llm": "gemini-2.5-flash",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 4.217250650981441
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 4.216946350992657
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 4.388854346005246
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 6.7484387459699064
+    },
+    "agents_llm_service_failed_attempts_latency": {
+     "elapsed_time": 2.6224023510003462
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": "gpt-4o",
+   "tool_calls": [
+    {
+     "tool": "log_tenant_issue",
+     "params": "{\"caller_name\":\"Mary Sermic\",\"caller_phone\":null,\"unit\":\"5\",\"reason\":\"Checking status of broken window request\",\"call_type\":\"work_order_status\",\"severity\":2,\"severity_reason\":\"informational request\",\"system__message_to_speak\":\"Logging your request status inquiry.\"}"
+    }
+   ],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 4.217250650981441
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 4.216946350992657
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 2.1999750109389424
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 4.388854346005246
+    },
+    "agents_llm_service_failed_attempts_latency": {
+     "elapsed_time": 2.6224023510003462
+    }
+   },
+   "llm_usage": {
+    "claude-haiku-5-5": {
+     "input": {
+      "tokens": 8840,
+      "price": 0.0009724
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 31519,
+      "price": 0.0043338625000000006
+     },
+     "output_total": {
+      "tokens": 160,
+      "price": 8.8e-05
+     }
+    },
+    "gemini-2.5-flash": {
+     "input": {
+      "tokens": 13471,
+      "price": 0.004041299999999999
+     },
+     "input_cache_read": {
+      "tokens": 7324,
+      "price": 0.00021972
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 151,
+      "price": 0.0003775
+     }
+    },
+    "gpt-4o": {
+     "input": {
+      "tokens": 25464,
+      "price": 0.06366
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 69,
+      "price": 0.00069
+     }
+    }
+   }
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [
+    {
+     "tool": "log_tenant_issue",
+     "is_error": false,
+     "result": "{\"logged\": true, \"severity\": 3}"
+    }
+   ],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Just a sec…. ",
+   "producing_llm": "claude-haiku-5-5",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": {
+    "claude-haiku-5-5": {
+     "input": {
+      "tokens": 9162,
+      "price": 0.00100782
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 31519,
+      "price": 0.0043338625000000006
+     },
+     "output_total": {
+      "tokens": 160,
+      "price": 8.8e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "Ok, so it's still just waiting for review? Is there any idea when someone will actually come fix it?",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Let me pull that up…. I see the request is still waiting for your asset",
+   "producing_llm": "gemini-2.5-flash",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 4.755901689990424
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 4.755584159982391
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 4.8918514139950275
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 5.055538111017086
+    },
+    "agents_llm_service_failed_attempts_latency": {
+     "elapsed_time": 2.993091293028556
+    }
+   },
+   "llm_usage": {
+    "claude-haiku-5-5": {
+     "input": {
+      "tokens": 9208,
+      "price": 0.00101288
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 31519,
+      "price": 0.0043338625000000006
+     },
+     "output_total": {
+      "tokens": 160,
+      "price": 8.8e-05
+     }
+    },
+    "gemini-2.5-flash": {
+     "input": {
+      "tokens": 20936,
+      "price": 0.0062808000000000004
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 156,
+      "price": 0.00039
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "Sorry, you cut out a little there. Is it still waiting on the asset manager?",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Just a sec…. Yes, it is still waiting for your asset manager to review. Is there anything else I can help you with today?",
+   "producing_llm": "gemini-2.5-flash",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 4.651479916996323
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 4.650930627016351
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 4.78512774198316
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 4.9451770699815825
+    },
+    "agents_llm_service_failed_attempts_latency": {
+     "elapsed_time": 2.8490477410377935
+    }
+   },
+   "llm_usage": {
+    "claude-haiku-5-5": {
+     "input": {
+      "tokens": 9263,
+      "price": 0.00101893
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 31519,
+      "price": 0.0043338625000000006
+     },
+     "output_total": {
+      "tokens": 160,
+      "price": 8.8e-05
+     }
+    },
+    "gemini-2.5-flash": {
+     "input": {
+      "tokens": 20970,
+      "price": 0.006291
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 130,
+      "price": 0.000325
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "No, that's all. Thanks, bye.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "You're welcome, Mary. Have a great day, bye.",
+   "producing_llm": "claude-haiku-5-5",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 0.5242731029866263
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 0.8374759299913421
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 1.0305334689328447
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": "claude-haiku-5-5",
+   "tool_calls": [
+    {
+     "tool": "end_call",
+     "params": "{\"reason\": \"Resident's status question answered; caller is done.\", \"system__message_to_speak\": \"You're welcome, Mary. Have a great day, bye.\"}"
+    }
+   ],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 0.5242731029866263
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 0.8374759299913421
+    }
+   },
+   "llm_usage": {
+    "claude-haiku-5-5": {
+     "input": {
+      "tokens": 9322,
+      "price": 0.00102542
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 31519,
+      "price": 0.0043338625000000006
+     },
+     "output_total": {
+      "tokens": 107,
+      "price": 5.885e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [
+    {
+     "tool": "end_call",
+     "is_error": false,
+     "result": "{\"result_type\":\"end_call_success\",\"status\":\"success\",\"reason\":\"Resident's status question answered; caller is done.\",\"message\":null}"
+    }
+   ],
+   "turn_metrics": null,
+   "llm_usage": null
+  }
+ ]
+}

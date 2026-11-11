@@ -146,7 +146,7 @@ export function ItemModal({
   const resetLabel = isContact ? "Clear details" : "Reset to draft";
   const resetMessage =
     d.modal === "routing"
-      ? "This puts the menu back to the six names with no numbers, clears the fallback and after-hours text, and turns the routing menu off. Its approval is removed."
+      ? "This puts the menu back to the six names with no numbers, hours or extensions, clears the main office number and the fallback and after-hours text, and turns the routing menu off. Its approval is removed."
       : isContact
         ? "This clears the details you added. Sarah will not use them."
         : d.modal === "severity"

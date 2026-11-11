@@ -432,8 +432,12 @@ export default defineSchema({
         available: v.boolean(),
       }),
     ),
-    petsAllowed: v.boolean(),
-    moveInWindowDays: v.number(),
+    // Optional since the roster import (B2): the client rosters say nothing about pets or a
+    // move-in window, so an imported building leaves both unset rather than carrying a made-up
+    // default. Absent means "not provided": every reader (Sarah's tools, the SMS/WhatsApp bots,
+    // the KB doc) must then state no policy, and qualification never fails on an unset value.
+    petsAllowed: v.optional(v.boolean()),
+    moveInWindowDays: v.optional(v.number()),
     // Picked from Google Places on the Property page. Becomes the location of every tour event
     // and what Sarah tells a renter when she books. Never cloned from the template: it is one
     // specific building, not a sensible default for someone else's.
@@ -447,11 +451,36 @@ export default defineSchema({
     defaultAssetManagerUserId: v.optional(v.id("users")),
     // Display only (Property page, owner statements later).
     ownerName: v.optional(v.string()),
+    // The first of ownerEmails when the roster gives several; existing readers keep using it.
     ownerEmail: v.optional(v.string()),
+    // Every owner email, trimmed, lowercased and validated (roster "Owners Email Address", two
+    // owners in one cell split on ", "). Lowercase so a later "is this caller an owner?" lookup
+    // can compare an email spoken on a call against EITHER address with a plain equality check.
+    // Convex can't index array members; a lookup reads the org's properties via by_org (a few
+    // hundred rows) and checks `ownerEmails.includes(email.toLowerCase())`.
+    ownerEmails: v.optional(v.array(v.string())),
+    // --- Roster fields (B2, docs/rosters/unit-fields-spec.md). All optional: buildings created
+    // by hand have none of them. Written by convex/rosterImport.ts.
+    // Which client roster / team the building is on.
+    category: v.optional(v.union(v.literal("gold"), v.literal("silver"), v.literal("make_up"))),
+    // Owned by the company's owners ("Delia - Rentals") or managed for other owners (Gold,
+    // Silver, "Delia Management Properties"); client answer 2026-10-30.
+    ownership: v.optional(v.union(v.literal("company_owned"), v.literal("managed"))),
+    // The roster marks the building "selling" (Gold only so far). Absent = not stated.
+    selling: v.optional(v.boolean()),
+    // City as the roster / asset manager gave it, spelling kept. Also inside address.formatted.
+    city: v.optional(v.string()),
+    // Make Up page title ("Delia - Rentals" / "Delia Management Properties"), verbatim.
+    sourceSection: v.optional(v.string()),
+    // The asset manager the client named for this building, by name, while that person has no
+    // account yet (Silver = Nikki, Make Up = Delia). defaultAssetManagerUserId holds who is assigned today; this
+    // is what lets the units be bulk-moved to the right person once they join.
+    intendedAssetManagerName: v.optional(v.string()),
     updatedAt: v.number(),
   })
     .index("by_org", ["orgId"])
-    .index("by_user", ["userId"]),
+    .index("by_user", ["userId"])
+    .index("by_org_and_category", ["orgId", "category"]),
 
   // Feedback from the landing page's "Try yourself" demo only — never from the dashboard's
   // own /call, where a customer testing their own agent has no reason to rate it.
@@ -486,6 +515,11 @@ export default defineSchema({
     petType: v.optional(v.string()),
     callerName: v.optional(v.string()),
     callerPhone: v.optional(v.string()),
+    // The city or area they want to rent in, in their own words ("albany ny", "anywhere"), and the
+    // cities in the team's data it matched (labels as stored; empty for no preference or an area
+    // we have no building in). Set by log_lead.
+    preferredArea: v.optional(v.string()),
+    preferredCities: v.optional(v.array(v.string())),
     qualifies: v.optional(v.boolean()),
     disqualifyReason: v.optional(v.string()),
     // Set alongside a false qualifies when the miss was small (see qualifyRules.NEAR_MISS_BAND)
@@ -753,15 +787,70 @@ export default defineSchema({
     unitNumberKey: v.string(), // normalizeUnitKey(unitNumber), for matching what callers say
     floor: v.optional(v.number()),
     isTopFloor: v.optional(v.boolean()), // drives the roof/leak script
+    // "studio" | "1br" | "2br" | "3br+" (what Sarah's bedrooms filter matches), plus two values
+    // the roster import writes: "-" when the roster gives no bedroom count (commercial, garage,
+    // office) and "room" for a unit rented as one room of a shared apartment (rentedAs below).
     bedrooms: v.string(),
     bathrooms: v.optional(v.number()),
     parking: v.optional(v.string()),
-    rent: v.optional(v.number()),
+    rent: v.optional(v.number()), // dollars a month; absent when not stated, never 0
     available: v.boolean(), // Sarah offers ONLY when true
     availableFrom: v.optional(v.string()),
     leasingFacts: v.optional(v.string()),
     assetManagerUserId: v.id("users"),
     maintenanceIntakeActive: v.boolean(),
+    // --- Roster fields (B2, docs/rosters/unit-fields-spec.md). All optional so units entered by
+    // hand stay valid; absent = "-" (not stated in the roster). Written by convex/rosterImport.ts
+    // through units.upsertRosterUnit.
+    unitType: v.optional(
+      v.union(
+        v.literal("residential"),
+        v.literal("commercial"),
+        v.literal("storefront"),
+        v.literal("garage"),
+        v.literal("office"),
+        v.literal("other"),
+        v.literal("unknown"),
+      ),
+    ),
+    // Text floor label when the roster's floor is not a plain number: "Basement" (stored with
+    // floor = 0, so it sorts below the first floor and is never a top floor) or anything else
+    // ("Carriage house", stored with no floor number).
+    floorRaw: v.optional(v.string()),
+    // Numeric bedroom count (0 = studio). On a unit rented as a room it is the bedroom count of
+    // the shared apartment the room is in, not of the room.
+    bedroomsCount: v.optional(v.number()),
+    // "room" = one room of a shared apartment, rented on its own (687 State Street B1-B4).
+    // Absent = the whole unit.
+    rentedAs: v.optional(v.literal("room")),
+    occupancy: v.optional(
+      v.union(
+        v.literal("occupied"),
+        v.literal("occupied_leaving"),
+        v.literal("vacant"),
+        v.literal("vacant_not_ready"),
+      ),
+    ),
+    // At-will was merged into month-to-month (client, 2026-10-30), so there is no at_will value.
+    leaseType: v.optional(
+      v.union(v.literal("fixed"), v.literal("month_to_month"), v.literal("vacant"), v.literal("unknown")),
+    ),
+    leaseEnd: v.optional(v.string()), // YYYY-MM-DD, the roster's lease end for the unit
+    rentPaidTo: v.optional(
+      v.union(v.literal("company"), v.literal("owner_direct"), v.literal("included_in_other_unit")),
+    ),
+    heatingFuel: v.optional(v.union(v.literal("gas"), v.literal("electric"), v.literal("both"))),
+    gasPaidBy: v.optional(v.union(v.literal("tenant"), v.literal("landlord"))),
+    electricPaidBy: v.optional(v.union(v.literal("tenant"), v.literal("landlord"))),
+    laundry: v.optional(
+      v.union(
+        v.literal("none"),
+        v.literal("shared_building"),
+        v.literal("hookups"),
+        v.literal("provided"),
+        v.literal("unknown"),
+      ),
+    ),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -800,12 +889,55 @@ export default defineSchema({
     email: v.optional(v.string()),
     leaseEnd: v.optional(v.string()), // YYYY-MM-DD
     active: v.boolean(), // false = moved out / removed. Never hard-deleted, history points at it.
-    source: v.union(v.literal("manual"), v.literal("buildium_csv")),
+    // roster_import = a tenant name from the client unit rosters (names only, no phones).
+    source: v.union(v.literal("manual"), v.literal("buildium_csv"), v.literal("roster_import")),
     updatedAt: v.number(),
   })
     .index("by_org", ["orgId"])
     .index("by_unit", ["unitId"])
     .index("by_org_and_email", ["orgId", "email"]),
+
+  // Import provenance for the client unit rosters (docs/rosters/518-unit-rosters-normalized.xlsx):
+  // one row per roster row, so every imported value can be traced back to the sheet. Holds every
+  // "Source: ..." cell verbatim (absent = empty cell), Notes and the manager's feedback. Never
+  // holds "Please check", "Correct? (Y/N)" or "Corrections" (review workflow only). The importer
+  // keys on (orgId, category, rowId), which is what makes a re-run update instead of duplicate.
+  unitSourceRows: defineTable({
+    orgId: v.string(),
+    category: v.union(v.literal("gold"), v.literal("silver"), v.literal("make_up")),
+    rowId: v.string(), // "S-001": our row number in the roster, not a business key
+    page: v.number(), // Source: Page
+    propertyId: v.id("properties"),
+    unitId: v.id("units"),
+    // The sheet's Property / Unit / Asset manager / Notes cells at import time.
+    property: v.string(),
+    unit: v.string(),
+    assetManager: v.string(),
+    notes: v.optional(v.string()),
+    sourceUnit: v.optional(v.string()),
+    sourceCom: v.optional(v.string()), // Source: COM (unlabeled column)
+    sourceFloor: v.optional(v.string()),
+    sourceTenants: v.optional(v.string()),
+    sourceLeaseEnd: v.optional(v.string()), // Source: Lease End/Exp
+    sourceBedBath: v.optional(v.string()),
+    sourceRent: v.optional(v.string()),
+    sourceGeTl: v.optional(v.string()), // Source: G/E & T/L
+    sourceLmat: v.optional(v.string()),
+    sourceLaundry: v.optional(v.string()),
+    sourceGasPaid: v.optional(v.string()),
+    sourceElectricPaid: v.optional(v.string()),
+    sourceGasElectric: v.optional(v.string()),
+    sourceWho: v.optional(v.string()),
+    sourceWd: v.optional(v.string()), // Source: W/D
+    sourcePropertyHeading: v.optional(v.string()),
+    sourceLayoutNotes: v.optional(v.string()),
+    sourceSection: v.optional(v.string()),
+    managerFeedback: v.optional(v.string()), // Source: Manager feedback, word for word
+    updatedAt: v.number(),
+  })
+    .index("by_org_category_row", ["orgId", "category", "rowId"])
+    .index("by_unit", ["unitId"])
+    .index("by_property", ["propertyId"]),
 
   // Convex cannot index the elements of an array, so each phone gets its own row. Caller ID ->
   // resident is then one indexed read. Rows exist only for ACTIVE residents (removed on
@@ -969,8 +1101,16 @@ export default defineSchema({
       v.literal("cancelled"),
     ),
     dueDate: v.optional(v.number()),
-    // Appointment window for the technician visit, e.g. "Today 2-4pm". Free text with presets in the UI.
+    // Appointment window for the technician visit. windowStart/windowEnd (epoch ms) are set by the
+    // picker, and `window` holds their absolute label ("Tue, Nov 3, 1:00–3:00 PM"). Older rows have
+    // only `window`, as free text that may be relative ("Today 2-4pm").
     window: v.optional(v.string()),
+    windowStart: v.optional(v.number()),
+    windowEnd: v.optional(v.number()),
+    // What the tenant said suits them for a visit, in their own words ("next week Monday"), copied
+    // from the request at creation. Free text: never parsed, and never the scheduled time (that is
+    // window / windowStart / windowEnd, set by staff).
+    tenantPreferredTime: v.optional(v.string()),
     cancelReason: v.optional(v.string()),
     createdBy: v.id("users"),
     createdAt: v.number(),
@@ -1092,6 +1232,30 @@ export default defineSchema({
     .index("by_conversation", ["elevenLabsConversationId"])
     .index("by_org_and_created", ["orgId", "createdAt"])
     .index("by_assignee_and_status", ["assignedUserId", "status"]),
+
+  // --- Owner verification (owner call menu, B36) --------------------------------
+  // One row per call per property an existing owner tried to verify with verify_owner (property +
+  // email on file). check_staff_availability only returns a transfer number while this call has a
+  // verified row (ownerVerifyLib.hasLiveVerification). Never holds an email. Rows are purged after
+  // ownerVerifyLib.VERIFICATION_RETENTION_MS (crons.ts); the audit trail keeps the history.
+  ownerVerifications: defineTable({
+    orgId: v.string(),
+    elevenLabsConversationId: v.string(),
+    propertyId: v.id("properties"),
+    verified: v.boolean(),
+    attempts: v.number(), // email checks on this property in this call
+    failures: v.number(),
+    verifiedAt: v.optional(v.number()),
+    lastAttemptAt: v.number(),
+    createdAt: v.number(),
+    // transfer_owner_call (TRANSFER_MECHANISM "twilio_dial"): when this call was handed to Twilio to
+    // ring a staff member, and who. One transfer per call; the Dial result reads the label back.
+    transferStartedAt: v.optional(v.number()),
+    transferTo: v.optional(v.string()),
+  })
+    .index("by_conversation", ["elevenLabsConversationId"])
+    .index("by_property_and_last_attempt", ["propertyId", "lastAttemptAt"])
+    .index("by_created", ["createdAt"]),
 
   // Legacy per-call counters (find_resident / send_photo_link caps). Nothing writes them any
   // more; the table stays so existing rows still validate.

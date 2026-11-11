@@ -1,6 +1,6 @@
 "use node";
 
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import mammoth from "mammoth";
 import { PDFParse } from "pdf-parse";
 import { internalAction } from "./_generated/server";
@@ -27,9 +27,9 @@ export const extractFile = internalAction({
 
     const blob = await ctx.storage.get(args.storageId);
     try {
-      if (!blob) throw new Error("Upload was lost before it could be read. Try again.");
+      if (!blob) throw new ConvexError("Upload was lost before it could be read. Try again.");
       if (blob.size > MAX_FILE_BYTES) {
-        throw new Error("That file is over 20MB. Please upload a smaller PDF or Word doc.");
+        throw new ConvexError("That file is over 20MB. Please upload a smaller PDF or Word doc.");
       }
 
       const kind = fileKind(args.fileName, blob.type);
@@ -37,7 +37,7 @@ export const extractFile = internalAction({
       const raw = kind === "pdf" ? await extractPdf(buffer) : await extractDocx(buffer);
       const body = cleanText(raw);
       if (!body) {
-        throw new Error(
+        throw new ConvexError(
           "No text found in that file. If it's a scanned PDF, paste the content instead.",
         );
       }
@@ -57,9 +57,9 @@ function fileKind(fileName: string, contentType: string): "pdf" | "docx" {
   if (lower.endsWith(".pdf") || type.includes("pdf")) return "pdf";
   if (lower.endsWith(".docx") || type.includes("wordprocessingml")) return "docx";
   if (lower.endsWith(".doc") || type === "application/msword") {
-    throw new Error("Old .doc files aren't supported. Save as .docx or PDF and try again.");
+    throw new ConvexError("Old .doc files aren't supported. Save as .docx or PDF and try again.");
   }
-  throw new Error("Please upload a PDF or Word (.docx) file.");
+  throw new ConvexError("Please upload a PDF or Word (.docx) file.");
 }
 
 function titleFromFileName(fileName: string) {

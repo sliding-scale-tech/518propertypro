@@ -13,6 +13,7 @@ import {
   flowsOf,
   isApprovalRequired,
   isFlowKey,
+  ownerRoutingStatus,
   tenantMessagesOf,
   type FlowKey,
   type MissingItem,
@@ -21,13 +22,14 @@ import {
 import type { SarahConfig } from "@/convex/sarahConfigLib";
 import { RequireView } from "@/components/require-view";
 import { BuiltInQuestions, ScreeningQuestions } from "@/components/screening-questions";
-import { Modal, btnDanger, btnOutline, btnPrimary, cleanError, formatWhen, inputClass } from "@/components/maintenance/shared";
+import { Modal, btnDanger, btnOutline, btnPrimary, formatWhen, inputClass } from "@/components/maintenance/shared";
 import { Btn, Card, CardHead, ConfirmDialog, Field, PageHeader, Pill, Seg } from "@/components/ui";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import { ItemModal } from "@/components/sarah/item-modal";
 import { PilotPanel } from "@/components/sarah/pilot-panel";
 import { QuestionFlowEditor } from "@/components/sarah/question-flow";
 import { PhoneLine } from "@/components/sarah/phone-line";
+import { RoutingEditor, fromRoutingDraft, routingDraftProblems, toRoutingDraft } from "@/components/sarah/routing-editor";
 
 /**
  * Sarah configuration (build plan P17). Everything here edits a DRAFT; nothing changes on live
@@ -271,7 +273,7 @@ function SarahPageInner() {
     try {
       await fn();
     } catch (e) {
-      toast(cleanError(e), "error");
+      toast(errorMessage(e), "error");
     } finally {
       setBusy(null);
     }
@@ -280,7 +282,15 @@ function SarahPageInner() {
   const onSave = () =>
     run("save", async () => {
       if (Object.values(local.leasing).some((x) => typeof x === "number" && !Number.isFinite(x))) {
-        throw new Error("Fill in every number on the Leasing tab.");
+        toast("Fill in every number on the Leasing tab.", "error");
+        return;
+      }
+      // Same rules as the server; the field itself is marked on the Routing directory tab.
+      const routingProblem = routingDraftProblems(toRoutingDraft(local.routingDirectory), data.ownLine)[0];
+      if (routingProblem) {
+        setTab("routing");
+        toast(routingProblem.message, "error");
+        return;
       }
       // JSON round-trip drops undefined fields, which Convex arguments do not accept.
       const clean: SarahConfig = JSON.parse(JSON.stringify(local));
@@ -682,80 +692,25 @@ function SarahPageInner() {
         {tab === "routing" ? (
           <Section
             title="Routing directory"
-            hint="For the owner call routing menu. It cannot be switched on while any entry has no phone number, and Sarah only gives numbers listed here."
+            hint="The owner call routing menu: who an existing property owner can be put through to, by name, role or keypad key. Sarah never gives these numbers out."
           >
             {(() => {
-              const missing = local.routingDirectory.entries.some((e) => !e.phone.trim());
+              const st = ownerRoutingStatus(local);
               return (
-                <div className="flex items-center gap-3">
-                  <Toggle
-                    label="Routing directory enabled"
-                    checked={local.routingDirectory.enabled}
-                    lockedReason={missing ? "Add a phone number to every entry first" : undefined}
-                    onChange={(enabled) => set((c) => ({ ...c, routingDirectory: { ...c.routingDirectory, enabled } }))}
-                  />
-                  <span className="text-sm">{local.routingDirectory.enabled ? "On" : "Off"}</span>
-                </div>
+                <p className={`rounded-xl px-3 py-2 text-[13px] ${st.live ? "bg-success-soft text-success-ink" : "bg-muted"}`}>
+                  <span className="font-medium">{st.live ? "Menu on in this draft." : "Menu off."}</span> {st.reason}
+                </p>
               );
             })()}
-            <div className="space-y-2">
-              {local.routingDirectory.entries.map((e, i) => {
-                const upd = (patch: Partial<typeof e>) =>
-                  set((c) => ({
-                    ...c,
-                    routingDirectory: {
-                      ...c.routingDirectory,
-                      entries: c.routingDirectory.entries.map((x, k) => (k === i ? { ...x, ...patch } : x)),
-                    },
-                  }));
-                const move = (d: number) =>
-                  set((c) => {
-                    const j = i + d;
-                    const list = [...c.routingDirectory.entries];
-                    if (j < 0 || j >= list.length) return c;
-                    [list[i], list[j]] = [list[j], list[i]];
-                    return { ...c, routingDirectory: { ...c.routingDirectory, entries: list } };
-                  });
-                return (
-                  <div key={i} className="flex flex-wrap items-center gap-1.5">
-                    <input className={`${inputClass} w-44`} placeholder="Name" maxLength={100} value={e.label} onChange={(ev) => upd({ label: ev.target.value })} />
-                    <input className={`${inputClass} w-40`} placeholder="Phone" inputMode="tel" value={e.phone} onChange={(ev) => upd({ phone: ev.target.value })} />
-                    <input className={`${inputClass} w-44`} placeholder="Hours (optional)" maxLength={200} value={e.hours ?? ""} onChange={(ev) => upd({ hours: ev.target.value })} />
-                    <button type="button" aria-label="Move up" className="rounded-lg p-2 hover:bg-accent disabled:opacity-30" disabled={i === 0} onClick={() => move(-1)}>
-                      <ArrowUp className="h-4 w-4" />
-                    </button>
-                    <button type="button" aria-label="Move down" className="rounded-lg p-2 hover:bg-accent disabled:opacity-30" disabled={i === local.routingDirectory.entries.length - 1} onClick={() => move(1)}>
-                      <ArrowDown className="h-4 w-4" />
-                    </button>
-                    <button
-                      type="button"
-                      aria-label="Remove"
-                      className="rounded-lg p-2 text-destructive hover:bg-destructive/10"
-                      onClick={() =>
-                        set((c) => ({
-                          ...c,
-                          routingDirectory: { ...c.routingDirectory, entries: c.routingDirectory.entries.filter((_, k) => k !== i) },
-                        }))
-                      }
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  </div>
-                );
-              })}
-              <button
-                type="button"
-                className={btnOutline}
-                onClick={() =>
-                  set((c) => ({
-                    ...c,
-                    routingDirectory: { ...c.routingDirectory, entries: [...c.routingDirectory.entries, { label: "", phone: "" }] },
-                  }))
-                }
-              >
-                <Plus className="h-4 w-4" /> Add person
-              </button>
-            </div>
+            <RoutingEditor
+              value={toRoutingDraft(local.routingDirectory)}
+              onChange={(d) => set((c) => ({ ...c, routingDirectory: fromRoutingDraft(d) }))}
+              readOnly={!canEdit}
+              members={data.members}
+              ownLine={data.ownLine}
+              ownerEmailProperties={data.ownerEmailProperties}
+              showEnable
+            />
           </Section>
         ) : null}
 

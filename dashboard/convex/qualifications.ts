@@ -57,6 +57,8 @@ export const upsertArgs = {
     petType: v.optional(v.string()),
     callerName: v.optional(v.string()),
     callerPhone: v.optional(v.string()),
+    preferredArea: v.optional(v.string()),
+    preferredCities: v.optional(v.array(v.string())),
     qualifies: v.optional(v.boolean()),
     disqualifyReason: v.optional(v.string()),
     nearMiss: v.optional(v.boolean()),

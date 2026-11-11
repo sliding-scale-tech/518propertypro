@@ -1,6 +1,7 @@
 "use client";
 
 import { useAuth } from "@clerk/nextjs";
+import { errorMessage } from "@/components/ui/toast";
 import { useAction } from "convex/react";
 import { Loader2 } from "lucide-react";
 import Link from "next/link";
@@ -80,7 +81,7 @@ function AcceptInvite() {
           router.replace("/home");
           return;
         } catch (err) {
-          const message = err instanceof Error ? err.message : "";
+          const message = errorMessage(err, "");
           if (attempt < 4 && message.includes("still being set up")) {
             await new Promise((resolve) => setTimeout(resolve, 1500));
             continue;

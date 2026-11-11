@@ -55,3 +55,18 @@ export function shortDateIn(at: number, timeZone: string): string {
 export function formatTime(at: number, timeZone: string): string {
   return new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", timeZone }).format(at);
 }
+
+/**
+ * A leasing caller's city or area: the matched city names from the team's data, with what they
+ * actually said when it reads differently ("Schenectady (said: Skenectady)"), else just what they
+ * said ("anywhere"). Undefined when they were not asked.
+ */
+export function areaLabel(said?: string, cities?: string[]): string | undefined {
+  const matched = (cities ?? []).filter(Boolean);
+  if (matched.length === 0) return said || undefined;
+  const label = matched.join(" or ");
+  // "albany ny" and "Albany, New York" read the same as "Albany".
+  const norm = (x: string) =>
+    x.toLowerCase().replace(/\b(?:new york|nys|ny)\b/g, "").replace(/[^a-z]+/g, "");
+  return said && norm(said) !== norm(label) ? `${label} (said: ${said})` : label;
+}

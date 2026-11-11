@@ -7,8 +7,8 @@ import { useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Btn, Card, CardHead, ListRow, IconTile } from "@/components/ui";
-import { useToast } from "@/components/toast";
-import { cleanError, timeAgo } from "@/components/maintenance/shared";
+import { errorMessage, useToast } from "@/components/toast";
+import { timeAgo } from "@/components/maintenance/shared";
 
 /** Failed / unclear calls that still need a human callback (admin dashboard). */
 export function FollowUpCard() {
@@ -23,7 +23,7 @@ export function FollowUpCard() {
       await markFollowedUp({ conversationId: id });
       toast("Marked as followed up.");
     } catch (e) {
-      toast(cleanError(e), "error");
+      toast(errorMessage(e), "error");
     } finally {
       setBusy(null);
     }

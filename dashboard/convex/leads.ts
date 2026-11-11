@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import { internalMutation, mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
@@ -8,6 +8,7 @@ import { scheduleEmergencyAlert, scheduleNotify, staffRecipientIds } from "./not
 import { ensureLeadConversation } from "./conversations";
 import { upsertArgs, upsertQualification } from "./qualifications";
 import { weekBounds } from "./tourSchedule";
+import { STAFF_MESSAGE_PREFIX } from "./ownerRoutingLib";
 
 /**
  * Sarah's routing of people to people (lead -> asset manager, unmatched caller -> asset manager,
@@ -437,7 +438,7 @@ export const logUnmatchedCaller = internalMutation({
         .query("callbackContacts")
         .withIndex("by_conversation", (q) => q.eq("elevenLabsConversationId", args.elevenLabsConversationId))
         .collect()
-    ).find((r) => r.orgId === args.orgId);
+    ).find((r) => r.orgId === args.orgId && !r.reason.startsWith(STAFF_MESSAGE_PREFIX)); // a staff message (owner call menu) is its own row
 
     const conv = await ctx.db
       .query("conversations")
@@ -553,11 +554,11 @@ export const setCallbackStatus = mutation({
   args: { id: v.id("callbackContacts"), status: v.union(v.literal("open"), v.literal("called_back"), v.literal("closed")) },
   handler: async (ctx, args) => {
     const org = await currentOrg(ctx);
-    if (!org) throw new Error("No team found for this account. Try signing in again.");
+    if (!org) throw new ConvexError("No team found for this account. Try signing in again.");
     const row = await ctx.db.get(args.id);
     const admin = viewFor(org.isAdmin, org.jobRoles) === "admin";
     if (!row || row.orgId !== org.orgId || (!admin && row.assignedUserId !== org.user._id)) {
-      throw new Error("Callback not found.");
+      throw new ConvexError("Callback not found.");
     }
     await ctx.db.patch(row._id, { status: args.status, updatedAt: Date.now() });
     await writeAudit(ctx, {

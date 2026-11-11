@@ -1,0 +1,334 @@
+{
+ "model": "gemini-3-flash-preview",
+ "scenario": "S6",
+ "test_agent_id_deleted": "agent_7901m6dwk3hjewdapd1bvxn6yd02",
+ "status_llm_judge": "passed",
+ "judge_rationale": {
+  "messages": [
+   "The agent's first reply after the caller's gas-leak opening told the caller to leave the building immediately and call 911, before asking any other question such as name or address. This meets the criterion.",
+   "The agent ended the conversation."
+  ],
+  "summary": "Evaluation succeeded"
+ },
+ "credits_used": 251,
+ "charging": {
+  "llm_price": 0.04127661999999999,
+  "llm_charge": 206,
+  "platform_charge": 45,
+  "platform_usage": {
+   "category_usage": {
+    "text_message": {
+     "credits": 45,
+     "price": 0.009000000000000001,
+     "quantity": 3.0
+    }
+   }
+  }
+ },
+ "llm_usage_by_model": {
+  "claude-haiku-5-5": {
+   "input": {
+    "tokens": 3497,
+    "price": 0.00038467
+   },
+   "input_cache_read": {
+    "tokens": 0,
+    "price": 0.0
+   },
+   "input_cache_write": {
+    "tokens": 2720,
+    "price": 0.00037400000000000004
+   },
+   "output_total": {
+    "tokens": 139,
+    "price": 7.645e-05
+   }
+  },
+  "gemini-3-flash-preview": {
+   "input": {
+    "tokens": 78789,
+    "price": 0.0393945
+   },
+   "input_cache_read": {
+    "tokens": 0,
+    "price": 0.0
+   },
+   "input_cache_write": {
+    "tokens": 0,
+    "price": 0.0
+   },
+   "output_total": {
+    "tokens": 349,
+    "price": 0.001047
+   }
+  }
+ },
+ "simulated_user_prompt": "You are a caller phoning 518 Property Pro, a property management company, and talking to its receptionist Sarah. This is a phone call: speak naturally and briefly, one or two short sentences per reply, no lists, no stage directions. The receptionist speaks first. Your FIRST reply must be exactly this sentence, word for word, and nothing else: \"I smell gas in my apartment at 1 Washington Avenue unit 3, it's strong and I hear hissing.\" After that, answer only what you are asked, using ONLY the facts below; never volunteer other details unprompted. If she reads back a phone number, check it digit by digit against yours: if correct say \"Yes, that's right.\", if wrong, give the correct number again. If she asks you to confirm an address or unit that matches yours, say yes. If she asks something not covered by the facts, give a short, plausible, neutral answer. When she asks if there is anything else, say \"No, that's all. Thanks, bye.\" and stop. Keep the call short: once she has done what you called for, end politely.\nFACTS:\n- You are a resident at 1 Washington Avenue, unit 3. Strong gas smell and hissing in the kitchen.\n- When told to leave, say \"Okay, I'm going outside now.\" and then \"Okay, I'm outside.\"\n- Your name, when asked: Sam Rivera. Number, when asked: \"five one eight, five five five, zero one three three\" (518-555-0133).\n- Nobody is hurt.",
+ "transcript": [
+  {
+   "role": "agent",
+   "message": "Thanks for calling 518 Property Pro, this is Sarah! Are you calling about renting an apartment, a maintenance issue, or something else?",
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 0.001753640011884272
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "user",
+   "message": "I smell gas in my apartment at 1 Washington Avenue unit 3, it's strong and I hear hissing.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "[excited] Leave the building immediately and call 911. If you can do it safely from outside, warn your neighbors. Once you are outside, tell me your name and the address.",
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.2494828320341185
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.2489576120860875
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.3685223510256037
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 1.961716877995059
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [
+    {
+     "tool": "log_maintenance_request",
+     "params": "{\"description\": \"Strong gas smell and hissing heard in the apartment.\", \"severity_score\": 10, \"system__message_to_speak\": \"Logging this emergency now.\", \"issue_type\": \"gas\", \"severity\": \"emergency\", \"spoken_unit\": \"3\", \"spoken_address\": \"1 Washington Avenue\"}"
+    }
+   ],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.2494828320341185
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.2489576120860875
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 0.398509428021498
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.3685223510256037
+    }
+   },
+   "llm_usage": {
+    "gemini-3-flash-preview": {
+     "input": {
+      "tokens": 26093,
+      "price": 0.0130465
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 123,
+      "price": 0.000369
+     }
+    }
+   }
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [
+    {
+     "tool": "log_maintenance_request",
+     "is_error": false,
+     "result": "{\"logged\": true, \"severity\": \"emergency\", \"request_number\": 1010, \"status\": \"new\", \"closed_out_of_scope\": false, \"unit_label\": \"3\", \"routed_to_asset_manager\": true, \"team_alerted\": true, \"say\": \"I've logged this as an emergency and alerted the team right away.\"}"
+    }
+   ],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "[excited] I've logged this as an emergency and alerted the team right away. May I have your name and the best number to reach you on?",
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.1851442130282521
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.1848690330516547
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.3137510820524767
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [
+    {
+     "tool": "escalate",
+     "params": "{\"system__message_to_speak\": \"Alerting the team now.\", \"caller_name\": \"unknown\", \"reason\": \"urgent_tenant_issue\", \"caller_phone\": \"unknown\", \"summary\": \"Emergency gas leak with hissing at 1 Washington Avenue unit 3. Caller advised to evacuate and call 911.\", \"living_area\": \"1 Washington Avenue unit 3\"}"
+    }
+   ],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.1851442130282521
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.1848690330516547
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 0.3029280880000442
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.3137510820524767
+    }
+   },
+   "llm_usage": {
+    "gemini-3-flash-preview": {
+     "input": {
+      "tokens": 26283,
+      "price": 0.0131415
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 128,
+      "price": 0.000384
+     }
+    }
+   }
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [
+    {
+     "tool": "escalate",
+     "is_error": false,
+     "result": "{\"escalated\": true, \"staff_notified\": true, \"team_alerted\": true}"
+    }
+   ],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "[excited] The team has been alerted. Please stay safe outside and call 911 immediately. We will follow up once you are safe. \n\n",
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.0279766839230433
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.0276905939681455
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.1522195629077032
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": "gemini-3-flash-preview",
+   "tool_calls": [
+    {
+     "tool": "end_call",
+     "params": "{\"system__message_to_speak\": \"Please call 911 now and stay safe. Goodbye.\", \"reason\": \"Life-safety emergency: gas leak with hissing. Caller advised to evacuate and call 911. Team alerted and escalated.\"}"
+    }
+   ],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.0279766839230433
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.0276905939681455
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 0.22419068799354136
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.1522195629077032
+    }
+   },
+   "llm_usage": {
+    "gemini-3-flash-preview": {
+     "input": {
+      "tokens": 26413,
+      "price": 0.0132065
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 98,
+      "price": 0.000294
+     }
+    }
+   }
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [
+    {
+     "tool": "end_call",
+     "is_error": false,
+     "result": "{\"result_type\":\"end_call_success\",\"status\":\"success\",\"reason\":\"Life-safety emergency: gas leak with hissing. Caller advised to evacuate and call 911. Team alerted and escalated.\",\"message\":null}"
+    }
+   ],
+   "turn_metrics": null,
+   "llm_usage": null
+  }
+ ]
+}

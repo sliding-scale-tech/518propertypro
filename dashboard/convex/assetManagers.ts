@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { action, internalMutation, mutation, query } from "./_generated/server";
@@ -49,14 +49,14 @@ const EMAIL_RE = /^[^\s@<>"',;:()[\]\\]+@[^\s@<>"',;:()[\]\\]+\.[^\s@<>"',;:()[\
 /** Trim, drop control characters, enforce a max length. Throws a message fit to show a person. */
 function cleanText(raw: string, label: string, max: number, min = 0): string {
   const out = raw.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim();
-  if (out.length > max) throw new Error(`${label} is too long (max ${max} characters).`);
-  if (out.length < min) throw new Error(`${label} is too short (min ${min} characters).`);
+  if (out.length > max) throw new ConvexError(`${label} is too long (max ${max} characters).`);
+  if (out.length < min) throw new ConvexError(`${label} is too short (min ${min} characters).`);
   return out;
 }
 
 function cleanEmail(raw: string, label: string): string {
   const email = raw.trim().toLowerCase();
-  if (email.length > MAX_EMAIL || !EMAIL_RE.test(email)) throw new Error(`Enter a valid ${label}.`);
+  if (email.length > MAX_EMAIL || !EMAIL_RE.test(email)) throw new ConvexError(`Enter a valid ${label}.`);
   return email;
 }
 
@@ -85,10 +85,10 @@ async function requireAmMember(ctx: QueryCtx | MutationCtx, org: OrgContext, use
     .withIndex("by_user", (q) => q.eq("userId", userId))
     .first();
   if (!membership || membership.orgId !== org.orgId || !isAm(membership)) {
-    throw new Error("Asset manager not found.");
+    throw new ConvexError("Asset manager not found.");
   }
   const user = await ctx.db.get(userId);
-  if (!user) throw new Error("Asset manager not found.");
+  if (!user) throw new ConvexError("Asset manager not found.");
   return { membership, user };
 }
 
@@ -566,19 +566,19 @@ export const setAvailability = mutation({
   handler: async (ctx, args) => {
     const org = await requireAdminView(ctx);
     const { membership } = await requireAmMember(ctx, org, args.userId);
-    if (args.hours.length > 7) throw new Error("Send at most one entry per day.");
+    if (args.hours.length > 7) throw new ConvexError("Send at most one entry per day.");
 
     const weekly: sched.DayHours[] = [];
     for (const h of args.hours) {
       if (h.start === null && h.end === null) continue; // day off
-      if (h.start === null || h.end === null) throw new Error("Set both a start and an end time, or turn the day off.");
+      if (h.start === null || h.end === null) throw new ConvexError("Set both a start and an end time, or turn the day off.");
       if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(h.start) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(h.end)) {
-        throw new Error("Times must look like 09:00.");
+        throw new ConvexError("Times must look like 09:00.");
       }
       if (minutesOf(h.start) % 15 !== 0 || minutesOf(h.end) % 15 !== 0) {
-        throw new Error("Times must be in 15-minute steps.");
+        throw new ConvexError("Times must be in 15-minute steps.");
       }
-      if (minutesOf(h.start) >= minutesOf(h.end)) throw new Error("Each day must end after it starts.");
+      if (minutesOf(h.start) >= minutesOf(h.end)) throw new ConvexError("Each day must end after it starts.");
       weekly.push({ day: h.day, start: h.start, end: h.end });
     }
     // saveWeeklyHours re-validates days (0-6, no duplicates) and the minimum tour length.
@@ -730,7 +730,7 @@ async function moveUnit(
   reason: string | undefined,
 ) {
   const unit = await ctx.db.get(unitId);
-  if (!unit || unit.orgId !== org.orgId) throw new Error("Unit not found.");
+  if (!unit || unit.orgId !== org.orgId) throw new ConvexError("Unit not found.");
   // The target must be an asset manager on THIS team (also re-checked inside units.ts).
   await requireAmMember(ctx, org, to);
 
@@ -816,7 +816,7 @@ export const sendPasswordReset = action({
       // Give the attempt back: a failed send must not burn one of the three daily tries.
       await ctx.runMutation(internal.assetManagers.releasePasswordReset, { reservationId: target.reservationId });
       console.error("assetManagers.sendPasswordReset: email failed", err instanceof Error ? err.message.slice(0, 200) : "unknown");
-      throw new Error("Could not send the email. Try again in a moment.");
+      throw new ConvexError("Could not send the email. Try again in a moment.");
     }
     return { sent: true, method: "email_link" };
   },
@@ -830,14 +830,14 @@ export const reservePasswordReset = internalMutation({
       .query("memberships")
       .withIndex("by_user", (q) => q.eq("userId", args.actorUserId))
       .first();
-    if (!actor || actor.orgId !== args.orgId || !isAdminView({ isAdmin: actor.role === "admin", jobRoles: actor.jobRoles ?? [] })) throw new Error("You don't have access to that.");
+    if (!actor || actor.orgId !== args.orgId || !isAdminView({ isAdmin: actor.role === "admin", jobRoles: actor.jobRoles ?? [] })) throw new ConvexError("You don't have access to that.");
     const membership = await ctx.db
       .query("memberships")
       .withIndex("by_user", (q) => q.eq("userId", args.targetUserId))
       .first();
     const user = await ctx.db.get(args.targetUserId);
     if (!membership || membership.orgId !== args.orgId || !isAm(membership) || !user?.email) {
-      throw new Error("Asset manager not found.");
+      throw new ConvexError("Asset manager not found.");
     }
 
     const since = Date.now() - DAY_MS;
@@ -846,7 +846,7 @@ export const reservePasswordReset = internalMutation({
       .withIndex("by_target_and_at", (q) => q.eq("targetUserId", args.targetUserId).gte("at", since))
       .collect();
     if (recent.length >= RESET_LIMIT_PER_DAY) {
-      throw new Error("Too many reset emails were sent to this person today. Try again tomorrow.");
+      throw new ConvexError("Too many reset emails were sent to this person today. Try again tomorrow.");
     }
 
     const reservationId = await ctx.db.insert("passwordResetRequests", {
@@ -919,9 +919,9 @@ export const calendar = query({
     const org = await requireAdminView(ctx);
     await requireAmMember(ctx, org, args.userId);
     if (!Number.isFinite(args.from) || !Number.isFinite(args.to) || args.to <= args.from) {
-      throw new Error("Pick a valid date range.");
+      throw new ConvexError("Pick a valid date range.");
     }
-    if (args.to - args.from > MAX_CALENDAR_DAYS * DAY_MS) throw new Error("That range is too long.");
+    if (args.to - args.from > MAX_CALENDAR_DAYS * DAY_MS) throw new ConvexError("Pick a date range of 62 days or fewer.");
     const organization = await ctx.db.get(org.orgId);
     const timeZone = organization?.timeZone ?? "UTC";
     const tours = await toursBetween(ctx, org, args.userId, args.from, args.to, timeZone);

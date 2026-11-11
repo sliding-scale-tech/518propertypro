@@ -1,0 +1,775 @@
+{
+ "model": "gpt-5-mini",
+ "scenario": "S6",
+ "test_agent_id_deleted": "agent_9201m6dwk5vkf869jt6sf3vk1ry0",
+ "status_llm_judge": "failed",
+ "judge_rationale": {
+  "messages": [
+   "The agent's first reply after the caller's opening line did not tell them to leave and call 911. It first said 'Let me pull that up... One moment... [slow', and only after the caller pressed for speed did it say to leave the building and call 911, so the criterion was not met.",
+   "The simulated user ended the conversation."
+  ],
+  "summary": "Evaluation failed"
+ },
+ "credits_used": 915,
+ "charging": {
+  "llm_price": 0.1442238,
+  "llm_charge": 720,
+  "platform_charge": 195,
+  "platform_usage": {
+   "category_usage": {
+    "text_message": {
+     "credits": 195,
+     "price": 0.039,
+     "quantity": 13.0
+    }
+   }
+  }
+ },
+ "llm_usage_by_model": {
+  "claude-haiku-5-5": {
+   "input": {
+    "tokens": 3959,
+    "price": 0.00043548999999999997
+   },
+   "input_cache_read": {
+    "tokens": 16835,
+    "price": 0.00018518499999999998
+   },
+   "input_cache_write": {
+    "tokens": 15170,
+    "price": 0.002085875
+   },
+   "output_total": {
+    "tokens": 1860,
+    "price": 0.001023
+   }
+  },
+  "gemini-2.5-flash": {
+   "input": {
+    "tokens": 40465,
+    "price": 0.012139500000000001
+   },
+   "input_cache_read": {
+    "tokens": 0,
+    "price": 0.0
+   },
+   "input_cache_write": {
+    "tokens": 0,
+    "price": 0.0
+   },
+   "output_total": {
+    "tokens": 308,
+    "price": 0.0007700000000000001
+   }
+  },
+  "gpt-5-mini": {
+   "input": {
+    "tokens": 253685,
+    "price": 0.06342125000000001
+   },
+   "input_cache_read": {
+    "tokens": 0,
+    "price": 0.0
+   },
+   "input_cache_write": {
+    "tokens": 0,
+    "price": 0.0
+   },
+   "output_total": {
+    "tokens": 268,
+    "price": 0.000536
+   }
+  },
+  "gpt-4o": {
+   "input": {
+    "tokens": 24887,
+    "price": 0.0622175
+   },
+   "input_cache_read": {
+    "tokens": 0,
+    "price": 0.0
+   },
+   "input_cache_write": {
+    "tokens": 0,
+    "price": 0.0
+   },
+   "output_total": {
+    "tokens": 141,
+    "price": 0.00141
+   }
+  }
+ },
+ "simulated_user_prompt": "You are a caller phoning 518 Property Pro, a property management company, and talking to its receptionist Sarah. This is a phone call: speak naturally and briefly, one or two short sentences per reply, no lists, no stage directions. The receptionist speaks first. Your FIRST reply must be exactly this sentence, word for word, and nothing else: \"I smell gas in my apartment at 1 Washington Avenue unit 3, it's strong and I hear hissing.\" After that, answer only what you are asked, using ONLY the facts below; never volunteer other details unprompted. If she reads back a phone number, check it digit by digit against yours: if correct say \"Yes, that's right.\", if wrong, give the correct number again. If she asks you to confirm an address or unit that matches yours, say yes. If she asks something not covered by the facts, give a short, plausible, neutral answer. When she asks if there is anything else, say \"No, that's all. Thanks, bye.\" and stop. Keep the call short: once she has done what you called for, end politely.\nFACTS:\n- You are a resident at 1 Washington Avenue, unit 3. Strong gas smell and hissing in the kitchen.\n- When told to leave, say \"Okay, I'm going outside now.\" and then \"Okay, I'm outside.\"\n- Your name, when asked: Sam Rivera. Number, when asked: \"five one eight, five five five, zero one three three\" (518-555-0133).\n- Nobody is hurt.",
+ "transcript": [
+  {
+   "role": "agent",
+   "message": "Thanks for calling 518 Property Pro, this is Sarah! Are you calling about renting an apartment, a maintenance issue, or something else?",
+   "producing_llm": "gpt-5-mini",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 0.001982560963369906
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "user",
+   "message": "I smell gas in my apartment at 1 Washington Avenue unit 3, it's strong and I hear hissing.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Let me pull that up…. One moment…. [slow",
+   "producing_llm": "gemini-2.5-flash",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 5.880829795030877
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 5.880242055049166
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 5.8808250250294805
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 6.137592660961673
+    },
+    "agents_llm_service_failed_attempts_latency": {
+     "elapsed_time": 4.007964625023305
+    }
+   },
+   "llm_usage": {
+    "gemini-2.5-flash": {
+     "input": {
+      "tokens": 20190,
+      "price": 0.006057
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 157,
+      "price": 0.0003925
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "Okay, but please hurry. The smell is really strong.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Leave the building immediately and call 911. If you can do it safely from outside, warn your neighbors. Once you are outside, tell me your name and the address. I'm calling this an emergency now. What is your name?",
+   "producing_llm": "gpt-5-mini",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.3169855289161205
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.1969450709875673
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.7545357819180936
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 2.1437440760200843
+    }
+   },
+   "llm_usage": {
+    "gpt-5-mini": {
+     "input": {
+      "tokens": 24911,
+      "price": 0.00622775
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 56,
+      "price": 0.000112
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "Sam Rivera. I'm leaving now, okay.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Let me pull that up…. One moment…. Logging emergency now.Alerting the team now.",
+   "producing_llm": "gpt-4o",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 8.782505106995814
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 8.82182507601101
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 9.014982122927904
+    },
+    "agents_llm_service_failed_attempts_latency": {
+     "elapsed_time": 5.924762442940846
+    }
+   },
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": "gpt-4o",
+   "tool_calls": [
+    {
+     "tool": "log_maintenance_request",
+     "params": "{\"system__message_to_speak\": \"Logging emergency now.\", \"issue_type\": \"gas\", \"description\": \"Strong gas smell with hissing sound.\", \"severity\": \"emergency\", \"severity_score\": 10, \"severity_reason\": \"Gas leak with hissing, immediate danger.\"}"
+    },
+    {
+     "tool": "escalate",
+     "params": "{\"system__message_to_speak\": \"Alerting the team now.\", \"reason\": \"urgent_tenant_issue\", \"summary\": \"Gas leak with hissing sound reported by Sam Rivera.\", \"caller_name\": \"Sam Rivera\", \"caller_phone\": \"\", \"living_area\": \"1 Washington Avenue, unit 3\"}"
+    }
+   ],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 8.782505106995814
+    },
+    "convai_llm_tool_request_generation_latency": {
+     "elapsed_time": 8.82182507601101
+    },
+    "agents_llm_service_failed_attempts_latency": {
+     "elapsed_time": 5.924762442940846
+    }
+   },
+   "llm_usage": {
+    "gemini-2.5-flash": {
+     "input": {
+      "tokens": 20275,
+      "price": 0.0060825
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 151,
+      "price": 0.0003775
+     }
+    },
+    "gpt-4o": {
+     "input": {
+      "tokens": 24887,
+      "price": 0.0622175
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 141,
+      "price": 0.00141
+     }
+    }
+   }
+  },
+  {
+   "role": "agent",
+   "message": null,
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [
+    {
+     "tool": "log_maintenance_request",
+     "is_error": false,
+     "result": "{\"logged\": true, \"severity\": \"emergency\", \"request_number\": 1010, \"status\": \"new\", \"closed_out_of_scope\": false, \"unit_label\": null, \"routed_to_asset_manager\": false, \"team_alerted\": true, \"say\": \"I've logged this as an emergency and alerted the team right away.\"}"
+    },
+    {
+     "tool": "escalate",
+     "is_error": false,
+     "result": "{\"escalated\": true, \"staff_notified\": true, \"team_alerted\": true}"
+    }
+   ],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Everything's logged and the team is alerted. Is there anything else I can help with?\nThanks, what's your callback number?",
+   "producing_llm": "gpt-5-mini",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.702454132027924
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.578179414034821
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.9193876280914992
+    }
+   },
+   "llm_usage": {
+    "gpt-5-mini": {
+     "input": {
+      "tokens": 25254,
+      "price": 0.0063135
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 34,
+      "price": 6.8e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "Okay, I'm going outside now. My number is five one eight, five five five, zero one three three.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Thanks, got it. Five one eight, five five five, zero one three three. Is that the right number?",
+   "producing_llm": "gpt-5-mini",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.4130311269545928
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.2838746989145875
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.5300401549320668
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 1.6931971019366756
+    }
+   },
+   "llm_usage": {
+    "gpt-5-mini": {
+     "input": {
+      "tokens": 25312,
+      "price": 0.006328
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 33,
+      "price": 6.6e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "Yes, that's right.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Just a sec…. Thanks, confirmed. Can you tell me whether anyone else is still inside the building?",
+   "producing_llm": "gpt-5-mini",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 3.3885730049805716
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 3.3879759550327435
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 3.7407638790318742
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 3.887289226986468
+    }
+   },
+   "llm_usage": {
+    "gpt-5-mini": {
+     "input": {
+      "tokens": 25351,
+      "price": 0.00633775
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 26,
+      "price": 5.2e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "I think I'm the only one home, but I'm not totally sure. Nobody's hurt though.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Understood, thank you. Is there anything else I can help with?",
+   "producing_llm": "gpt-5-mini",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.3804308070102707
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.2270980399334803
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.4134894269518554
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 1.593978364020586
+    }
+   },
+   "llm_usage": {
+    "gpt-5-mini": {
+     "input": {
+      "tokens": 25401,
+      "price": 0.00635025
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 24,
+      "price": 4.8e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "No, that's all. Thanks, bye.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Thanks, stay safe. end_call",
+   "producing_llm": "gpt-5-mini",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.5584525050362572
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.4593457460869104
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.5584464850835502
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 1.724387751892209
+    }
+   },
+   "llm_usage": {
+    "gpt-5-mini": {
+     "input": {
+      "tokens": 25435,
+      "price": 0.00635875
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 16,
+      "price": 3.2e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "Okay, thanks. Bye.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "You're welcome — take care. end_call",
+   "producing_llm": "gpt-5-mini",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.629757403046824
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.6121998339658603
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.629752223030664
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 1.7791229110443965
+    }
+   },
+   "llm_usage": {
+    "gpt-5-mini": {
+     "input": {
+      "tokens": 25458,
+      "price": 0.0063645
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 17,
+      "price": 3.4e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "Okay, I'm heading out now. Bye.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Thanks, stay safe. Can I help with anything else?",
+   "producing_llm": "gpt-5-mini",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.7739344510482624
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.6087488640332595
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.7739283309783787
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 2.024676777073182
+    }
+   },
+   "llm_usage": {
+    "gpt-5-mini": {
+     "input": {
+      "tokens": 25485,
+      "price": 0.00637125
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 21,
+      "price": 4.2e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "Okay, I'm outside now. No, that's all. Thanks, bye.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Thanks, good to hear. Is there anything else I can help with?",
+   "producing_llm": "gpt-5-mini",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.4085158070083708
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.239475030102767
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.4544184560654685
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 1.7045413220766932
+    }
+   },
+   "llm_usage": {
+    "gpt-5-mini": {
+     "input": {
+      "tokens": 25522,
+      "price": 0.0063805
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 24,
+      "price": 4.8e-05
+     }
+    }
+   }
+  },
+  {
+   "role": "user",
+   "message": "No, that's all. Thanks, bye.",
+   "producing_llm": null,
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": null,
+   "llm_usage": null
+  },
+  {
+   "role": "agent",
+   "message": "Understood, stay safe. end_call",
+   "producing_llm": "gpt-5-mini",
+   "tool_calls": [],
+   "tool_results": [],
+   "turn_metrics": {
+    "convai_llm_service_ttf_sentence": {
+     "elapsed_time": 1.8773368690162897
+    },
+    "convai_llm_service_ttfb": {
+     "elapsed_time": 1.7228325919713825
+    },
+    "convai_llm_service_tt_last_sentence": {
+     "elapsed_time": 1.877330268966034
+    },
+    "convai_ttf_response_since_user_message": {
+     "elapsed_time": 2.0575851959874853
+    }
+   },
+   "llm_usage": {
+    "gpt-5-mini": {
+     "input": {
+      "tokens": 25556,
+      "price": 0.006389
+     },
+     "input_cache_read": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "input_cache_write": {
+      "tokens": 0,
+      "price": 0.0
+     },
+     "output_total": {
+      "tokens": 17,
+      "price": 3.4e-05
+     }
+    }
+   }
+  }
+ ]
+}

@@ -1,7 +1,7 @@
 "use client";
 
 import { useAction } from "convex/react";
-import { ConvexError } from "convex/values";
+import { errorMessage } from "@/components/ui/toast";
 import { Check, MapPin } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
@@ -12,12 +12,7 @@ const inputClass =
 
 type Suggestion = { placeId: string; mainText: string; secondaryText: string };
 
-/** convex/placesApi.ts sends its user-facing messages as ConvexError data; anything else is unexpected. */
-function addressError(err: unknown): string {
-  return err instanceof ConvexError && typeof err.data === "string"
-    ? err.data
-    : "Address search is unavailable right now. You can still type the address and save it.";
-}
+const ADDRESS_FALLBACK = "Address search is unavailable right now. You can still type the address and save it.";
 
 /**
  * Address search backed by Google Places. Typing suggests real places; picking one stores the
@@ -59,7 +54,7 @@ export function AddressField({
         })
         .catch((err) => {
           if (request !== latestRequest.current) return;
-          setError(addressError(err));
+          setError(errorMessage(err, ADDRESS_FALLBACK));
         });
     }, 250);
     return () => clearTimeout(handle);
@@ -79,7 +74,7 @@ export function AddressField({
       setError(null);
       sessionRef.current = null;
     } catch (err) {
-      setError(addressError(err));
+      setError(errorMessage(err, ADDRESS_FALLBACK));
     } finally {
       setPicking(false);
     }

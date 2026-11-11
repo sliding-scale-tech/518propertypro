@@ -31,8 +31,6 @@ export function priorityOf(sev: Severity): "emergency" | "urgent" | "routine" {
   return sev === "informational" ? "routine" : sev;
 }
 
-export const WINDOW_PRESETS = ["Today, 1-3 PM", "Today, 3-5 PM", "Tomorrow, 9-11 AM", "Tomorrow, 1-3 PM"];
-
 export function mrId(n: number): string {
   return `MR-${n}`;
 }

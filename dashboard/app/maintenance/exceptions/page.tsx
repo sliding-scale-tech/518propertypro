@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import { Dropdown } from "@/components/ui/dropdown";
 import { RequireView } from "@/components/require-view";
 import { PageHeader } from "@/components/ui";
@@ -16,7 +16,6 @@ import {
   UnitPickerDialog,
   btnOutline,
   btnPrimary,
-  cleanError,
   inputClass,
   mrNumber,
   timeAgo,
@@ -79,7 +78,7 @@ function FallbackDialog({
                 toast("Fallback approved.", "success");
                 onClose();
               } catch (e) {
-                toast(cleanError(e), "error");
+                toast(errorMessage(e), "error");
                 setBusy(false);
               }
             }}
@@ -185,7 +184,7 @@ function Exceptions() {
               await resolve({ requestId: resolving, unitId });
               toast("Resolved and re-routed.", "success");
             } catch (e) {
-              toast(cleanError(e), "error");
+              toast(errorMessage(e), "error");
               throw e;
             }
           }}

@@ -1,0 +1,700 @@
+[
+ {
+  "model": "claude-haiku-5-5",
+  "scenario": "S1",
+  "file": "claude-haiku-5-5__S1__152601.json",
+  "checks": {
+   "no_reask": false,
+   "no_premature_log": true,
+   "tool_order": true,
+   "phone_readback": null,
+   "emergency_first": null,
+   "only_returned_units": null,
+   "one_question": true,
+   "max_25_words": false,
+   "no_hallucination": true,
+   "no_meta_speech": true,
+   "ended_properly": true
+  },
+  "notes": [
+   "re-asked leak_location: \"Where exactly is the leak?\"",
+   "35 words: \"Sorry about that. I can't promise a time, but your asset manager will review the request and follow \"",
+   "41 words: \"Thanks, Tom. Thanks, Tom. I've noted weekday afternoons as your preferred access time. Your request \""
+  ],
+  "extra": {
+   "generations": 18,
+   "backup_generations": 8,
+   "backup_models": [
+    "gemini-2.5-flash",
+    "gpt-4o"
+   ],
+   "fillers": 15,
+   "truncated_replies": [
+    " Just a sec…. Thanks, Tom. What floor do",
+    "Let me pull that up…. Thanks, Tom. Is",
+    " can't promise a time, but the asset man"
+   ],
+   "mock_mismatch": []
+  },
+  "latency": {
+   "ttfb": [
+    1.5995759349316359,
+    1.5995759349316359,
+    0.49367804266512394,
+    0.5084796827286482,
+    0.6753604263067245,
+    2.5808551209047437,
+    7.138119514100254,
+    2.192833953537047,
+    2.192833953537047,
+    2.9150810595601797,
+    4.330377770587802,
+    1.9235768439248204,
+    4.618469869717956,
+    4.618469869717956,
+    4.6863185884431005,
+    2.517177582718432,
+    1.8817321360111237,
+    0.6433845283463597,
+    0.6433845283463597,
+    0.6002600602805614,
+    0.6023463699966669,
+    0.6023463699966669
+   ],
+   "ttfb_primary": [
+    1.5995759349316359,
+    1.5995759349316359,
+    0.49367804266512394,
+    0.5084796827286482,
+    0.6753604263067245,
+    2.9150810595601797,
+    2.517177582718432,
+    1.8817321360111237,
+    0.6002600602805614,
+    0.6023463699966669,
+    0.6023463699966669
+   ],
+   "since_user": [
+    1.778093389235437,
+    0.8712894702330232,
+    5.008337127044797,
+    7.521422880701721,
+    3.918861215002835,
+    4.479411414824426,
+    3.7052286230027676,
+    7.481401002034545,
+    5.046946895308793,
+    2.7176226563751698,
+    2.117729786783457,
+    5.424129953607917,
+    1.0648617232218385
+   ]
+  },
+  "credits": 1625,
+  "llm_usd_by_model": {
+   "claude-haiku-5-5": 0.10237,
+   "gemini-2.5-flash": 0.04689,
+   "gpt-4o": 0.13104
+  },
+  "llm_usd_total": 0.2803,
+  "platform_credits": 225,
+  "est_minutes": 3.77,
+  "judge": "failure",
+  "status": "failed"
+ },
+ {
+  "model": "claude-haiku-5-5",
+  "scenario": "S4",
+  "file": "claude-haiku-5-5__S4__153352.json",
+  "checks": {
+   "no_reask": true,
+   "no_premature_log": true,
+   "tool_order": true,
+   "phone_readback": null,
+   "emergency_first": null,
+   "only_returned_units": null,
+   "one_question": true,
+   "max_25_words": true,
+   "no_hallucination": true,
+   "no_meta_speech": false,
+   "ended_properly": true
+  },
+  "notes": [
+   "spoke internal text: \"One moment, let me look that up. Mary has given her name, address, and unit already, so I'll check t\""
+  ],
+  "extra": {
+   "generations": 9,
+   "backup_generations": 4,
+   "backup_models": [
+    "gemini-2.5-flash",
+    "gpt-4o"
+   ],
+   "fillers": 5,
+   "truncated_replies": [
+    " request is still waiting for your asset"
+   ],
+   "mock_mismatch": []
+  },
+  "latency": {
+   "ttfb": [
+    1.6674078620271757,
+    1.6674078620271757,
+    0.5591845229500905,
+    0.49730667006224394,
+    2.019853848963976,
+    2.019853848963976,
+    4.216946350992657,
+    4.216946350992657,
+    4.755584159982391,
+    4.650930627016351,
+    0.5242731029866263,
+    0.5242731029866263
+   ],
+   "ttfb_primary": [
+    1.6674078620271757,
+    1.6674078620271757,
+    0.5591845229500905,
+    0.49730667006224394,
+    0.5242731029866263,
+    0.5242731029866263
+   ],
+   "since_user": [
+    1.8657073890790343,
+    3.988059782073833,
+    6.7484387459699064,
+    5.055538111017086,
+    4.9451770699815825,
+    1.0305334689328447
+   ]
+  },
+  "credits": 841,
+  "llm_usd_by_model": {
+   "claude-haiku-5-5": 0.05617,
+   "gemini-2.5-flash": 0.02436,
+   "gpt-4o": 0.06435
+  },
+  "llm_usd_total": 0.14488,
+  "platform_credits": 120,
+  "est_minutes": 1.84,
+  "judge": "success",
+  "status": "passed"
+ },
+ {
+  "model": "claude-haiku-5-5",
+  "scenario": "S6",
+  "file": "claude-haiku-5-5__S6__153136.json",
+  "checks": {
+   "no_reask": true,
+   "no_premature_log": false,
+   "tool_order": false,
+   "phone_readback": false,
+   "emergency_first": true,
+   "only_returned_units": null,
+   "one_question": null,
+   "max_25_words": false,
+   "no_hallucination": true,
+   "no_meta_speech": true,
+   "ended_properly": true
+  },
+  "notes": [
+   "claimed before a logged:true result: \"I'm logging\" in \"Okay, I'm logging that. What is your name?\"",
+   "emergency log delayed until after asking the caller a question",
+   "callback number never asked for",
+   "40 words: \" I'm sorry, Sam, you're right to be frustrated.  Please stay outside and keep well away from the bui\"",
+   "32 words: \"Please call 911 yourself right now, Sam. I can't dispatch anyone. The team has been alerted, and thi\""
+  ],
+  "extra": {
+   "generations": 7,
+   "backup_generations": 3,
+   "backup_models": [
+    "gemini-2.5-flash",
+    "gpt-4o"
+   ],
+   "fillers": 5,
+   "truncated_replies": [],
+   "mock_mismatch": []
+  },
+  "latency": {
+   "ttfb": [
+    4.842605925165117,
+    4.31729637645185,
+    2.5443454636260867,
+    2.5443454636260867,
+    0.5809995653107762,
+    0.6444451343268156,
+    0.5653617456555367,
+    0.5653617456555367
+   ],
+   "ttfb_primary": [
+    0.5809995653107762,
+    0.6444451343268156,
+    0.5653617456555367,
+    0.5653617456555367
+   ],
+   "since_user": [
+    5.068145727738738,
+    4.516706502996385,
+    7.181433964520693,
+    1.164149439893663,
+    1.1712397802621126,
+    1.5958094783127308
+   ]
+  },
+  "credits": 733,
+  "llm_usd_by_model": {
+   "claude-haiku-5-5": 0.03971,
+   "gemini-2.5-flash": 0.01925,
+   "gpt-4o": 0.0638
+  },
+  "llm_usd_total": 0.12276,
+  "platform_credits": 120,
+  "est_minutes": 1.92,
+  "judge": "success",
+  "status": "passed"
+ },
+ {
+  "model": "gemini-3-flash-preview",
+  "scenario": "S1",
+  "file": "gemini-3-flash-preview__S1__152837.json",
+  "checks": {
+   "no_reask": true,
+   "no_premature_log": true,
+   "tool_order": true,
+   "phone_readback": null,
+   "emergency_first": null,
+   "only_returned_units": null,
+   "one_question": true,
+   "max_25_words": true,
+   "no_hallucination": true,
+   "no_meta_speech": true,
+   "ended_properly": true
+  },
+  "notes": [],
+  "extra": {
+   "generations": 13,
+   "backup_generations": 0,
+   "backup_models": [],
+   "fillers": 0,
+   "truncated_replies": [],
+   "mock_mismatch": []
+  },
+  "latency": {
+   "ttfb": [
+    0.9981965972110629,
+    0.9981965972110629,
+    1.5240681199356914,
+    0.9520637476816773,
+    2.091726022772491,
+    2.091726022772491,
+    1.7771886568516493,
+    1.3415098125115037,
+    2.199096281081438,
+    2.0476250629872084,
+    1.600859709084034,
+    2.145319771952927,
+    1.322165402583778,
+    1.322165402583778,
+    1.5742421299219131,
+    2.2847174406051636,
+    2.2847174406051636
+   ],
+   "ttfb_primary": [
+    0.9981965972110629,
+    0.9981965972110629,
+    1.5240681199356914,
+    0.9520637476816773,
+    2.091726022772491,
+    2.091726022772491,
+    1.7771886568516493,
+    1.3415098125115037,
+    2.199096281081438,
+    2.0476250629872084,
+    1.600859709084034,
+    2.145319771952927,
+    1.322165402583778,
+    1.322165402583778,
+    1.5742421299219131,
+    2.2847174406051636,
+    2.2847174406051636
+   ],
+   "since_user": [
+    1.1951724234968424,
+    1.1724979635328054,
+    2.2938915006816387,
+    1.5491313990205526,
+    2.545294406823814,
+    2.414647137746215,
+    2.1597446519881487,
+    2.4497976480051875,
+    1.531847519800067,
+    2.954014901071787
+   ]
+  },
+  "credits": 1063,
+  "llm_usd_by_model": {
+   "claude-haiku-5-5": 0.00287,
+   "gemini-3-flash-preview": 0.17375
+  },
+  "llm_usd_total": 0.17663,
+  "platform_credits": 180,
+  "est_minutes": 1.98,
+  "judge": "failure",
+  "status": "failed"
+ },
+ {
+  "model": "gemini-3-flash-preview",
+  "scenario": "S4",
+  "file": "gemini-3-flash-preview__S4__153304.json",
+  "checks": {
+   "no_reask": true,
+   "no_premature_log": true,
+   "tool_order": true,
+   "phone_readback": null,
+   "emergency_first": null,
+   "only_returned_units": null,
+   "one_question": true,
+   "max_25_words": true,
+   "no_hallucination": true,
+   "no_meta_speech": true,
+   "ended_properly": true
+  },
+  "notes": [],
+  "extra": {
+   "generations": 6,
+   "backup_generations": 0,
+   "backup_models": [],
+   "fillers": 0,
+   "truncated_replies": [],
+   "mock_mismatch": []
+  },
+  "latency": {
+   "ttfb": [
+    2.42500458995346,
+    2.42500458995346,
+    0.9141685400390998,
+    1.317964965943247,
+    1.317964965943247,
+    1.5531097579514608,
+    1.9917798939859495,
+    1.142025301931426,
+    1.142025301931426
+   ],
+   "ttfb_primary": [
+    2.42500458995346,
+    2.42500458995346,
+    0.9141685400390998,
+    1.317964965943247,
+    1.317964965943247,
+    1.5531097579514608,
+    1.9917798939859495,
+    1.142025301931426,
+    1.142025301931426
+   ],
+   "since_user": [
+    2.5868783950572833,
+    1.589985657017678,
+    1.399071293999441
+   ]
+  },
+  "credits": 467,
+  "llm_usd_by_model": {
+   "claude-haiku-5-5": 0.00169,
+   "gemini-3-flash-preview": 0.07684
+  },
+  "llm_usd_total": 0.07853,
+  "platform_credits": 75,
+  "est_minutes": 0.82,
+  "judge": "success",
+  "status": "passed"
+ },
+ {
+  "model": "gemini-3-flash-preview",
+  "scenario": "S6",
+  "file": "gemini-3-flash-preview__S6__153059.json",
+  "checks": {
+   "no_reask": true,
+   "no_premature_log": true,
+   "tool_order": true,
+   "phone_readback": false,
+   "emergency_first": true,
+   "only_returned_units": null,
+   "one_question": null,
+   "max_25_words": false,
+   "no_hallucination": false,
+   "no_meta_speech": true,
+   "ended_properly": false
+  },
+  "notes": [
+   "callback number never asked for",
+   "34 words: \"    May I have your name and the best number to reach you on?  The team has been alerted. Please sta\"",
+   "placeholder value passed to escalate.caller_name: 'unknown'",
+   "placeholder value passed to escalate.caller_phone: 'unknown'",
+   "ended the call without waiting for the answer to: \"May I have your name and the best number to reach you on?\""
+  ],
+  "extra": {
+   "generations": 3,
+   "backup_generations": 0,
+   "backup_models": [],
+   "fillers": 0,
+   "truncated_replies": [],
+   "mock_mismatch": []
+  },
+  "latency": {
+   "ttfb": [
+    1.2489576120860875,
+    1.2489576120860875,
+    1.1848690330516547,
+    1.0276905939681455
+   ],
+   "ttfb_primary": [
+    1.2489576120860875,
+    1.2489576120860875,
+    1.1848690330516547,
+    1.0276905939681455
+   ],
+   "since_user": [
+    1.961716877995059
+   ]
+  },
+  "credits": 251,
+  "llm_usd_by_model": {
+   "claude-haiku-5-5": 0.00084,
+   "gemini-3-flash-preview": 0.04044
+  },
+  "llm_usd_total": 0.04128,
+  "platform_credits": 45,
+  "est_minutes": 0.82,
+  "judge": "success",
+  "status": "passed"
+ },
+ {
+  "model": "gpt-5-mini",
+  "scenario": "S1",
+  "file": "gpt-5-mini__S1__152923.json",
+  "checks": {
+   "no_reask": false,
+   "no_premature_log": false,
+   "tool_order": false,
+   "phone_readback": null,
+   "emergency_first": null,
+   "only_returned_units": null,
+   "one_question": true,
+   "max_25_words": true,
+   "no_hallucination": true,
+   "no_meta_speech": true,
+   "ended_properly": false
+  },
+  "notes": [
+   "re-asked first_noticed: \"When did you first notice or report the issue?\"",
+   "claimed before a logged:true result: \"I'm logging\" in \"Thanks, Tom, got that. I'm logging the request now. Is there anything else I can help with\"",
+   "log_maintenance_request never called",
+   "end_call never called"
+  ],
+  "extra": {
+   "generations": 8,
+   "backup_generations": 0,
+   "backup_models": [],
+   "fillers": 0,
+   "truncated_replies": [],
+   "mock_mismatch": []
+  },
+  "latency": {
+   "ttfb": [
+    1.0581620140001178,
+    1.0581620140001178,
+    0.863713514059782,
+    1.0280273333191872,
+    0.9036665847525001,
+    0.933142613619566,
+    0.9508692342787981,
+    1.0663237934932113,
+    0.923010234721005
+   ],
+   "ttfb_primary": [
+    1.0581620140001178,
+    1.0581620140001178,
+    0.863713514059782,
+    1.0280273333191872,
+    0.9036665847525001,
+    0.933142613619566,
+    0.9508692342787981,
+    1.0663237934932113,
+    0.923010234721005
+   ],
+   "since_user": [
+    1.3971767025068402,
+    1.5113754700869322,
+    1.1884237928315997,
+    1.3402663227170706,
+    1.3431184515357018,
+    1.3956041326746345,
+    1.1202568523585796
+   ]
+  },
+  "credits": 396,
+  "llm_usd_by_model": {
+   "claude-haiku-5-5": 0.00187,
+   "gpt-5-mini": 0.05058
+  },
+  "llm_usd_total": 0.05245,
+  "platform_credits": 135,
+  "est_minutes": 1.19,
+  "judge": "failure",
+  "status": "failed"
+ },
+ {
+  "model": "gpt-5-mini",
+  "scenario": "S4",
+  "file": "gpt-5-mini__S4__153237.json",
+  "checks": {
+   "no_reask": true,
+   "no_premature_log": true,
+   "tool_order": false,
+   "phone_readback": null,
+   "emergency_first": null,
+   "only_returned_units": null,
+   "one_question": true,
+   "max_25_words": true,
+   "no_hallucination": true,
+   "no_meta_speech": true,
+   "ended_properly": true
+  },
+  "notes": [
+   "check_work_order_status without an exact find_unit match first",
+   "log_tenant_issue (call_type work_order_status) never called"
+  ],
+  "extra": {
+   "generations": 3,
+   "backup_generations": 3,
+   "backup_models": [
+    "gemini-2.5-flash",
+    "gpt-4o"
+   ],
+   "fillers": 4,
+   "truncated_replies": [],
+   "mock_mismatch": []
+  },
+  "latency": {
+   "ttfb": [
+    5.5205196887254715,
+    5.5205196887254715,
+    4.999898444861174,
+    5.396323489956558,
+    5.396323489956558
+   ],
+   "ttfb_primary": [],
+   "since_user": [
+    7.852402218617499,
+    5.553328429348767
+   ]
+  },
+  "credits": 456,
+  "llm_usd_by_model": {
+   "claude-haiku-5-5": 0.0011,
+   "gemini-2.5-flash": 0.0157,
+   "gpt-4o": 0.06253
+  },
+  "llm_usd_total": 0.07934,
+  "platform_credits": 60,
+  "est_minutes": 0.92,
+  "judge": "success",
+  "status": "passed"
+ },
+ {
+  "model": "gpt-5-mini",
+  "scenario": "S6",
+  "file": "gpt-5-mini__S6__153042.json",
+  "checks": {
+   "no_reask": true,
+   "no_premature_log": true,
+   "tool_order": false,
+   "phone_readback": true,
+   "emergency_first": false,
+   "only_returned_units": null,
+   "one_question": null,
+   "max_25_words": false,
+   "no_hallucination": true,
+   "no_meta_speech": false,
+   "ended_properly": false
+  },
+  "notes": [
+   "emergency log delayed until after asking the caller a question",
+   "first reply to the gas report was: \"[slow\"",
+   "27 words: \"Logging emergency now.Alerting the team now. Everything's logged and the team is alerted. Is there a\"",
+   "spoke internal text: \"Thanks, stay safe. end_call\"",
+   "spoke internal text: \"You're welcome — take care. end_call\"",
+   "spoke internal text: \"Understood, stay safe. end_call\"",
+   "end_call never called"
+  ],
+  "extra": {
+   "generations": 12,
+   "backup_generations": 2,
+   "backup_models": [
+    "gemini-2.5-flash",
+    "gpt-4o"
+   ],
+   "fillers": 5,
+   "truncated_replies": [
+    "Let me pull that up…. One moment…. [slow",
+    "Thanks, stay safe. end_call",
+    "You're welcome — take care. end_call",
+    "Understood, stay safe. end_call"
+   ],
+   "mock_mismatch": []
+  },
+  "latency": {
+   "ttfb": [
+    5.880242055049166,
+    1.1969450709875673,
+    8.782505106995814,
+    8.782505106995814,
+    1.578179414034821,
+    1.2838746989145875,
+    3.3879759550327435,
+    1.2270980399334803,
+    1.4593457460869104,
+    1.6121998339658603,
+    1.6087488640332595,
+    1.239475030102767,
+    1.7228325919713825
+   ],
+   "ttfb_primary": [
+    1.1969450709875673,
+    1.578179414034821,
+    1.2838746989145875,
+    3.3879759550327435,
+    1.2270980399334803,
+    1.4593457460869104,
+    1.6121998339658603,
+    1.6087488640332595,
+    1.239475030102767,
+    1.7228325919713825
+   ],
+   "since_user": [
+    6.137592660961673,
+    2.1437440760200843,
+    9.014982122927904,
+    1.6931971019366756,
+    3.887289226986468,
+    1.593978364020586,
+    1.724387751892209,
+    1.7791229110443965,
+    2.024676777073182,
+    1.7045413220766932,
+    2.0575851959874853
+   ]
+  },
+  "credits": 915,
+  "llm_usd_by_model": {
+   "claude-haiku-5-5": 0.00373,
+   "gemini-2.5-flash": 0.01291,
+   "gpt-5-mini": 0.06396,
+   "gpt-4o": 0.06363
+  },
+  "llm_usd_total": 0.14422,
+  "platform_credits": 195,
+  "est_minutes": 2.43,
+  "judge": "failure",
+  "status": "failed"
+ }
+]

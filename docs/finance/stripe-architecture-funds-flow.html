@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Rent Payment Architecture</title>
+<style>
+  :root {
+    --money: #15803d;
+    --money-dark: #14532d;
+    --money-tint: #f0faf3;
+    --data: #2563eb;
+    --data-dark: #1e3a8a;
+    --data-tint: #f3f7ff;
+    --ink: #0f172a;
+    --ink-2: #334155;
+    --ink-3: #64748b;
+    --line: #cbd5e1;
+    --planned: #94a3b8;
+    --planned-tint: #f8fafc;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: #ffffff; }
+  body {
+    width: 1720px; height: 1400px; position: relative; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: var(--ink); -webkit-font-smoothing: antialiased;
+  }
+  .abs { position: absolute; }
+  svg.wires { position: absolute; left: 0; top: 0; width: 1720px; height: 1400px; overflow: visible; }
+
+  /* Title */
+  .title { left: 50px; top: 34px; font-size: 30px; font-weight: 700; letter-spacing: -0.3px; }
+  .subtitle { left: 50px; top: 80px; font-size: 16px; color: var(--ink-3); }
+
+  /* Legend */
+  .legend { left: 1180px; top: 26px; width: 500px; border: 1px solid var(--line); border-radius: 12px; padding: 10px 16px; background: #fff; }
+  .legend .row { display: flex; align-items: center; height: 26px; font-size: 14px; color: var(--ink-2); }
+  .legend .row b { color: var(--ink); margin-right: 6px; }
+  .legend svg { width: 64px; height: 20px; margin-right: 12px; flex: none; }
+  .legend .pbox { width: 64px; height: 20px; margin-right: 12px; flex: none; border: 1.5px dashed var(--planned); border-radius: 5px; background: var(--planned-tint); font-size: 9.5px; font-weight: 700; color: var(--ink-3); display: flex; align-items: center; justify-content: center; letter-spacing: 0.6px; }
+
+  /* Boxes */
+  .box { border-radius: 16px; border: 1.5px solid var(--line); background: #fff; }
+  .box h3 { font-size: 20px; font-weight: 700; color: var(--ink); line-height: 1.2; }
+  .box p { font-size: 14px; color: var(--ink-2); line-height: 1.4; }
+  .kicker { font-size: 12px; font-weight: 700; letter-spacing: 0.9px; text-transform: uppercase; color: var(--ink-3); margin-bottom: 4px; }
+
+  .simplr { left: 440px; top: 140px; width: 1200px; height: 150px; background: var(--data-tint); border-color: #bfd0f5; padding: 16px 20px; }
+  .simplr .head { display: flex; align-items: center; gap: 14px; }
+  .pill { font-size: 13px; font-weight: 600; padding: 4px 12px; border-radius: 999px; white-space: nowrap; }
+  .pill.data { background: #dbe6fd; color: var(--data-dark); }
+  .chips { position: absolute; left: 20px; top: 70px; display: flex; gap: 14px; }
+  .chip { width: 220px; height: 60px; border-radius: 10px; background: #fff; border: 1px solid #c9d7f4; padding: 8px 12px; font-size: 14px; font-weight: 600; color: var(--ink); line-height: 1.3; display: flex; flex-direction: column; justify-content: center; }
+  .chip span { font-weight: 400; color: var(--ink-3); font-size: 13.5px; }
+  .chip.later { border-style: dashed; border-color: var(--planned); background: var(--planned-tint); }
+
+  .tenant { left: 50px; top: 430px; width: 210px; height: 140px; padding: 18px; display: flex; flex-direction: column; justify-content: center; text-align: center; background: #fff; }
+
+  .stripe { left: 440px; top: 380px; width: 420px; height: 200px; padding: 16px 20px; background: #fff; }
+  .stripe .chips2 { position: absolute; left: 20px; top: 128px; display: flex; gap: 20px; }
+  .stripe .chip { width: 180px; height: 50px; border-color: var(--line); background: #f8fafc; text-align: center; align-items: center; }
+
+  .bank { left: 1010px; top: 440px; width: 240px; height: 120px; padding: 16px; background: var(--money-tint); border-color: #b9dfc6; display: flex; flex-direction: column; justify-content: center; text-align: center; }
+  .owners { left: 1410px; top: 440px; width: 190px; height: 120px; padding: 16px; background: var(--money-tint); border-color: #b9dfc6; display: flex; flex-direction: column; justify-content: center; text-align: center; }
+  .office { left: 440px; top: 810px; width: 420px; height: 120px; padding: 16px 20px; background: var(--money-tint); border-color: #b9dfc6; display: flex; flex-direction: column; justify-content: center; }
+
+  .planned { left: 440px; top: 620px; width: 420px; height: 92px; border: 1.5px dashed var(--planned); border-radius: 14px; background: var(--planned-tint); padding: 12px 16px 12px 16px; }
+  .planned .top { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .tag { font-size: 11.5px; font-weight: 700; letter-spacing: 0.8px; color: #fff; background: var(--planned); border-radius: 5px; padding: 2px 7px; }
+  .planned p { font-size: 14px; color: var(--ink-2); line-height: 1.35; }
+
+  /* Arrow labels */
+  .lbl { font-size: 14px; line-height: 1.32; }
+  .lbl.m { color: var(--money-dark); }
+  .lbl.d { color: var(--data-dark); }
+  .lbl b { font-weight: 700; }
+
+  /* Badges */
+  .badge { width: 26px; height: 26px; border-radius: 50%; color: #fff; font-size: 14px; font-weight: 700; display: flex; align-items: center; justify-content: center; border: 2.5px solid #fff; box-shadow: 0 0 0 1px rgba(15,23,42,0.08); }
+  .badge.m { background: var(--money); }
+  .badge.d { background: var(--data); }
+  .badge.p { background: var(--planned); }
+  .badge.inline { display: inline-flex; border: none; box-shadow: none; width: 24px; height: 24px; font-size: 13.5px; flex: none; }
+
+  /* Bottom panels */
+  .rule { left: 50px; top: 962px; width: 1630px; height: 1px; background: #e2e8f0; }
+  .panel-h { font-size: 13px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--ink-3); margin-bottom: 12px; }
+  .keylist { left: 50px; top: 986px; width: 1020px; }
+  .keylist .it { display: flex; gap: 12px; align-items: flex-start; font-size: 14px; line-height: 1.45; color: var(--ink-2); margin-bottom: 8px; }
+  .keylist .it .badge { margin-top: -1px; }
+  .keylist .it b { color: var(--ink); font-weight: 600; }
+  .facts { left: 1120px; top: 986px; width: 560px; border-radius: 14px; background: #f8fafc; border: 1px solid #e2e8f0; padding: 18px 22px 10px; }
+  .facts ul { list-style: none; }
+  .facts li { position: relative; padding-left: 18px; font-size: 14px; line-height: 1.45; color: var(--ink-2); margin-bottom: 10px; }
+  .facts li::before { content: ""; position: absolute; left: 2px; top: 8px; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-3); }
+  .facts li b { color: var(--ink); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<!-- ===== Arrows (drawn first, boxes sit on top) ===== -->
+<svg class="wires" viewBox="0 0 1720 1400" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="hm" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="4.2" markerHeight="4.2" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#15803d"/>
+    </marker>
+    <marker id="hd" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/>
+    </marker>
+  </defs>
+
+  <g fill="none" stroke="#2563eb" stroke-width="2.5" stroke-dasharray="8 6" stroke-linejoin="round" marker-end="url(#hd)">
+    <!-- 1 Simplr -> Tenant -->
+    <path d="M440,175 H120 V428"/>
+    <!-- 2 Tenant -> Simplr -->
+    <path d="M200,430 V268 H438"/>
+    <!-- 2 Simplr -> Stripe (create session) -->
+    <path d="M555,290 V378"/>
+    <!-- 4 Stripe -> Simplr -->
+    <path d="M790,380 V292"/>
+    <!-- 8 Office -> Simplr -->
+    <path d="M860,895 H1690 V215 H1642"/>
+  </g>
+
+  <g fill="none" stroke="#15803d" stroke-width="5" stroke-linejoin="round" marker-end="url(#hm)">
+    <!-- 3 Tenant -> Stripe Checkout -->
+    <path d="M260,535 H437"/>
+    <!-- 5 Stripe -> Bank -->
+    <path d="M860,500 H1007"/>
+    <!-- 6 Bank -> Owners -->
+    <path d="M1250,500 H1407"/>
+    <!-- 7 Tenant -> Office -->
+    <path d="M155,570 V870 H437"/>
+    <!-- 9 Office -> Bank -->
+    <path d="M860,840 H1130 V563"/>
+  </g>
+
+  <!-- Planned connector -->
+  <path d="M650,580 V620" fill="none" stroke="#94a3b8" stroke-width="2" stroke-dasharray="4 4"/>
+</svg>
+
+<!-- ===== Title + legend ===== -->
+<div class="abs title">518 Property Pro — Rent Payment Architecture &amp; Funds Flow</div>
+<div class="abs subtitle">Proposed v1 · Prepared by Simplr for Stripe technical review · November 2026</div>
+
+<div class="abs legend">
+  <div class="row">
+    <svg viewBox="0 0 64 20"><line x1="2" y1="10" x2="52" y2="10" stroke="#15803d" stroke-width="5"/><path d="M50,3 L62,10 L50,17 z" fill="#15803d"/></svg>
+    <b>Money</b>&nbsp;movement of funds
+  </div>
+  <div class="row">
+    <svg viewBox="0 0 64 20"><line x1="2" y1="10" x2="54" y2="10" stroke="#2563eb" stroke-width="2.5" stroke-dasharray="8 6"/><path d="M52,4.5 L62,10 L52,15.5 z" fill="#2563eb"/></svg>
+    <b>Data / notifications</b>&nbsp;no funds move
+  </div>
+  <div class="row">
+    <div class="pbox">PLANNED</div>
+    <b>Planned</b>&nbsp;being explored, not in launch scope
+  </div>
+</div>
+
+<!-- ===== Boxes ===== -->
+<div class="abs box simplr">
+  <div class="head">
+    <h3>Simplr platform</h3>
+    <span class="pill data">Software only · never holds or moves funds</span>
+  </div>
+  <div class="chips">
+    <div class="chip">Invoicing &amp; reminders</div>
+    <div class="chip">Webhook handler<span>signature-verified, idempotent</span></div>
+    <div class="chip">Tenant ledger &amp; receipts</div>
+    <div class="chip later">Owner statements<span>later phase</span></div>
+    <div class="chip">Accountant console<span>record cash / check</span></div>
+  </div>
+</div>
+
+<div class="abs box tenant">
+  <h3>Tenant</h3>
+  <p style="margin-top:6px">Pays rent each month</p>
+</div>
+
+<div class="abs box stripe">
+  <div class="kicker">Stripe</div>
+  <h3>Property Pro's own account</h3>
+  <p style="margin-top:6px">Property Pro owns it and keeps its login.<br>Simplr uses restricted API keys.</p>
+  <div class="chips2">
+    <div class="chip">Stripe-hosted Checkout</div>
+    <div class="chip">Webhooks</div>
+  </div>
+</div>
+
+<div class="abs planned">
+  <div class="top"><div class="badge p" style="width:24px;height:24px;font-size:12.5px;border:none;box-shadow:none">10</div><span class="tag">PLANNED</span></div>
+  <p>ACH bank payments with faster settlement (~2 business days): being explored</p>
+</div>
+
+<div class="abs box bank">
+  <h3>Property Pro bank account</h3>
+  <p style="margin-top:6px">Designated payout account</p>
+</div>
+
+<div class="abs box owners">
+  <h3>Property owners</h3>
+</div>
+
+<div class="abs box office">
+  <h3>Property Pro office / accountant</h3>
+  <p style="margin-top:6px">Takes cash and checks in person</p>
+</div>
+
+<!-- ===== Arrow badges + short labels ===== -->
+<!-- 1 -->
+<div class="abs badge d" style="left:267px; top:162px">1</div>
+<div class="abs lbl d" style="left:136px; top:190px; width:290px">Invoice email on the 1st (pay link)<br>Reminder on the 4th if unpaid</div>
+<!-- 2 -->
+<div class="abs badge d" style="left:307px; top:255px">2</div>
+<div class="abs lbl d" style="left:216px; top:284px; width:215px">Tenant opens pay link</div>
+<div class="abs badge d" style="left:542px; top:321px">2</div>
+<div class="abs lbl d" style="left:574px; top:306px; width:200px">Create Checkout<br>Session (server-side)</div>
+<!-- 4 -->
+<div class="abs badge d" style="left:777px; top:321px">4</div>
+<div class="abs lbl d" style="left:809px; top:306px; width:260px">Signed webhooks →<br>ledger updated, receipt issued</div>
+<!-- 3 -->
+<div class="abs badge m" style="left:336px; top:522px">3</div>
+<div class="abs lbl m" style="left:268px; top:474px; width:166px; text-align:center"><b>Rent by credit card</b></div>
+<div class="abs lbl m" style="left:268px; top:556px; width:166px; text-align:center">Debit / prepaid<br>declined</div>
+<!-- 5 -->
+<div class="abs badge m" style="left:922px; top:487px">5</div>
+<div class="abs lbl m" style="left:870px; top:458px; width:130px; text-align:center"><b>Payouts</b></div>
+<!-- 6 -->
+<div class="abs badge m" style="left:1317px; top:487px">6</div>
+<div class="abs lbl m" style="left:1256px; top:522px; width:148px; text-align:center">Monthly owner<br>statement</div>
+<!-- 7 -->
+<div class="abs badge m" style="left:142px; top:700px">7</div>
+<div class="abs lbl m" style="left:172px; top:820px; width:255px"><b>Cash or check in person</b><br>(always available)</div>
+<!-- 9 -->
+<div class="abs badge m" style="left:1117px; top:690px">9</div>
+<div class="abs lbl m" style="left:1150px; top:694px; width:120px"><b>Deposits</b></div>
+<!-- 8 -->
+<div class="abs badge d" style="left:1277px; top:882px">8</div>
+<div class="abs lbl d" style="left:1160px; top:852px; width:520px; text-align:center">Accountant records the payment → same ledger, receipt issued</div>
+
+<!-- ===== Bottom: numbered key + key facts ===== -->
+<div class="abs rule"></div>
+
+<div class="abs keylist">
+  <div class="panel-h">Flows</div>
+  <div class="it"><div class="badge d inline">1</div><div><b>Simplr → Tenant:</b> invoice email on the 1st (pay link, full balance) · reminder on the 4th if unpaid.</div></div>
+  <div class="it"><div class="badge d inline">2</div><div><b>Tenant → Simplr → Stripe:</b> tenant opens the link; Simplr creates a Checkout Session server-side on Property Pro's Stripe account.</div></div>
+  <div class="it"><div class="badge m inline">3</div><div><b>Tenant → Stripe-hosted Checkout:</b> rent paid by credit card. Debit/prepaid declined. Disclosed credit-card surcharge (pending counsel review). Card data never touches Simplr.</div></div>
+  <div class="it"><div class="badge d inline">4</div><div><b>Stripe → Simplr:</b> signature-verified webhooks (checkout.session.completed, refunds, disputes) → ledger updated, receipt issued. Success page shows “processing” only.</div></div>
+  <div class="it"><div class="badge m inline">5</div><div><b>Stripe → Property Pro bank account:</b> payouts.</div></div>
+  <div class="it"><div class="badge m inline">6</div><div><b>Property Pro bank account → Property owners:</b> monthly owner statement: rent collected less management fee &amp; expenses (existing process).</div></div>
+  <div class="it"><div class="badge m inline">7</div><div><b>Tenant → Property Pro office:</b> cash or check in person (always available).</div></div>
+  <div class="it"><div class="badge d inline">8</div><div><b>Property Pro office / accountant → Simplr:</b> accountant records the payment → same ledger, receipt issued.</div></div>
+  <div class="it"><div class="badge m inline">9</div><div><b>Property Pro office → Property Pro bank account:</b> deposits.</div></div>
+  <div class="it"><div class="badge p inline" style="font-size:12px">10</div><div><b>Planned:</b> ACH bank payments with faster settlement (~2 business days): being explored, not in launch scope.</div></div>
+</div>
+
+<div class="abs facts">
+  <div class="panel-h">Key facts</div>
+  <ul>
+    <li><b>Simplr never holds or moves funds.</b> There is no Stripe Connect or platform account.</li>
+    <li><b>Property Pro owns the Stripe account.</b> Simplr gets sandbox-only developer access until production review.</li>
+    <li><b>No autopay and no saved payment methods at launch.</b> Tenants make a new payment each month.</li>
+    <li><b>Rent only at launch.</b> Security deposits are handled outside Stripe.</li>
+    <li><b>Fees:</b> surcharge on credit cards only, subject to counsel review. No surcharge on debit or prepaid cards.</li>
+  </ul>
+</div>
+
+</body>
+</html>

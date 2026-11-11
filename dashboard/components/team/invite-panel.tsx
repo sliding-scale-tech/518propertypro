@@ -4,7 +4,7 @@ import { useAction, useQuery } from "convex/react";
 import { Mail, UserPlus } from "lucide-react";
 import { useState } from "react";
 import { api } from "@/convex/_generated/api";
-import { useToast } from "@/components/toast";
+import { errorMessage, useToast } from "@/components/toast";
 import { APP_ROLE_OPTIONS, E164 } from "@/components/team/member-details";
 import type { AppRole } from "@/convex/jobRoles";
 import { Btn, Card, CardHead, Field, Input, Select } from "@/components/ui";
@@ -44,7 +44,7 @@ export function InvitePanel() {
       setEmail("");
       setPhone("");
     } catch (err) {
-      toast(err instanceof Error ? err.message : "That didn't work.", "error");
+      toast(errorMessage(err, "That didn't work."), "error");
     } finally {
       setBusy(false);
     }
