@@ -11,6 +11,7 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { RequireView } from "@/components/require-view";
 import { errorMessage, useToast } from "@/components/toast";
 import { WorkOrderFormat, woStage } from "@/components/work-orders/format";
+import { BillingBlock, CloseBillForm } from "@/components/work-orders/close-bill-form";
 import type { WoPriority } from "@/components/work-orders/shared";
 import { TenantPreferredTime, WindowPicker, type WindowValue } from "@/components/work-orders/window-picker";
 import { tenantPreferredTimeText } from "@/convex/workOrderWindow";
@@ -167,10 +168,9 @@ function View({
 }) {
   const { workOrder: wo, viewerCan } = data;
   const toast = useToast();
-  const reviewClose = useMutation(api.workOrders.reviewClose);
   const addNote = useMutation(api.workOrders.addNote);
 
-  const [modal, setModal] = useState<null | "edit" | "reassign" | "cancel" | "sendback">(null);
+  const [modal, setModal] = useState<null | "edit" | "reassign" | "cancel" | "sendback" | "close" | "billing">(null);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -222,10 +222,7 @@ function View({
             ) : null}
             {viewerCan.review ? <OutlineButton onClick={() => setModal("sendback")}>Send back</OutlineButton> : null}
             {viewerCan.review ? (
-              <PrimaryButton
-                disabled={busy}
-                onClick={() => void run(() => reviewClose({ workOrderId: wo._id }), "Work order closed")}
-              >
+              <PrimaryButton disabled={busy} onClick={() => setModal("close")}>
                 Review &amp; close
               </PrimaryButton>
             ) : null}
@@ -271,6 +268,12 @@ function View({
         />
       </Card>
 
+      {data.billing && wo.status === "reviewed_closed" ? (
+        <Section title="Billing">
+          <BillingBlock billing={data.billing} onEdit={() => setModal("billing")} />
+        </Section>
+      ) : null}
+
       {canNote ? (
         <Section title="Add a note">
           <div className="flex gap-2">
@@ -302,6 +305,19 @@ function View({
       {modal === "reassign" ? <ReassignModal data={data} technicians={technicians} onClose={() => setModal(null)} /> : null}
       {modal === "cancel" ? <ReasonModal wo={wo._id} mode="cancel" onClose={() => setModal(null)} /> : null}
       {modal === "sendback" ? <ReasonModal wo={wo._id} mode="sendback" onClose={() => setModal(null)} /> : null}
+      {(modal === "close" && viewerCan.review) || (modal === "billing" && data.billing?.canEdit) ? (
+        <Modal title={modal === "close" ? `Close WO-${wo.number}` : `Edit billing for WO-${wo.number}`} onClose={() => setModal(null)}>
+          <CloseBillForm
+            mode={modal === "close" ? "close" : "edit"}
+            workOrderId={wo._id}
+            woNumber={wo.number}
+            billing={data.billing}
+            suggestedDescription={data.expensesTab?.technicianExpenseNote ?? null}
+            onDone={() => setModal(null)}
+            onCancel={() => setModal(null)}
+          />
+        </Modal>
+      ) : null}
     </div>
   );
 }

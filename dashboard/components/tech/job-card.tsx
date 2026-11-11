@@ -1,9 +1,8 @@
 "use client";
 
-import Link from "next/link";
 import { AlertTriangle, MapPin, PawPrint } from "lucide-react";
-import { Pill, SevChip } from "@/components/ui";
-import { PRIORITY_BAR, STATUS_LABEL, formatDate, mapsUrl } from "./lib";
+import { PriorityBadge, TechBadge, TechCard, TechLinkButton } from "./ui";
+import { STATUS_LABEL, formatDate, mapsUrl } from "./lib";
 
 export type TechJob = {
   _id: string;
@@ -16,6 +15,8 @@ export type TechJob = {
   window?: string;
   unitNumber?: string;
   propertyName?: string;
+  /** Formatted street address. workOrders.list does not return it yet; used when present. */
+  address?: string;
   isOverdue: boolean;
   actionRequired?: { kind: "sent_back" | "info_requested" } | null;
 };
@@ -23,55 +24,67 @@ export type TechJob = {
 export function JobCard({ job }: { job: TechJob }) {
   const place = job.propertyName ?? "Unknown property";
   const hasPets = /\b(pet|pets|dog|dogs|cat|cats)\b/i.test(job.accessNotes ?? "");
+  // The maps link prefers the formatted address; the property name is only a fallback.
+  const destination = job.address || place;
+  const primary = job.status === "in_progress" || !!job.actionRequired;
+  const meta = [job.address, job.window, `WO-${job.number}`].filter(Boolean) as string[];
   return (
-    <li className="relative overflow-hidden rounded-2xl border border-border bg-card">
-      <span className={`absolute inset-y-0 left-0 w-1.5 ${PRIORITY_BAR[job.priority] ?? "bg-muted"}`} aria-hidden />
-      <div className="pl-5 pr-4 pt-3">
-        <a
-          href={mapsUrl(place)}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex min-h-11 items-center gap-2 text-sm font-medium text-primary"
-        >
-          <MapPin className="h-4 w-4 shrink-0" />
-          <span className="min-w-0 truncate">
-            {place}
-            {job.unitNumber ? ` · Unit ${job.unitNumber}` : ""}
-          </span>
-        </a>
-      </div>
-      <Link href={`/tech/jobs/${job._id}`} className="block min-h-11 py-2 pb-4 pl-5 pr-4">
-        <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
-          <span className="font-mono">WO-{job.number}</span>
-          <SevChip level={job.priority} />
-        </div>
-        <p className="text-base font-semibold leading-snug">{job.title}</p>
-        {job.accessNotes && (
-          <p
-            className={`mt-2 line-clamp-2 flex gap-1.5 rounded-lg px-2 py-1 text-sm ${
-              hasPets ? "bg-warning-soft font-medium text-warning-ink" : "text-muted-foreground"
-            }`}
-          >
-            {hasPets && <PawPrint className="mt-0.5 h-4 w-4 shrink-0" />}
-            <span>{job.accessNotes}</span>
-          </p>
-        )}
-        <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-          <Pill>{STATUS_LABEL[job.status] ?? job.status}</Pill>
+    <TechCard as="li">
+      <div className="flex flex-col gap-2">
+        <p className="break-words text-base font-semibold">{job.title}</p>
+        <div className="flex flex-wrap gap-2">
+          <PriorityBadge level={job.priority} />
+          <TechBadge tone="info">{STATUS_LABEL[job.status] ?? job.status}</TechBadge>
           {job.actionRequired ? (
-            <Pill tone="warn" className="font-semibold">
-              <AlertTriangle className="h-3 w-3" /> Action required
-            </Pill>
+            <TechBadge tone="warning">
+              <AlertTriangle aria-hidden className="h-3.5 w-3.5" /> Action required
+            </TechBadge>
           ) : null}
-          {job.window ? <Pill tone="warn">{job.window}</Pill> : null}
           {job.dueDate !== undefined && (
-            <span className={job.isOverdue ? "font-semibold text-danger-ink" : ""}>
+            <TechBadge tone={job.isOverdue ? "danger" : "neutral"}>
               Due {formatDate(job.dueDate)}
               {job.isOverdue ? " (overdue)" : ""}
-            </span>
+            </TechBadge>
           )}
         </div>
-      </Link>
-    </li>
+      </div>
+
+      <div>
+        <p className="break-words text-base font-semibold">
+          {place}
+          {job.unitNumber ? ` · Unit ${job.unitNumber}` : ""}
+        </p>
+        <div className="mt-1 flex flex-col gap-0.5 text-xs text-muted-foreground">
+          {meta.map((m) => (
+            <p key={m} className="break-words">
+              {m}
+            </p>
+          ))}
+        </div>
+      </div>
+
+      {job.accessNotes && (
+        <p
+          className={`flex gap-2 rounded-[8px] p-3 text-xs ${hasPets ? "bg-warning-soft font-medium text-warning-ink" : "bg-muted text-muted-foreground"}`}
+        >
+          {hasPets && <PawPrint aria-hidden className="mt-0.5 h-4 w-4 shrink-0" />}
+          <span className="line-clamp-2 break-words">{job.accessNotes}</span>
+        </p>
+      )}
+
+      <a
+        href={mapsUrl(destination)}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex min-h-11 items-center gap-2 text-sm font-medium text-primary"
+      >
+        <MapPin aria-hidden className="h-4 w-4 shrink-0" />
+        Directions
+      </a>
+
+      <TechLinkButton href={`/tech/jobs/${job._id}`} variant={primary ? "primary" : "secondary"}>
+        {primary ? "Open job" : "View details"}
+      </TechLinkButton>
+    </TechCard>
   );
 }

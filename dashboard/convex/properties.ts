@@ -9,6 +9,7 @@ import { propertyAddressValidator } from "./placesApi";
 import { amScope } from "./amScope";
 import { applyDefaultAssetManager } from "./units";
 import { cleanOwnerEmails, MAX_OWNER_EMAILS, ownerEmailProblems, ownerEmailsOf } from "./ownerVerifyLib";
+import { linkOwnerForProperty, ownerIdentityChanged } from "./ownerLinking";
 
 const DEFAULT_PROPERTY = {
   name: "518 Property Pro",
@@ -321,6 +322,12 @@ export const updateProfile = mutation({
           ? `Owner emails changed (${before.length} before, ${after.length} now).`
           : undefined,
     });
+    // Owner identity (ownerLinking.ts): a changed owner name / email links the owner only when
+    // name + email make it certain. Never moves an existing link and never throws for an expected
+    // case; anything uncertain shows on the Owners page's "Needs an owner" list.
+    if (ownerIdentityChanged(property, { ...property, ...patch })) {
+      await linkOwnerForProperty(ctx, property._id, { source: "manual", actorUserId: org.user._id });
+    }
   },
 });
 

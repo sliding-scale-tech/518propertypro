@@ -27,12 +27,13 @@ import {
 import * as el from "./elevenLabsApi";
 import { backfillUnassignedLeadsForOrg } from "./leads";
 import type { JobRole } from "./jobRoles";
+import type { AppRole } from "./jobRoles";
 import {
   appRoleOf,
-  appRoleValidator,
   jobRoleValidator,
   jobRolesFor,
   notifyChannelValidator,
+  parseAppRole,
 } from "./jobRoles";
 import { sendEmail } from "./resendApi";
 import { countOwnedBy, purgeOrgUnits } from "./units";
@@ -288,13 +289,15 @@ export const setJobRoles = mutation({
 });
 
 /**
- * Sets a member's app role (Admin / Asset manager / Technician), writing both the membership
- * role and the job roles in one patch so they can never disagree. Admin-only.
+ * Sets a member's app role (Admin / Asset manager / Technician / Accountant), writing both the
+ * membership role and the job roles in one patch so they can never disagree. Admin-only.
+ * appRole arrives as a plain string and is checked by parseAppRole for a clear ConvexError.
  */
 export const setAppRole = mutation({
-  args: { userId: v.id("users"), appRole: appRoleValidator },
+  args: { userId: v.id("users"), appRole: v.string() },
   handler: async (ctx, args) => {
     const org = await requireOrgAdmin(ctx);
+    const appRole = parseAppRole(args.appRole);
     const membership = await ctx.db
       .query("memberships")
       .withIndex("by_user", (q) => q.eq("userId", args.userId))
@@ -302,7 +305,7 @@ export const setAppRole = mutation({
     if (!membership || membership.orgId !== org.orgId) throw new ConvexError("Member not found.");
 
     const before = membership.jobRoles ?? [];
-    const next = jobRolesFor(args.appRole);
+    const next = jobRolesFor(appRole);
     const wasAdmin = isAdminView({ isAdmin: membership.role === "admin", jobRoles: before });
 
     if (wasAdmin && next.role !== "admin") {
@@ -554,12 +557,17 @@ export const invite = action({
     email: v.string(),
     role: v.optional(v.union(v.literal("admin"), v.literal("member"))),
     jobRoles: v.optional(v.array(jobRoleValidator)),
-    // Preferred: when given, role and jobRoles above are ignored and derived from it.
-    appRole: v.optional(appRoleValidator),
+    // Preferred: when given, role and jobRoles above are ignored and derived from it. A plain
+    // string so parseAppRole can reject a bad value with a clear ConvexError.
+    appRole: v.optional(v.string()),
     phone: v.optional(v.string()),
     fullName: v.optional(v.string()),
   },
-  handler: async (ctx, args): Promise<{ email: string; resent: boolean }> => await createAndSendInvite(ctx, args),
+  handler: async (ctx, args): Promise<{ email: string; resent: boolean }> =>
+    await createAndSendInvite(ctx, {
+      ...args,
+      appRole: args.appRole === undefined ? undefined : parseAppRole(args.appRole),
+    }),
 });
 
 /**
@@ -573,7 +581,7 @@ export async function createAndSendInvite(
     email: string;
     role?: "admin" | "member";
     jobRoles?: JobRole[];
-    appRole?: "admin" | "asset_manager" | "technician";
+    appRole?: AppRole;
     phone?: string;
     fullName?: string;
   },

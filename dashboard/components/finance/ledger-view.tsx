@@ -1,0 +1,262 @@
+"use client";
+
+import { useQuery } from "convex/react";
+import type { FunctionReturnType } from "convex/server";
+import { Plus } from "lucide-react";
+import Link from "next/link";
+import { useState } from "react";
+import { api } from "@/convex/_generated/api";
+import { formatAmount, formatDate } from "@/convex/rosFormat";
+import { SUBTRACTION_TYPES } from "@/convex/rosPolicy";
+import { Btn, Card, DataTable, Field, PageHeader, Pill, Select, Toggle, type Column } from "@/components/ui";
+import { FinanceNav, useNow } from "./finance-nav";
+import { Spinner } from "./form-bits";
+import { DELETE_ENTRY } from "./line-labels";
+import { recentMonths } from "./months";
+import { TransactionForm, VoidDialog, type EntryInit } from "./transaction-form";
+
+type LedgerRow = FunctionReturnType<typeof api.ledger.list>["page"][number];
+
+type Dialog = { kind: "add" } | { kind: "edit"; entry: EntryInit } | { kind: "void"; entryId: string; summary: string };
+
+function entryOf(r: LedgerRow): EntryInit {
+  return {
+    entryId: r._id,
+    propertyId: r.propertyId,
+    unitId: r.unitId,
+    date: r.date,
+    accountId: r.accountId,
+    accountName: r.accountName,
+    counterparty: r.counterparty,
+    memo: r.memo,
+    amountCents: r.amountCents,
+  };
+}
+
+const summaryOf = (r: { date: string; accountName: string; amountCents: number }) =>
+  `${formatDate(r.date)} · ${r.accountName} · ${formatAmount(r.amountCents)}`;
+
+/** `/owner-statements/ledger`: manual transactions and everything billed (spec 6.4). */
+export function LedgerView() {
+  const now = useNow();
+  const months = recentMonths(now);
+  const [ownerId, setOwnerId] = useState("");
+  const [propertyId, setPropertyId] = useState("");
+  const [month, setMonth] = useState("");
+  const [includeVoided, setIncludeVoided] = useState(false);
+  // Cursor of each page visited; the last one is the page shown.
+  const [cursors, setCursors] = useState<(string | null)[]>([null]);
+  const [dialog, setDialog] = useState<Dialog | null>(null);
+
+  const owners = useQuery(api.owners.list, { includeInactive: true });
+  const opts = useQuery(api.ledger.formOptions, {});
+  const cursor = cursors[cursors.length - 1];
+  const page = useQuery(api.ledger.list, {
+    ownerId: ownerId || null,
+    propertyId: propertyId || null,
+    month: month || null,
+    includeVoided,
+    cursor,
+  });
+
+  const resetPaging = () => setCursors([null]);
+
+  const columns: Column<LedgerRow>[] = [
+    {
+      key: "date",
+      header: "Date",
+      className: "whitespace-nowrap tabular-nums",
+      // A billed row shows the date it has on its statement; a carried-forward one also its own date.
+      render: (r) =>
+        r.postedDate ? (
+          <div>
+            <div>{formatDate(r.postedDate)}</div>
+            <div className="text-[11px] text-muted-foreground">Dated {formatDate(r.date)}</div>
+          </div>
+        ) : (
+          formatDate(r.date)
+        ),
+    },
+    { key: "property", header: "Property", render: (r) => r.propertyName },
+    { key: "unit", header: "Unit", className: "whitespace-nowrap", render: (r) => r.unit },
+    { key: "account", header: "Account", render: (r) => r.accountName },
+    { key: "name", header: "Name", render: (r) => r.name },
+    {
+      key: "memo",
+      header: "Memo",
+      render: (r) => (
+        <span className="line-clamp-2 max-w-[260px]" title={r.memo}>
+          {r.memo}
+        </span>
+      ),
+    },
+    {
+      key: "amount",
+      header: "Amount",
+      align: "right",
+      className: "whitespace-nowrap tabular-nums",
+      // Subtractions get a leading minus in this table only; statements show positive amounts.
+      render: (r) => (SUBTRACTION_TYPES.has(r.type) ? `−${formatAmount(r.amountCents)}` : formatAmount(r.amountCents)),
+    },
+    { key: "source", header: "Source", render: (r) => <Pill>{r.sourceLabel}</Pill> },
+    {
+      key: "statement",
+      header: "Statement",
+      render: (r) =>
+        r.voided ? (
+          <span title={r.voidReason ?? undefined}>
+            <Pill tone="bad">Deleted</Pill>
+          </span>
+        ) : r.statementId ? (
+          <Link href={`/owner-statements/${r.statementId}`} className="text-primary hover:underline">
+            {r.statementLabel ?? "Statement"}
+          </Link>
+        ) : (
+          <span className="text-muted-foreground">Unbilled</span>
+        ),
+    },
+    {
+      key: "actions",
+      header: <span className="sr-only">Actions</span>,
+      align: "right",
+      render: (r) =>
+        r.editable ? (
+          <div className="flex justify-end gap-1.5">
+            <Btn sm onClick={() => setDialog({ kind: "edit", entry: entryOf(r) })}>
+              Edit
+            </Btn>
+            <Btn sm variant="dng" onClick={() => setDialog({ kind: "void", entryId: r._id, summary: summaryOf(r) })}>
+              {DELETE_ENTRY.button}
+            </Btn>
+          </div>
+        ) : null,
+    },
+  ];
+
+  return (
+    <div className="pb-10">
+      <PageHeader
+        title="Ledger"
+        subtitle="Every owner transaction: rent and other rows entered by hand, plus work orders, fees and draws once a statement is final."
+        actions={
+          <Btn variant="pri" onClick={() => setDialog({ kind: "add" })}>
+            <Plus aria-hidden className="h-4 w-4" /> Add transaction
+          </Btn>
+        }
+      />
+      <FinanceNav active="ledger" />
+      <Card>
+        <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_200px_auto]">
+          <Field label="Owner" htmlFor="ledger-owner">
+            <Select
+              id="ledger-owner"
+              value={ownerId}
+              onChange={(e) => {
+                setOwnerId(e.target.value || "");
+                resetPaging();
+              }}
+            >
+              <option value="">All owners</option>
+              {(owners ?? []).map((o) => (
+                <option key={o._id} value={o._id}>
+                  {o.legalName}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Property" htmlFor="ledger-property">
+            <Select
+              id="ledger-property"
+              value={propertyId}
+              onChange={(e) => {
+                setPropertyId(e.target.value || "");
+                resetPaging();
+              }}
+            >
+              <option value="">All properties</option>
+              {(opts?.properties ?? []).map((p) => (
+                <option key={p.propertyId} value={p.propertyId}>
+                  {p.name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Month" htmlFor="ledger-month">
+            <Select
+              id="ledger-month"
+              value={month}
+              onChange={(e) => {
+                setMonth(e.target.value || "");
+                resetPaging();
+              }}
+            >
+              <option value="">Any month</option>
+              {months.map((m) => (
+                <option key={m.value} value={m.value}>
+                  {m.label}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <div className="flex items-end gap-2 pb-2">
+            <Toggle
+              checked={includeVoided}
+              label="Show deleted"
+              onChange={(v) => {
+                setIncludeVoided(v);
+                resetPaging();
+              }}
+            />
+            <span className="text-[13px]">Show deleted</span>
+          </div>
+        </div>
+
+        {page === undefined ? (
+          <Spinner label="Loading transactions…" />
+        ) : (
+          <>
+            <DataTable
+                caption="Ledger transactions"
+                columns={columns}
+                rows={page.page}
+                rowKey={(r) => r._id}
+                empty={
+                  ownerId || propertyId || month
+                    ? "No transactions match these filters."
+                    : "No transactions yet. Add rent, landscaping and other rows with “Add transaction”."
+                }
+              />
+            <div className="mt-3 flex items-center justify-end gap-2 text-[12.5px] text-muted-foreground">
+              <span>Page {cursors.length}</span>
+              <Btn sm disabled={cursors.length <= 1} onClick={() => setCursors((c) => c.slice(0, -1))}>
+                Previous
+              </Btn>
+              <Btn
+                sm
+                disabled={page.isDone}
+                onClick={() => setCursors((c) => [...c, page.continueCursor])}
+              >
+                Next
+              </Btn>
+            </div>
+          </>
+        )}
+      </Card>
+
+      {dialog?.kind === "add" ? (
+        <TransactionForm mode="add" defaultPropertyId={propertyId || undefined} onClose={() => setDialog(null)} />
+      ) : null}
+      {dialog?.kind === "edit" ? (
+        <TransactionForm
+          mode="edit"
+          entry={dialog.entry}
+          onClose={() => setDialog(null)}
+          onVoid={() => setDialog({ kind: "void", entryId: dialog.entry.entryId, summary: summaryOf(dialog.entry) })}
+        />
+      ) : null}
+      {dialog?.kind === "void" ? (
+        <VoidDialog entryId={dialog.entryId} summary={dialog.summary} onClose={() => setDialog(null)} />
+      ) : null}
+    </div>
+  );
+}

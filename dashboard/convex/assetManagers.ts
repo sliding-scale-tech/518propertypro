@@ -15,6 +15,7 @@ import { assertE164, createAndSendInvite } from "./team";
 import { saveWeeklyHours } from "./tours";
 import * as sched from "./tourSchedule";
 import { reassignUnitWithReason } from "./units";
+import { PHOTO_EMAIL_INVALID, speakablePhotoEmail } from "./sarahReplies";
 
 /**
  * Admin "Asset Managers" management flow (table, invite, profile, availability, work orders,
@@ -47,20 +48,20 @@ const EMAIL_RE = /^[^\s@<>"',;:()[\]\\]+@[^\s@<>"',;:()[\]\\]+\.[^\s@<>"',;:()[\
 // --- Helpers --------------------------------------------------------------
 
 /** Trim, drop control characters, enforce a max length. Throws a message fit to show a person. */
-function cleanText(raw: string, label: string, max: number, min = 0): string {
+export function cleanText(raw: string, label: string, max: number, min = 0): string {
   const out = raw.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim();
   if (out.length > max) throw new ConvexError(`${label} is too long (max ${max} characters).`);
   if (out.length < min) throw new ConvexError(`${label} is too short (min ${min} characters).`);
   return out;
 }
 
-function cleanEmail(raw: string, label: string): string {
+export function cleanEmail(raw: string, label: string): string {
   const email = raw.trim().toLowerCase();
   if (email.length > MAX_EMAIL || !EMAIL_RE.test(email)) throw new ConvexError(`Enter a valid ${label}.`);
   return email;
 }
 
-function initialsOf(name: string): string {
+export function initialsOf(name: string): string {
   const parts = name.split(/\s+/).filter(Boolean);
   if (parts.length === 0) return "?";
   const letters = parts.length === 1 ? parts[0].slice(0, 2) : parts[0][0] + parts[parts.length - 1][0];
@@ -402,6 +403,7 @@ export const profile = query({
       imageUrl: user.imageUrl ?? null,
       workEmail: user.email ?? "",
       personalEmail: membership.personalEmail ?? null,
+      photoEmail: membership.photoEmail ?? null,
       phone: membership.phone ?? null,
       status: statusOf(membership, now),
       unavailableUntil: membership.unavailableUntil ?? null,
@@ -482,12 +484,15 @@ async function toursBetween(
  * Edits the admin-managed profile fields. The NAME is read-only: it mirrors the person's Clerk
  * profile (users.firstName/lastName, rewritten by the Clerk webhook), and there is no clean
  * membership-level override, so a name edit here would be silently reverted. The WORK EMAIL is
- * the Clerk sign-in identity and is read-only too. "" clears personalEmail / phone / notes.
+ * the Clerk sign-in identity and is read-only too. "" clears personalEmail / photoEmail / phone /
+ * notes. photoEmail is the address Sarah dictates to tenants for photos of repairs in this person's
+ * units, so it must also be one she can read out (sarahReplies.speakablePhotoEmail).
  */
 export const updateProfile = mutation({
   args: {
     userId: v.id("users"),
     personalEmail: v.optional(v.string()),
+    photoEmail: v.optional(v.string()),
     phone: v.optional(v.string()),
     internalNotes: v.optional(v.string()),
   },
@@ -496,12 +501,25 @@ export const updateProfile = mutation({
     const { membership } = await requireAmMember(ctx, org, args.userId);
 
     // Fields are picked one by one; nothing else can reach the row.
-    const patch: { personalEmail?: string; phone?: string; internalNotes?: string } = {};
+    const patch: { personalEmail?: string; photoEmail?: string; phone?: string; internalNotes?: string } = {};
     const changed: string[] = [];
     if (args.personalEmail !== undefined) {
       const raw = args.personalEmail.trim();
       patch.personalEmail = raw === "" ? undefined : cleanEmail(raw, "personal email");
       changed.push("personalEmail");
+    }
+    if (args.photoEmail !== undefined) {
+      const raw = args.photoEmail.trim();
+      if (raw === "") {
+        patch.photoEmail = undefined;
+      } else {
+        const email = speakablePhotoEmail(raw);
+        if (!email) {
+          throw new ConvexError(PHOTO_EMAIL_INVALID);
+        }
+        patch.photoEmail = email;
+      }
+      changed.push("photoEmail");
     }
     if (args.phone !== undefined) {
       const raw = args.phone.replace(/[\s().-]/g, "");
@@ -824,48 +842,60 @@ export const sendPasswordReset = action({
 
 export const reservePasswordReset = internalMutation({
   args: { orgId: v.id("organizations"), actorUserId: v.id("users"), targetUserId: v.id("users") },
-  handler: async (ctx, args) => {
-    // Re-verify the actor here too: this is the boundary even though only the action calls it.
-    const actor = await ctx.db
-      .query("memberships")
-      .withIndex("by_user", (q) => q.eq("userId", args.actorUserId))
-      .first();
-    if (!actor || actor.orgId !== args.orgId || !isAdminView({ isAdmin: actor.role === "admin", jobRoles: actor.jobRoles ?? [] })) throw new ConvexError("You don't have access to that.");
-    const membership = await ctx.db
-      .query("memberships")
-      .withIndex("by_user", (q) => q.eq("userId", args.targetUserId))
-      .first();
-    const user = await ctx.db.get(args.targetUserId);
-    if (!membership || membership.orgId !== args.orgId || !isAm(membership) || !user?.email) {
-      throw new ConvexError("Asset manager not found.");
-    }
-
-    const since = Date.now() - DAY_MS;
-    const recent = await ctx.db
-      .query("passwordResetRequests")
-      .withIndex("by_target_and_at", (q) => q.eq("targetUserId", args.targetUserId).gte("at", since))
-      .collect();
-    if (recent.length >= RESET_LIMIT_PER_DAY) {
-      throw new ConvexError("Too many reset emails were sent to this person today. Try again tomorrow.");
-    }
-
-    const reservationId = await ctx.db.insert("passwordResetRequests", {
-      orgId: args.orgId,
-      targetUserId: args.targetUserId,
-      requestedBy: args.actorUserId,
-      at: Date.now(),
-    });
-    await writeAudit(ctx, {
-      orgId: args.orgId,
-      entity: "membership",
-      entityId: membership._id,
-      action: "password_reset_emailed",
-      actorUserId: args.actorUserId,
-      note: "method=email_link",
-    });
-    return { reservationId, email: user.email, name: userName(user) };
-  },
+  handler: async (ctx, args) => await reserveResetFor(ctx, args, isAm, "Asset manager not found."),
 });
+
+/**
+ * Shared by the Asset Managers and Technicians reset emails: re-checks the actor is Admin view on
+ * the team, the target holds the right job role (`isTarget`), applies the 3-per-day limit, and
+ * records + audits the attempt.
+ */
+export async function reserveResetFor(
+  ctx: MutationCtx,
+  args: { orgId: Id<"organizations">; actorUserId: Id<"users">; targetUserId: Id<"users"> },
+  isTarget: (m: Doc<"memberships">) => boolean,
+  notFound: string,
+) {
+  // Re-verify the actor here too: this is the boundary even though only the action calls it.
+  const actor = await ctx.db
+    .query("memberships")
+    .withIndex("by_user", (q) => q.eq("userId", args.actorUserId))
+    .first();
+  if (!actor || actor.orgId !== args.orgId || !isAdminView({ isAdmin: actor.role === "admin", jobRoles: actor.jobRoles ?? [] })) throw new ConvexError("You don't have access to that.");
+  const membership = await ctx.db
+    .query("memberships")
+    .withIndex("by_user", (q) => q.eq("userId", args.targetUserId))
+    .first();
+  const user = await ctx.db.get(args.targetUserId);
+  if (!membership || membership.orgId !== args.orgId || !isTarget(membership) || !user?.email) {
+    throw new ConvexError(notFound);
+  }
+
+  const since = Date.now() - DAY_MS;
+  const recent = await ctx.db
+    .query("passwordResetRequests")
+    .withIndex("by_target_and_at", (q) => q.eq("targetUserId", args.targetUserId).gte("at", since))
+    .collect();
+  if (recent.length >= RESET_LIMIT_PER_DAY) {
+    throw new ConvexError("Too many reset emails were sent to this person today. Try again tomorrow.");
+  }
+
+  const reservationId = await ctx.db.insert("passwordResetRequests", {
+    orgId: args.orgId,
+    targetUserId: args.targetUserId,
+    requestedBy: args.actorUserId,
+    at: Date.now(),
+  });
+  await writeAudit(ctx, {
+    orgId: args.orgId,
+    entity: "membership",
+    entityId: membership._id,
+    action: "password_reset_emailed",
+    actorUserId: args.actorUserId,
+    note: "method=email_link",
+  });
+  return { reservationId, email: user.email, name: userName(user) };
+}
 
 export const releasePasswordReset = internalMutation({
   args: { reservationId: v.id("passwordResetRequests") },
@@ -878,7 +908,7 @@ function esc(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-function resetEmailHtml(name: string, link: string): string {
+export function resetEmailHtml(name: string, link: string): string {
   const font = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
   return `<!DOCTYPE html>
 <html><body style="margin:0;padding:0;background:#f8fafc">
@@ -895,7 +925,7 @@ function resetEmailHtml(name: string, link: string): string {
 </table></td></tr></table></body></html>`;
 }
 
-function resetEmailText(name: string, link: string): string {
+export function resetEmailText(name: string, link: string): string {
   return [
     "Reset your password",
     "",

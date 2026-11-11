@@ -461,7 +461,8 @@ def run_import(args, dry_run):
             summary = parse_json_output(out)
         add(total, summary)
         print(f"  batch {i}: {len(chunk)} rows -> properties {summary['properties']} units {summary['units']} "
-              f"residents {summary['residents']} sourceRows {summary['sourceRows']}")
+              f"residents {summary['residents']} sourceRows {summary['sourceRows']} "
+              f"ownerLinks {summary.get('ownerLinks', {})}")
     total["available"] = sorted(total.get("available", []))
     print(json.dumps({k: v for k, v in total.items() if k != "dryRun"}, indent=2))
 

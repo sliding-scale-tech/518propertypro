@@ -4,6 +4,12 @@ import { jobRoleValidator, notifyChannelValidator } from "./jobRoles";
 import { propertyAddressValidator } from "./placesApi";
 import { auditEntityValidator } from "./auditEntities";
 import { sarahConfigValidator } from "./sarahConfigLib";
+import {
+  accountSystemKeyValidator,
+  ledgerSourceValidator,
+  rowTypeValidator,
+  statementStatusValidator,
+} from "./rosValidators";
 
 export default defineSchema({
   // Mirrors Clerk users via the /auth webhook (user.created / session.created / user.updated).
@@ -63,6 +69,11 @@ export default defineSchema({
     // identity and is never editable here; these are contact/notes only.
     personalEmail: v.optional(v.string()),
     internalNotes: v.optional(v.string()), // admin-only, never shown to the member
+    // Where Sarah tells tenants to email photos/video of a repair, for units this person is the
+    // asset manager of. May be a shared team inbox (Gold: goldteam@…). Lowercased and checked as
+    // speakable on save (sarahReplies.speakablePhotoEmail); absent = Sarah gives no address and
+    // says the asset manager will follow up. Seeded by photoEmails.seedDefaults.
+    photoEmail: v.optional(v.string()),
     // The asset manager who gets READ access to this person's units while they are out of
     // office (see amScope.ts). Cleared together with unavailableUntil.
     coveringUserId: v.optional(v.id("users")),
@@ -851,6 +862,9 @@ export default defineSchema({
         v.literal("unknown"),
       ),
     ),
+    // Rental Owner Statement: the security deposit currently held for this unit, integer cents >= 0.
+    // undefined = not recorded (counts as 0 with a warning). docs/specs/ros-build-spec.md 3.9.
+    securityDepositHeldCents: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -965,6 +979,10 @@ export default defineSchema({
     callerName: v.optional(v.string()),
     callerNumber: v.optional(v.string()), // telephony caller ID (trusted)
     callbackNumber: v.optional(v.string()), // spoken (may be misheard)
+    // E.164, read back by Sarah digit by digit and confirmed by the caller (log_maintenance_request
+    // confirmed_phone). Never filled from caller ID alone. Kept for the planned confirmation text;
+    // nothing sends to it yet.
+    smsConfirmPhone: v.optional(v.string()),
     spokenAddress: v.optional(v.string()),
     spokenUnit: v.optional(v.string()),
     residentId: v.optional(v.id("residents")),
@@ -1117,11 +1135,30 @@ export default defineSchema({
     updatedAt: v.number(),
     completedAt: v.optional(v.number()),
     closedAt: v.optional(v.number()),
+    // --- Owner-statement billing (docs/specs/ros-build-spec.md 3.9). All optional so existing rows
+    // stay valid. unitId stays required: property-level billing is the billPropertyLevel flag.
+    workCompletedDescription: v.optional(v.string()), // tech writes on submit; office edits; = ROS memo (<= 2000 chars)
+    billAmountCents: v.optional(v.number()), // what the owner is charged; = ROS amount; integer > 0
+    costCents: v.optional(v.number()), // internal only: never on the ROS, never to owners or technicians
+    rosAccountId: v.optional(v.id("ledgerAccounts")), // default Repairs, picked on close
+    billPropertyLevel: v.optional(v.boolean()), // true = ROS row shows "Property level"; WO keeps its unit
+    noOwnerCharge: v.optional(v.boolean()), // true = never billed to the owner (ASSUMPTION A2)
+    billedStatementId: v.optional(v.id("ownerStatements")), // set at finalize; WO can never be billed twice
+    billedLedgerEntryId: v.optional(v.id("ledgerEntries")),
+    billedAt: v.optional(v.number()),
+    // true = closed (reviewed_closed), chargeable and not billed yet: the ROS build reads only these
+    // (index by_property_and_rosPending). Set by reviewClose / updateBilling, false once billed.
+    // Rows from before this field have it undefined until workOrderBilling.backfillRosPending runs;
+    // the build also reads those (rosBuild.loadBuildData), so nothing is missed meanwhile.
+    rosPending: v.optional(v.boolean()),
   })
     .index("by_org_and_status", ["orgId", "status"])
     .index("by_technician_and_status", ["technicianUserId", "status"])
     .index("by_request", ["requestId"])
-    .index("by_unit", ["unitId"]),
+    .index("by_unit", ["unitId"])
+    .index("by_property_and_status", ["propertyId", "status"])
+    .index("by_ros_account", ["rosAccountId"])
+    .index("by_property_and_rosPending", ["propertyId", "rosPending"]),
 
   workOrderFiles: defineTable({
     orgId: v.string(),
@@ -1328,4 +1365,233 @@ export default defineSchema({
     note: v.optional(v.string()),
     at: v.number(),
   }).index("by_org_and_item", ["orgId", "itemId", "at"]),
+
+  // --- Rental Owner Statements (ROS) ---------------------------------------------------------
+  //
+  // docs/specs/ros-build-spec.md section 3. Money is integer cents; dates are YYYY-MM-DD business
+  // dates in America/New_York; months are YYYY-MM.
+
+  // The rental owner entity (an LLC or a person); one statement per entity per month.
+  owners: defineTable({
+    orgId: v.string(),
+    legalName: v.string(), // "Nye Properties LLC"
+    // normalizeNameKey(legalName). NOT unique: owners with the same name are told apart by email
+    // (ownerIdentity.ts: same name + a shared email = one owner). Owners typed in by hand
+    // (owners.create / update) still refuse a name another non-merged owner already has.
+    nameKey: v.string(),
+    contactFirstName: v.optional(v.string()),
+    contactLastName: v.optional(v.string()),
+    emails: v.array(v.string()), // trimmed, lowercased, validated; [] allowed
+    // DEPRECATED (2026-11-11): no longer read or written. The fee is per property now:
+    // ownerProperties.managementFeeBps (own fee) ?? financeSettings.rosDefaultFeeBps (default 5.00%).
+    // Kept optional so existing rows stay valid; feeMigration.copyOwnerFeesToLinks copies a
+    // non-default value onto the owner's links.
+    managementFeeBps: v.optional(v.number()),
+    payeeName: v.optional(v.string()), // owner draw "Name"; undefined = derived (rosCalc.effectivePayee)
+    active: v.boolean(),
+    source: v.union(v.literal("manual"), v.literal("sheet_import")),
+    importKey: v.optional(v.string()), // = nameKey for imported rows; makes re-import idempotent
+    // Owner identity (ownerIdentity.ts): set when this owner was merged into another one
+    // (owners.merge). A merged owner is inactive, has no links and is never matched again.
+    mergedIntoOwnerId: v.optional(v.id("owners")),
+    mergedAt: v.optional(v.number()),
+    // Set when the owner was created automatically from a property's owner name + email
+    // (ownerLinking.linkOwnerForProperty) or from the "Needs an owner" list.
+    createdFromPropertyId: v.optional(v.id("properties")),
+    createdBy: v.optional(v.id("users")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_org", ["orgId"])
+    .index("by_org_and_name_key", ["orgId", "nameKey"])
+    .index("by_org_and_import_key", ["orgId", "importKey"]),
+
+  // "Not the same owner" decisions (owners.dismissIdentityFlag): an identity flag the accountant
+  // has looked at and rejected, so it is not raised again. Two kinds:
+  //   owner_pair     - two owners are different people (key = ownerIdentity.ownerPairKey);
+  //   property_owner - the owner a property page names is not this owner (key =
+  //                    ownerIdentity.propertyOwnerKey, including the property's owner name +
+  //                    emails at the time, so editing them brings the question back).
+  ownerIdentityDismissals: defineTable({
+    orgId: v.string(),
+    kind: v.union(v.literal("owner_pair"), v.literal("property_owner")),
+    key: v.string(),
+    ownerId: v.id("owners"),
+    otherOwnerId: v.optional(v.id("owners")),
+    propertyId: v.optional(v.id("properties")),
+    createdBy: v.optional(v.id("users")),
+    createdAt: v.number(),
+  })
+    .index("by_org", ["orgId"])
+    .index("by_org_and_key", ["orgId", "key"]),
+
+  // Owner-property link and per-link settings. A property can go on a statement only when it has
+  // exactly one link; two or more = co-owned (paused, ASSUMPTION A10).
+  ownerProperties: defineTable({
+    orgId: v.string(),
+    ownerId: v.id("owners"),
+    propertyId: v.id("properties"),
+    openingBalanceCents: v.optional(v.number()), // signed integer; beginning cash of the FIRST statement; undefined = 0 + warning
+    startMonth: v.optional(v.string()), // "YYYY-MM": first statement month; set at first finalize if empty
+    propertyReserveCents: v.optional(v.number()), // >= 0; default prefill for each statement; undefined = 0
+    // This property's own management fee (500 = 5.00%, integer 0..10000). undefined = the org
+    // default (financeSettings.rosDefaultFeeBps). On the link, so a sold building's new owner
+    // starts from the default. Changing it only affects drafts (finals are frozen snapshots).
+    managementFeeBps: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_owner", ["ownerId"])
+    .index("by_property", ["propertyId"])
+    .index("by_org", ["orgId"]),
+
+  // Org-wide owner-statement settings (one row per org, created on first change; feeSettings.ts).
+  financeSettings: defineTable({
+    orgId: v.string(),
+    // Default management fee for every property without its own fee. undefined = 500 (5.00%).
+    rosDefaultFeeBps: v.optional(v.number()),
+    updatedBy: v.optional(v.id("users")),
+    updatedAt: v.number(),
+  }).index("by_org", ["orgId"]),
+
+  // Chart of accounts for the owner ledger. Seeded by ledgerAccountSeed.ensureDefaultAccounts.
+  ledgerAccounts: defineTable({
+    orgId: v.string(),
+    name: v.string(),
+    nameKey: v.string(), // normalizeNameKey(name), unique per org
+    kind: rowTypeValidator, // immutable after create
+    systemKey: v.optional(accountSystemKeyValidator),
+    feeBase: v.boolean(), // counts toward the management fee base; only kind "income" may be true
+    active: v.boolean(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_org", ["orgId"])
+    .index("by_org_and_name_key", ["orgId", "nameKey"])
+    .index("by_org_and_system_key", ["orgId", "systemKey"]),
+
+  // The owner ledger: the record of money. A row with statementId is billed on that FINAL
+  // statement and can never change. Rows are never hard-deleted; only unbilled manual rows can be voided.
+  ledgerEntries: defineTable({
+    orgId: v.string(),
+    ownerId: v.id("owners"),
+    propertyId: v.id("properties"),
+    unitId: v.optional(v.id("units")), // absent = "Property level"
+    date: v.string(), // YYYY-MM-DD business date
+    type: rowTypeValidator, // always = account.kind at write time
+    accountId: v.id("ledgerAccounts"),
+    counterparty: v.string(), // tenant / vendor / payee; the Name column is built from it
+    memo: v.string(),
+    amountCents: v.number(), // integer > 0; direction comes from type
+    source: ledgerSourceValidator,
+    sourceId: v.optional(v.string()), // WO id; "<statementId>:<propertyId>" for fee/draw; "<statementId>:<unitId>" for roster_rent; Stripe id later
+    statementId: v.optional(v.id("ownerStatements")), // set = billed on that FINAL statement -> immutable
+    voided: v.optional(v.boolean()),
+    voidedAt: v.optional(v.number()),
+    voidedBy: v.optional(v.id("users")),
+    voidReason: v.optional(v.string()),
+    // Set at finalize on every billed row: the date it shows on the statement (a carried-forward
+    // row posts on the period's first day). `date` keeps the original date.
+    postedDate: v.optional(v.string()),
+    createdBy: v.optional(v.id("users")), // absent = system (finalize)
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_property_statement_date", ["propertyId", "statementId", "date"]) // unbilled = statementId undefined
+    .index("by_statement", ["statementId"])
+    .index("by_source", ["source", "sourceId"])
+    .index("by_owner_and_date", ["ownerId", "date"])
+    .index("by_org_and_date", ["orgId", "date"])
+    .index("by_account", ["accountId"])
+    .index("by_owner_and_posted", ["ownerId", "postedDate"])
+    .index("by_org_and_posted", ["orgId", "postedDate"]),
+
+  // One statement per owner per month (draft -> final, or discarded).
+  ownerStatements: defineTable({
+    orgId: v.string(),
+    ownerId: v.id("owners"),
+    month: v.string(), // "YYYY-MM"
+    periodStart: v.string(), // "YYYY-MM-01"
+    periodEnd: v.string(), // last day of month
+    propertyIds: v.array(v.id("properties")), // column order (sorted at create)
+    status: statementStatusValidator,
+    excludedKeys: v.array(v.string()), // "entry:<ledgerEntryId>" | "wo:<workOrderId>" | "rent:<unitId>" (rent: didn't pay)
+    // Lines that are left off by default (dated before the owner's first statement month) and that
+    // the accountant put back on. Same key format as excludedKeys.
+    includedKeys: v.optional(v.array(v.string())),
+    adjustments: v.array(
+      v.object({
+        propertyId: v.id("properties"),
+        earlyPaymentsCents: v.number(), // >= 0, default 0
+        unpaidBillsCents: v.number(), // >= 0, default 0
+        propertyReserveCents: v.optional(v.number()), // undefined = use ownerProperties.propertyReserveCents
+      }),
+    ),
+    overrides: v.array(
+      v.object({
+        propertyId: v.id("properties"),
+        feeAmountCents: v.optional(v.number()), // undefined = computed
+        feeMemo: v.optional(v.string()), // undefined = standard memo
+        feeExcluded: v.optional(v.boolean()),
+        drawAmountCents: v.optional(v.number()), // undefined = suggested
+        drawExcluded: v.optional(v.boolean()),
+      }),
+    ),
+    // Roster-rent prefill (until Stripe): the accountant's edits to the prefilled rent line of a unit
+    // (key "rent:<unitId>"). A field left out = the roster value (amount = units.rent, date =
+    // periodStart, name = active tenants, memo "Payment"). Removing a line uses excludedKeys.
+    rentOverrides: v.optional(
+      v.array(
+        v.object({
+          unitId: v.id("units"),
+          amountCents: v.optional(v.number()), // integer > 0
+          date: v.optional(v.string()), // YYYY-MM-DD inside the period
+          counterparty: v.optional(v.string()),
+          memo: v.optional(v.string()),
+        }),
+      ),
+    ),
+    // "I've checked the rent lines against what was actually received". Valid only while
+    // rentCheckedHash equals the current fingerprint of the rent lines; any change clears it.
+    rentCheckedAt: v.optional(v.number()),
+    rentCheckedBy: v.optional(v.id("users")),
+    rentCheckedHash: v.optional(v.string()),
+    statementDate: v.optional(v.string()), // set at finalize (business date)
+    endingCashCents: v.optional(v.number()), // set at finalize ("All properties")
+    availableCents: v.optional(v.number()), // set at finalize ("All properties")
+    finalizedAt: v.optional(v.number()),
+    finalizedBy: v.optional(v.id("users")),
+    discardedAt: v.optional(v.number()),
+    discardedBy: v.optional(v.id("users")),
+    emailedAt: v.optional(v.number()), // DELIVERY HOOK (not written in v1)
+    emailedTo: v.optional(v.array(v.string())), // DELIVERY HOOK
+    createdBy: v.id("users"),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_org_and_month", ["orgId", "month"])
+    .index("by_owner_and_month", ["ownerId", "month"]),
+
+  // One row per statement x property, for idempotency, locking and carry-forward.
+  ownerStatementProperties: defineTable({
+    orgId: v.string(),
+    statementId: v.id("ownerStatements"),
+    ownerId: v.id("owners"),
+    propertyId: v.id("properties"),
+    month: v.string(),
+    status: statementStatusValidator, // always equal to the parent's status (same mutation)
+    endingCashCents: v.optional(v.number()), // this property's ending cash, set at finalize = next month's beginning
+  })
+    .index("by_property_and_month", ["propertyId", "month"])
+    .index("by_property_and_status", ["propertyId", "status", "month"])
+    .index("by_statement", ["statementId"]),
+
+  // The immutable final content: JSON.stringify(StatementSnapshot) (rosCalc.ts).
+  ownerStatementSnapshots: defineTable({
+    orgId: v.string(),
+    statementId: v.id("ownerStatements"),
+    version: v.literal(1),
+    json: v.string(), // < 900 KB, else finalize refuses
+    createdAt: v.number(),
+  }).index("by_statement", ["statementId"]),
 });

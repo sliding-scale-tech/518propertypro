@@ -207,7 +207,15 @@ export default function TeamPage() {
                         ) : (
                           <Avatar
                             name={member.name}
-                            tone={member.appRole === "admin" ? "warn" : member.appRole === "technician" ? "ok" : "acc"}
+                            tone={
+                              member.appRole === "admin"
+                                ? "warn"
+                                : member.appRole === "technician"
+                                  ? "ok"
+                                  : member.appRole === "accountant"
+                                    ? "vio"
+                                    : "acc"
+                            }
                           />
                         )}
                         <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium">

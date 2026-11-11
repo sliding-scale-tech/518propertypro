@@ -3,6 +3,8 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { internalMutation, internalQuery } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { writeAudit } from "./audit";
+import { emptyLinkTally, linkOwnerForProperty, loadIdentityData, ownerIdentityChanged, tallyLink } from "./ownerLinking";
+import type { IdentityData, LinkTally } from "./ownerLinking";
 import { syncRosterResidents } from "./residents";
 import { assertValidAssetManager, upsertRosterUnit } from "./units";
 import { availableUnitsFor, findUnitFor } from "./sarahTools";
@@ -116,6 +118,7 @@ async function upsertProperty(
   p: MappedProperty,
   existing: Doc<"properties"> | null,
   note: string,
+  owners: { data: IdentityData; tally: LinkTally },
 ): Promise<{ property: Doc<"properties">; action: keyof Counts }> {
   const fields = desiredProperty(p, existing);
   if (!existing) {
@@ -131,6 +134,10 @@ async function upsertProperty(
       updatedAt: Date.now(),
     });
     await writeAudit(ctx, { orgId, entity: "property", entityId: id, action: "property_created", to: p.name, note });
+    // Owner identity: link the owner when name + email make it certain (ownerLinking.ts); never throws.
+    if (fields.ownerName !== undefined) {
+      tallyLink(owners.tally, await linkOwnerForProperty(ctx, id, { source: "sheet_import", data: owners.data }));
+    }
     return { property: (await ctx.db.get(id))!, action: "created" };
   }
   const patch: Record<string, unknown> = {};
@@ -150,6 +157,11 @@ async function upsertProperty(
     action: "property_updated",
     note: `${note}: ${changed.join(", ")}`,
   });
+  // Owner identity: a changed owner name / email may link an owner (ownerLinking.ts). An existing
+  // link is never moved; a different owner shows on the Owners page's "Needs an owner" list.
+  if (ownerIdentityChanged(existing, { ...existing, ...(patch as Partial<Doc<"properties">>) })) {
+    tallyLink(owners.tally, await linkOwnerForProperty(ctx, existing._id, { source: "sheet_import", data: owners.data }));
+  }
   return { property: (await ctx.db.get(existing._id))!, action: "updated" };
 }
 
@@ -199,8 +211,13 @@ async function importOnce(ctx: MutationCtx, args: ImportArgs, groups: Map<string
     sourceRows: zero(),
     residents: { created: 0, updated: 0, deactivated: 0, unchanged: 0 },
     available: [] as string[],
+    // Owner links made for the properties of this batch (ownerLinking.ts): linked to an existing
+    // owner, new owner created, already linked, or left for the "Needs an owner" list.
+    ownerLinks: emptyLinkTally(),
   };
   const resolvedIds = new Set<string>();
+  // Owners + "Not the same owner" decisions, read once per batch (not once per property).
+  const owners = { data: await loadIdentityData(ctx, args.orgId), tally: summary.ownerLinks };
 
   for (const [name, rows] of groups) {
     const prop = assertSameProperty(rows);
@@ -210,7 +227,7 @@ async function importOnce(ctx: MutationCtx, args: ImportArgs, groups: Map<string
       throw new ConvexError(`"${name}" resolves to a property another group in this batch also uses.`);
     }
     const note = `Roster import (${CATEGORY_NAME[args.category]})`;
-    const { property, action } = await upsertProperty(ctx, args.orgId, args.assetManagerUserId, prop, existing, note);
+    const { property, action } = await upsertProperty(ctx, args.orgId, args.assetManagerUserId, prop, existing, note, owners);
     resolvedIds.add(property._id);
     summary.properties[action] += 1;
 

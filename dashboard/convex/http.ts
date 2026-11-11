@@ -14,7 +14,8 @@ import {
 import * as waha from "./wahaApi";
 import { isOtlpPayload, parseOtlp } from "./otlp";
 import { isVagueIssue, realPhone, realValue, stripAudioTags } from "./sanitize";
-import { PHOTO_SAY, WAIT_FOR_CALLER, maintenanceLogLines } from "./sarahReplies";
+import { WAIT_FOR_CALLER, confirmedPhoneLines, maintenanceLogLines, photoReplyLines } from "./sarahReplies";
+import { toE164 } from "./phone";
 import { handleClerkWebhook } from "./clerkWebhook";
 import { handleOAuthCallback as handleGoogleOAuthCallback } from "./googleCalendar";
 import type { FunctionReturnType } from "convex/server";
@@ -2342,6 +2343,13 @@ http.route({
     }
     const callerNumber = realPhone(typeof body.caller_id === "string" ? body.caller_id : undefined);
     const callbackNumber = realPhone(typeof body.callback_phone === "string" ? body.callback_phone : undefined);
+    // The confirmed contact number (stored as smsConfirmPhone for the planned confirmation text;
+    // nothing is texted yet). Stored only when it normalises to E.164 AND the caller said yes to
+    // Sarah's read-back. Anything else is answered with what to do next, never a failed request.
+    const confirmedRaw = realValue(optString(body.confirmed_phone, 40));
+    const confirmedYes = body.confirmed_phone_yes === true || body.confirmed_phone_yes === "true";
+    const confirmedE164 = confirmedRaw ? toE164(confirmedRaw) : null;
+    const smsConfirmPhone = confirmedE164 && confirmedYes ? confirmedE164 : undefined;
     const severityReason = optString(body.severity_reason, 500);
     const severityScore =
       body.severity_score === undefined || body.severity_score === null || body.severity_score === ""
@@ -2401,6 +2409,7 @@ http.route({
           // The model's own 1-10 score when it gave one (clamped); else the level's representative score.
           severityScore: severityScore ?? SEVERITY_LEVEL_SCORE[severity],
           severityReason,
+          smsConfirmPhone,
         });
         emergencyAlerted = saved.emergencyAlerted;
       }
@@ -2426,12 +2435,15 @@ http.route({
 
     // Only a life-safety result is spoken now. Routine and urgent results carry closing_line for the
     // close of the call, so Sarah never announces the log mid-intake (see sarahReplies.ts).
+    const confirmedPhone = (stored: boolean) =>
+      confirmedPhoneLines({ given: !!confirmedRaw, valid: !!confirmedE164, confirmed: confirmedYes, stored });
     if (!saved) {
       return Response.json({
         logged: true,
         severity,
         team_alerted: emergencyAlerted,
         ...maintenanceLogLines({ severity, emergencyAlerted, saved: null }),
+        ...confirmedPhone(false),
       });
     }
     const closedOutOfScope = saved.status === "closed_out_of_scope";
@@ -2449,6 +2461,7 @@ http.route({
         emergencyAlerted,
         saved: { routedToAm: saved.routedToAm, closedOutOfScope },
       }),
+      ...confirmedPhone(!!smsConfirmPhone),
     });
   }),
 });
@@ -2650,6 +2663,8 @@ http.route({
  * decides what to do (the AM can send the upload link from the dashboard). The route and tool name
  * are kept so the registered ElevenLabs tool does not have to be re-created.
  * No per-call cap: a repeat call only updates the note and does not notify twice.
+ * The result's say line dictates where to email the photos (photo_email: the unit's asset manager's
+ * memberships.photoEmail) or, when that is not known, says the asset manager will follow up.
  */
 http.route({
   path: "/tools/send-photo-link",
@@ -2658,13 +2673,15 @@ http.route({
     const body = await readBody(request);
     const conversationId = typeof body.conversation_id === "string" ? body.conversation_id.slice(0, 200) : "";
     if (!conversationId) return Response.json({ error: "missing conversation_id" }, { status: 400 });
-    const say = PHOTO_SAY;
+    // No address unless the request this call logged resolved to a unit whose asset manager has a
+    // photo email (photoReplyLines falls back to PHOTO_SAY). The address is never logged here.
+    const fallback = photoReplyLines(null);
     const orgId = await resolveBookingOrg(
       ctx,
       conversationId,
       typeof body.agent_id === "string" ? body.agent_id : undefined,
     );
-    if (!orgId) return Response.json({ recorded: false, say });
+    if (!orgId) return Response.json({ recorded: false, ...fallback });
     try {
       const result = await ctx.runMutation(internal.maintenance.photoRequestFromCall, {
         orgId,
@@ -2677,19 +2694,18 @@ http.route({
       if (!result.recorded) {
         return Response.json({
           recorded: false,
-          say,
+          ...fallback,
           message: "No open maintenance request exists for this call yet. Call log_maintenance_request first, then this again.",
         });
       }
       return Response.json({
         recorded: true,
         request_number: result.number,
-        say,
-        message: `Say the say line once. ${WAIT_FOR_CALLER}`,
+        ...photoReplyLines(result.photoEmail),
       });
     } catch (err) {
       console.error("[send-photo-link] failed:", err);
-      return Response.json({ recorded: false, say });
+      return Response.json({ recorded: false, ...fallback });
     }
   }),
 });

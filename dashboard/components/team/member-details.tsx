@@ -17,9 +17,10 @@ export const APP_ROLE_OPTIONS: ReadonlyArray<{ value: AppRole; label: string; to
   { value: "admin", label: "Admin", tone: "warn", blurb: "Full access. Pat and Alex." },
   { value: "asset_manager", label: "Asset manager", tone: "acc", blurb: "Reviews requests for their units" },
   { value: "technician", label: "Technician", tone: "ok", blurb: "Works assigned jobs on their phone" },
+  { value: "accountant", label: "Accountant", tone: "vio", blurb: "Owner statements and finished work orders" },
 ];
 
-/** Role pill: Admin = warn, Asset manager = acc, Technician = ok; null (no role yet) shows as a warning. */
+/** Role pill: Admin = warn, Asset manager = acc, Technician = ok, Accountant = vio; null (no role yet) shows as a warning. */
 export function AppRoleBadge({ appRole }: { appRole: AppRole | null }) {
   const opt = APP_ROLE_OPTIONS.find((o) => o.value === appRole);
   if (!opt) {

@@ -997,6 +997,19 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
           "The number they want to be reached on, as digits, read back and confirmed. Leave it " +
           "out if they decline or say to use the number they called from; never invent one.",
       },
+      confirmed_phone: {
+        type: "string",
+        description:
+          "The best number to reach them about this request, as digits, sent ONLY after you read it back " +
+          "digit by digit and the caller said yes. The number they are calling from counts only if you " +
+          "read it back and they said yes to it. Leave it out until then; never invent one.",
+      },
+      confirmed_phone_yes: {
+        type: "boolean",
+        description:
+          "True only if the caller said yes, in their own words, after you read confirmed_phone back. " +
+          "A tool result is not a yes. Without it the number is not saved.",
+      },
       spoken_address: { type: "string", description: "The property address the caller said, as they said it." },
       spoken_unit: { type: "string", description: "The unit or apartment number exactly as the caller said it." },
       issue_type: {
@@ -1075,9 +1088,10 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       "Use ONLY when the caller says they are willing to send photos or video of the problem. It sends " +
       "nothing to the caller: it records the offer on the maintenance request logged on this call and " +
       "tells their asset manager, who decides what to do and follows up. Call it only after " +
-      "log_maintenance_request has run. Put the caller's own words, limits or caveats in note (for " +
+      "log_maintenance_request has run. Put the caller's own words, limits or caveats in note (" +
       "for example what they can and cannot send, and when). Never tell the caller you will text them a link; " +
-      "say what the tool's say line says.",
+      "say the tool's say line word for word: it gives the email address for the property's photos when one " +
+      "is known (photo_email). Never say an email address the result did not give.",
     url: `${siteUrl}/tools/send-photo-link`,
     required: ["conversation_id"],
     properties: {

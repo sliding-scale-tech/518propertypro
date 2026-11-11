@@ -8,6 +8,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { PHOTO_EMAIL_INVALID, speakablePhotoEmail } from "@/convex/sarahReplies";
 import { PriorityChip, StatusPill } from "@/components/board/chips";
 import { browserTimeZone } from "@/components/dashboard/format";
 import { toast } from "@/components/toast";
@@ -126,12 +127,17 @@ function ScheduleCard({ userId, profile }: { userId: Id<"users">; profile: Profi
   );
 }
 
-type Draft = { personalEmail: string; phone: string; internalNotes: string };
+type Draft = { personalEmail: string; photoEmail: string; phone: string; internalNotes: string };
 
 function ProfileCard({ userId, profile, startInEdit }: { userId: Id<"users">; profile: Profile; startInEdit: boolean }) {
   const updateProfile = useMutation(api.assetManagers.updateProfile);
   const sendReset = useAction(api.assetManagers.sendPasswordReset);
-  const draftOf = (): Draft => ({ personalEmail: profile.personalEmail ?? "", phone: profile.phone ?? "", internalNotes: profile.internalNotes });
+  const draftOf = (): Draft => ({
+    personalEmail: profile.personalEmail ?? "",
+    photoEmail: profile.photoEmail ?? "",
+    phone: profile.phone ?? "",
+    internalNotes: profile.internalNotes,
+  });
   const [draft, setDraft] = useState<Draft | null>(() => (startInEdit ? draftOf() : null));
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -155,18 +161,24 @@ function ProfileCard({ userId, profile, startInEdit }: { userId: Id<"users">; pr
   const phoneClean = draft ? draft.phone.replace(/[\s().-]/g, "") : "";
   const errors = {
     personalEmail: draft && draft.personalEmail.trim() !== "" && !EMAIL_RE.test(draft.personalEmail.trim()) ? "Enter a valid email address." : "",
+    photoEmail: draft && draft.photoEmail.trim() !== "" && !speakablePhotoEmail(draft.photoEmail) ? PHOTO_EMAIL_INVALID : "",
     phone: draft && phoneClean !== "" && !E164_RE.test(phoneClean) ? "Use international format, e.g. +14165550187." : "",
   };
 
   async function save() {
     if (!draft) return;
     setTouched(true);
-    if (errors.personalEmail || errors.phone) return;
+    const first = errors.personalEmail || errors.photoEmail || errors.phone;
+    if (first) {
+      toast.error(first);
+      return;
+    }
     setSaving(true);
     try {
       await updateProfile({
         userId,
         personalEmail: draft.personalEmail.trim(),
+        photoEmail: draft.photoEmail.trim(),
         phone: phoneClean,
         internalNotes: draft.internalNotes,
       });
@@ -193,6 +205,9 @@ function ProfileCard({ userId, profile, startInEdit }: { userId: Id<"users">; pr
           </LabelValue>
           <LabelValue label="Contact Number">
             <span className="text-[15px] font-normal">{profile.phone ?? "Not set"}</span>
+          </LabelValue>
+          <LabelValue label="Photo Email">
+            <span className="break-all text-[15px] font-normal">{profile.photoEmail ?? "Not set"}</span>
           </LabelValue>
         </div>
         <div className="mt-4">
@@ -239,6 +254,19 @@ function ProfileCard({ userId, profile, startInEdit }: { userId: Id<"users">; pr
           <div>
             <Input id="am-work-email" value={profile.workEmail} disabled readOnly className="h-11" />
             <p className="mt-1 text-xs text-muted-foreground">Comes from sign-in</p>
+          </div>
+        </div>
+        <div className={row}>
+          <label htmlFor="am-photo-email" className={lbl}>Photo Email</label>
+          <div>
+            <Input id="am-photo-email" type="email" value={draft.photoEmail} maxLength={254} placeholder="goldteam@518propertypro.com" onChange={(e) => set({ photoEmail: e.target.value })} className="h-11 aria-invalid:border-danger-ink" aria-invalid={touched && Boolean(errors.photoEmail)} aria-describedby="am-photo-email-help" />
+            {touched && errors.photoEmail ? (
+              <p className="mt-1 text-xs text-danger-ink">{errors.photoEmail}</p>
+            ) : (
+              <p id="am-photo-email-help" className="mt-1 text-xs text-muted-foreground">
+                Sarah tells tenants in this person&apos;s units to email repair photos here. Leave empty and she says the asset manager will follow up.
+              </p>
+            )}
           </div>
         </div>
         <div className={row}>

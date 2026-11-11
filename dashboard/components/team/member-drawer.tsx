@@ -2,6 +2,7 @@
 
 import type { FunctionReturnType } from "convex/server";
 import { AlertTriangle, Trash2 } from "lucide-react";
+import Link from "next/link";
 import type { api } from "@/convex/_generated/api";
 import { MemberDetails, APP_ROLE_OPTIONS } from "@/components/team/member-details";
 import { Btn, Drawer, DrawerSection, Pill } from "@/components/ui";
@@ -62,6 +63,15 @@ export function MemberDrawer({
               </p>
             ) : null}
           </div>
+
+          {isAdmin && member.appRole === "technician" ? (
+            <Link
+              href={`/technicians/${member.userId}`}
+              className="inline-flex h-10 w-full items-center justify-center rounded-xl bg-primary px-4 text-[13px] font-semibold text-primary-foreground hover:bg-primary/90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+            >
+              View profile
+            </Link>
+          ) : null}
 
           <DrawerSection title="Role and contact">
             {/* Keyed so one person's unsaved drafts never carry over to the next person opened. */}

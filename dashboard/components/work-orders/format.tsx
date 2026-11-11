@@ -511,8 +511,25 @@ export function WorkOrderFormat({
                 { label: "Hours", value: hoursText(w.totals.hours) },
                 ...w.expenses.map((e) => ({
                   label: e.kind === "material" ? "Material" : "Receipt",
-                  value: `${e.description} · ${fmtMoney(e.amountCents)}`,
+                  value:
+                    e.kind === "material" && e.reimbursable !== undefined ? (
+                      <span className="inline-flex flex-wrap items-center gap-1.5">
+                        {`${e.description} · ${fmtMoney(e.amountCents)}`}
+                        {/* SWEEP = company card; REIMB = the technician paid and is reimbursed. Older rows show no tag. */}
+                        <Pill
+                          tone={e.reimbursable ? "warn" : "neutral"}
+                          title={e.reimbursable ? "The technician paid and is reimbursed" : "Paid on the company card"}
+                        >
+                          {e.reimbursable ? "REIMB" : "SWEEP"}
+                        </Pill>
+                      </span>
+                    ) : (
+                      `${e.description} · ${fmtMoney(e.amountCents)}`
+                    ),
                 })),
+                ...(w.workOrder.workCompletedDescription
+                  ? [{ label: "Work completed", value: <span className="whitespace-pre-wrap">{w.workOrder.workCompletedDescription}</span> }]
+                  : []),
                 ...w.notes.map((n) => ({ label: "Notes", value: n.body })),
                 ...(w.workOrder.completedAt ? [{ label: "Completed", value: fmtDateTime(w.workOrder.completedAt) }] : []),
               ]}

@@ -4,8 +4,8 @@ import { useQuery } from "convex/react";
 import { ClipboardList, Loader2 } from "lucide-react";
 import { useState } from "react";
 import { RequireView } from "@/components/require-view";
-import { Seg } from "@/components/ui";
 import { JobCard } from "@/components/tech/job-card";
+import { TechBadge, TechCard, TechPageTitle, TechSeg } from "@/components/tech/ui";
 import { api } from "@/convex/_generated/api";
 
 type Tab = "open" | "done";
@@ -22,38 +22,48 @@ function MyJobs() {
     .map(({ j }) => j);
   const done = (jobs ?? []).filter((j) => ["completed", "reviewed_closed"].includes(j.status));
   const shown = tab === "open" ? open : done;
+  const today = new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
 
   return (
-    <div>
-      <h1 className="text-xl font-semibold">My jobs</h1>
-      <div className="mt-4">
-        <Seg
-          label="Job list"
-          value={tab}
-          onChange={setTab}
-          options={[
-            { value: "open", label: `Open (${open.length})` },
-            { value: "done", label: `Done (${done.length})` },
-          ]}
-        />
-      </div>
+    <div className="flex flex-col gap-4">
+      <TechPageTitle title="My jobs" subtitle={`${today} · Only work assigned to you`} />
+
+      {jobs !== undefined && (
+        <div className="flex flex-wrap gap-2">
+          <TechBadge tone="info">{open.length} active</TechBadge>
+          <TechBadge tone="success">{done.length} submitted</TechBadge>
+        </div>
+      )}
+
+      <TechSeg
+        label="Job list"
+        value={tab}
+        onChange={setTab}
+        options={[
+          { value: "open", label: `Open (${open.length})` },
+          { value: "done", label: `Done (${done.length})` },
+        ]}
+      />
 
       {jobs === undefined ? (
-        <div className="flex justify-center py-16">
-          <Loader2 className="h-6 w-6 animate-spin text-primary" />
-        </div>
+        <TechCard as="div" className="items-center py-10 text-center">
+          <Loader2 aria-hidden className="h-6 w-6 animate-spin text-primary" />
+          <p className="text-sm text-muted-foreground">Loading your jobs…</p>
+        </TechCard>
       ) : shown.length === 0 ? (
-        <div className="mt-8 rounded-[20px] border border-dashed border-border p-8 text-center">
-          <ClipboardList className="mx-auto h-8 w-8 text-muted-foreground" />
-          <p className="mt-3 font-medium">{tab === "open" ? "No open jobs right now" : "Nothing finished yet"}</p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {tab === "open" ? "New jobs from Pat will show up here." : "Completed jobs will appear here."}
-          </p>
-        </div>
+        <TechCard as="div" className="items-center py-10 text-center">
+          <ClipboardList aria-hidden className="h-8 w-8 text-muted-foreground" />
+          <div>
+            <p className="text-base font-semibold">{tab === "open" ? "No open jobs right now" : "Nothing finished yet"}</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {tab === "open" ? "New jobs from Pat will show up here." : "Completed jobs will appear here."}
+            </p>
+          </div>
+        </TechCard>
       ) : (
-        <ul className="mt-4 space-y-3">
+        <ul className="flex flex-col gap-4">
           {shown.map((j) => (
-            <JobCard key={j._id} job={j} />
+            <JobCard key={j._id} job={{ ...j, address: j.propertyAddress }} />
           ))}
         </ul>
       )}

@@ -23,7 +23,10 @@ export type AuditEntity =
   | "membership"
   | "resident"
   | "property"
-  | "conversation";
+  | "conversation"
+  | "owner"
+  | "ledger_entry"
+  | "ledger_account";
 
 export async function writeAudit(
   ctx: MutationCtx,

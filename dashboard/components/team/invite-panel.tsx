@@ -113,12 +113,13 @@ export function InvitePanel() {
 
 export type RoleFilter = "all" | AppRole | "none";
 
-// URL values (?role=admin|asset_manager|technician). Old plural links still land on the right chip.
+// URL values (?role=admin|asset_manager|technician|accountant). Old plural links still land on the right chip.
 export const ROLE_FILTERS: ReadonlyArray<{ value: RoleFilter; label: string }> = [
   { value: "all", label: "All" },
   { value: "admin", label: "Admins" },
   { value: "asset_manager", label: "Asset managers" },
   { value: "technician", label: "Technicians" },
+  { value: "accountant", label: "Accountants" },
   { value: "none", label: "No role" },
 ];
 
@@ -126,6 +127,7 @@ const ROLE_ALIASES: Record<string, RoleFilter> = {
   admins: "admin",
   asset_managers: "asset_manager",
   technicians: "technician",
+  accountants: "accountant",
 };
 
 export function parseRoleFilter(raw: string | null): RoleFilter {
@@ -140,7 +142,7 @@ export function matchesRoleFilter(filter: RoleFilter, m: { appRole: AppRole | nu
   return m.appRole === filter;
 }
 
-/** Pending-invite label: Admin / Asset manager / Technician, from the invite's app role. */
+/** Pending-invite label: Admin / Asset manager / Technician / Accountant, from the invite's app role. */
 export function inviteTypeLabel(inv: { appRole: AppRole | null }): string {
   return APP_ROLE_OPTIONS.find((o) => o.value === inv.appRole)?.label ?? "No role yet";
 }

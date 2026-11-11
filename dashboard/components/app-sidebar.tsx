@@ -24,6 +24,7 @@ import {
   Box,
   Target,
   CircleUser,
+  HardHat,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useQuery } from "convex/react";
@@ -94,6 +95,7 @@ const NAV: NavEntry[] = [
         alsoActive: ["/maintenance"],
       },
       { href: "/asset-managers", label: "Assets Managers", icon: Sparkles, views: ["admin"] },
+      { href: "/technicians", label: "Technicians", icon: HardHat, views: ["admin"] },
     ],
   },
   {
@@ -123,13 +125,7 @@ const NAV: NavEntry[] = [
     icon: CircleDollarSign,
     items: [
       { href: "/finance", label: "Payment", icon: FileText, views: ["admin"] },
-      {
-        href: "/finance",
-        label: "Owner Reports",
-        icon: FileText,
-        views: ["admin"],
-        query: { key: "view", value: "statements" },
-      },
+      { href: "/owner-statements", label: "Owner Reports", icon: FileText, views: ["admin", "accountant"] },
     ],
   },
   {

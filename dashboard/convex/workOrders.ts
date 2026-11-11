@@ -10,6 +10,8 @@ import { nextNumber } from "./counters";
 import { checkStorageUsable, markWorkOrderCreated } from "./maintenance";
 import { scheduleNotify, staffRecipientIds } from "./notify";
 import { resolveTimeZone, tenantPreferredTimeText, windowLabel, windowProblem } from "./workOrderWindow";
+import { billingPatch, billingView, checkBillingFields, seedAccounts } from "./workOrderBilling";
+import { MAX_WORK_DESCRIPTION } from "./rosPolicy";
 
 /**
  * Work orders (F5): the formal job a technician performs. Created by Pat (from a validated
@@ -219,8 +221,35 @@ export async function readable(
   return null;
 }
 
-/** Accountants read finished work for the books; when the tenant wanted a visit isn't part of that. */
+/**
+ * Owner-statement billing keys a technician must never receive (spec 5.6): what the owner is
+ * charged, the internal cost, the account and the billed-statement links.
+ */
+const TECHNICIAN_HIDDEN_KEYS = [
+  "billAmountCents",
+  "costCents",
+  "rosAccountId",
+  "noOwnerCharge",
+  "billedStatementId",
+  "billedLedgerEntryId",
+  "billedAt",
+] as const;
+
+export type TechnicianWorkOrder = Omit<Doc<"workOrders">, (typeof TECHNICIAN_HIDDEN_KEYS)[number]>;
+
+/** The work order without its billing keys: apply to every WO doc returned to a technician. */
+export function forTechnician(wo: Doc<"workOrders">): TechnicianWorkOrder {
+  const out: Record<string, unknown> = { ...wo };
+  for (const k of TECHNICIAN_HIDDEN_KEYS) delete out[k];
+  return out as TechnicianWorkOrder;
+}
+
+/**
+ * Accountants read finished work for the books; when the tenant wanted a visit isn't part of that.
+ * Technicians get the work order without its billing keys (forTechnician).
+ */
 function visibleWo(wo: Doc<"workOrders">, view: ReturnType<typeof viewFor>): Doc<"workOrders"> {
+  if (view === "technician") return forTechnician(wo);
   return view === "accountant" ? { ...wo, tenantPreferredTime: undefined } : wo;
 }
 
@@ -619,13 +648,17 @@ export const list = query({
     rows = rows.slice(0, LIST_CAP);
 
     const units = new Map<string, string>();
-    const properties = new Map<string, string>();
+    const properties = new Map<string, { name: string; address: string | undefined }>();
     const users = new Map<string, string>();
     const out = [];
     for (const w of rows) {
       if (!units.has(w.unitId)) units.set(w.unitId, (await ctx.db.get(w.unitId))?.unitNumber ?? "?");
       if (!properties.has(w.propertyId)) {
-        properties.set(w.propertyId, (await ctx.db.get(w.propertyId))?.name ?? "Unknown");
+        const property = await ctx.db.get(w.propertyId);
+        properties.set(w.propertyId, {
+          name: property?.name ?? "Unknown",
+          address: property?.address?.formatted?.trim() || undefined,
+        });
       }
       let technicianName: string | undefined;
       if (w.technicianUserId) {
@@ -654,7 +687,9 @@ export const list = query({
       out.push({
         ...visibleWo(w, view),
         unitNumber: units.get(w.unitId),
-        propertyName: properties.get(w.propertyId),
+        propertyName: properties.get(w.propertyId)?.name,
+        // Street address for the technician's maps link; undefined when the property has none.
+        propertyAddress: properties.get(w.propertyId)?.address,
         technicianName,
         requestNumber: request?.number,
         isOverdue: ACTIVE.includes(w.status) && w.dueDate !== undefined && w.dueDate < Date.now(),
@@ -734,6 +769,8 @@ export async function expensesTabFor(
         amount: e.amountCents, // cents
         submittedBy: await nameOf(e.technicianUserId),
         hasReceipt: !!(e.receiptFileId && fileById.has(e.receiptFileId)),
+        // SWEEP (false, company card) / REIMB (true, the technician is repaid); null on older rows.
+        reimbursable: e.reimbursable ?? null,
         createdAt: e.createdAt,
       })),
     ),
@@ -806,6 +843,8 @@ export const get = query({
       notes,
       actionRequired: view === "technician" ? await actionRequiredFor(ctx, wo, notes) : null,
       expensesTab: view === "technician" ? null : await expensesTabFor(ctx, wo, fileRows, time, expenses, notes, org),
+      // Bill, cost and account are staff-only: technicians get null (and a stripped workOrder).
+      billing: view === "technician" ? null : await billingView(ctx, org, wo),
       totals: {
         hours: time.reduce((sum, t) => sum + t.hours, 0),
         expenseCents: expenses.reduce((sum, e) => sum + e.amountCents, 0),
@@ -826,6 +865,42 @@ export const get = query({
 
 // --- Management (Pat powers, or the AM who owns a manual WO) --------------------------
 
+/**
+ * The one write path for putting a technician on a work order (assign and reassignMany): patch,
+ * audit, then notify the new technician and the one taking it off. Callers have already checked
+ * scope, that the work order is still active, and that `to` is a technician on this team.
+ * `reason` (reassignMany) goes on the audit row as "Reason: ...", like unit reassignments.
+ */
+async function applyAssignment(
+  ctx: MutationCtx,
+  org: OrgContext,
+  wo: Doc<"workOrders">,
+  unit: Doc<"units"> | null,
+  to: Id<"users">,
+  reason?: string,
+) {
+  const next: Status = wo.status === "created" ? "assigned" : wo.status;
+  if (next !== wo.status) assertWorkOrderTransition(wo.status, next);
+  await ctx.db.patch(wo._id, {
+    technicianUserId: to,
+    status: next,
+    updatedAt: Date.now(),
+  });
+  await writeAudit(ctx, {
+    orgId: org.orgId,
+    entity: "work_order",
+    entityId: wo._id,
+    action: wo.technicianUserId ? "reassigned" : "assigned",
+    actorUserId: org.user._id,
+    from: wo.technicianUserId,
+    to,
+    note: reason ? `Reason: ${reason}` : undefined,
+  });
+  await notifyTech(ctx, wo, unit, to, "wo_assigned", org.user._id);
+  // The previous technician learns the job is no longer theirs.
+  await notifyTech(ctx, wo, unit, wo.technicianUserId, "wo_changed", org.user._id);
+}
+
 export const assign = mutation({
   args: {
     workOrderId: v.id("workOrders"),
@@ -837,26 +912,82 @@ export const assign = mutation({
     await assertTechnician(ctx, org.orgId, args.technicianUserId);
     // The appointment window is changed through editScope.
     if (wo.technicianUserId === args.technicianUserId) return;
+    await applyAssignment(ctx, org, wo, unit, args.technicianUserId);
+  },
+});
 
-    const to: Status = wo.status === "created" ? "assigned" : wo.status;
-    if (to !== wo.status) assertWorkOrderTransition(wo.status, to);
-    await ctx.db.patch(wo._id, {
-      technicianUserId: args.technicianUserId,
-      status: to,
-      updatedAt: Date.now(),
-    });
-    await writeAudit(ctx, {
-      orgId: org.orgId,
-      entity: "work_order",
-      entityId: wo._id,
-      action: wo.technicianUserId ? "reassigned" : "assigned",
-      actorUserId: org.user._id,
-      from: wo.technicianUserId,
-      to: args.technicianUserId,
-    });
-    await notifyTech(ctx, wo, unit, args.technicianUserId, "wo_assigned", org.user._id);
-    // The previous technician learns the job is no longer theirs.
-    await notifyTech(ctx, wo, unit, wo.technicianUserId, "wo_changed", org.user._id);
+const MAX_REASSIGN = 50;
+const MAX_REASSIGN_REASON = 500;
+
+function techName(u: Doc<"users"> | null): string {
+  return [u?.firstName, u?.lastName].filter(Boolean).join(" ").trim() || u?.email || "Unknown";
+}
+
+/**
+ * Admin "Manage assignment" (Technicians > profile > Work orders): moves one or more active work
+ * orders to another technician, with a required reason kept on each audit row. A work order always
+ * keeps a technician: this only ever replaces one, never clears it. All-or-nothing: every work
+ * order is checked before any is changed (and a throw rolls the whole mutation back anyway).
+ *
+ * Args are plain strings so a missing pick reaches the handler and gets a message a person can act
+ * on, instead of the validator's generic rejection.
+ */
+export const reassignMany = mutation({
+  args: {
+    workOrderIds: v.array(v.string()),
+    toTechnicianUserId: v.optional(v.union(v.string(), v.null())),
+    reason: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const org = await requireOrg(ctx);
+    if (!canManageMaintenance(org)) throw new ConvexError("Only admins can reassign work orders.");
+
+    const uniqueIds = [...new Set(args.workOrderIds.map((id) => id.trim()).filter(Boolean))];
+    if (uniqueIds.length === 0) throw new ConvexError("Select at least one work order to reassign.");
+    if (uniqueIds.length > MAX_REASSIGN) {
+      throw new ConvexError(`Reassign at most ${MAX_REASSIGN} work orders at a time.`);
+    }
+    const rawTo = args.toTechnicianUserId?.trim() ?? "";
+    const to = rawTo ? ctx.db.normalizeId("users", rawTo) : null;
+    if (!rawTo) throw new ConvexError("Select the technician to reassign these work orders to.");
+    if (!to) throw new ConvexError("That person is not a technician on this team.");
+    const reason = (args.reason ?? "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim();
+    if (!reason) throw new ConvexError("Enter a reason for the reassignment.");
+    if (reason.length > MAX_REASSIGN_REASON) {
+      throw new ConvexError(`The reason is too long (at most ${MAX_REASSIGN_REASON} characters).`);
+    }
+    await assertTechnician(ctx, org.orgId, to);
+    const newUser = await ctx.db.get(to);
+    const newName = techName(newUser);
+
+    // Check everything first.
+    const found: Array<{ wo: Doc<"workOrders">; unit: Doc<"units"> }> = [];
+    for (const raw of uniqueIds) {
+      const id = ctx.db.normalizeId("workOrders", raw);
+      const hit = id ? await readable(ctx, org, id) : null;
+      if (!hit) throw new ConvexError("One of the selected work orders was not found. Refresh and try again.");
+      if (!canManageWo(org, hit.wo, hit.unit)) throw new ConvexError("You don't have access to that.");
+      if (!ACTIVE.includes(hit.wo.status)) {
+        throw new ConvexError(`WO-${hit.wo.number} is ${hit.wo.status.replace(/_/g, " ")} and can no longer be reassigned.`);
+      }
+      if (hit.wo.technicianUserId === to) {
+        throw new ConvexError(`WO-${hit.wo.number} is already assigned to ${newName}. Pick a different technician.`);
+      }
+      found.push(hit);
+    }
+
+    const previousIds = [...new Set(found.map((f) => f.wo.technicianUserId).filter((id): id is Id<"users"> => !!id))];
+    const previous = await Promise.all(previousIds.map(async (id) => ({ userId: id, name: techName(await ctx.db.get(id)) })));
+    for (const f of found) await applyAssignment(ctx, org, f.wo, f.unit, to, reason);
+
+    return {
+      at: Date.now(),
+      // One name when every work order came from the same technician (the profile tab's case).
+      previousTechnician: previous.length === 1 ? previous[0] : null,
+      previousTechnicians: previous,
+      newTechnician: { userId: to, name: newName },
+      workOrders: found.map((f) => ({ id: f.wo._id, number: `WO-${f.wo.number}` })),
+    };
   },
 });
 
@@ -964,17 +1095,38 @@ export const cancel = mutation({
   },
 });
 
-/** Pat reviews a submitted job and closes it out. */
+/**
+ * Pat reviews a submitted job and closes it out, setting the owner-statement billing at the same
+ * time (spec 5.6): description, Bill $ (unless "No charge to owner"), optional internal Cost $,
+ * account (default Repairs) and the property-level flag. Field errors are ConvexError({ message, field }).
+ */
 export const reviewClose = mutation({
-  args: { workOrderId: v.id("workOrders"), note: v.optional(v.string()) },
+  args: {
+    workOrderId: v.id("workOrders"),
+    note: v.optional(v.string()),
+    workCompletedDescription: v.optional(v.string()),
+    billAmountCents: v.optional(v.union(v.number(), v.null())),
+    costCents: v.optional(v.union(v.number(), v.null())),
+    rosAccountId: v.optional(v.string()),
+    billPropertyLevel: v.optional(v.boolean()),
+    noOwnerCharge: v.optional(v.boolean()),
+  },
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
     if (!canManageMaintenance(org)) throw new ConvexError("You don't have access to that.");
     const found = await readable(ctx, org, args.workOrderId);
     if (!found) throw new ConvexError("Work order not found.");
     assertWorkOrderTransition(found.wo.status, "reviewed_closed");
+    await seedAccounts(ctx, org);
+    const { value, account } = await checkBillingFields(ctx, org.orgId, args);
+    const note = optText(args.note, 1000);
     const now = Date.now();
-    await ctx.db.patch(found.wo._id, { status: "reviewed_closed", closedAt: now, updatedAt: now });
+    await ctx.db.patch(found.wo._id, {
+      status: "reviewed_closed",
+      closedAt: now,
+      updatedAt: now,
+      ...billingPatch(value, account),
+    });
     await writeAudit(ctx, {
       orgId: org.orgId,
       entity: "work_order",
@@ -983,7 +1135,21 @@ export const reviewClose = mutation({
       actorUserId: org.user._id,
       from: found.wo.status,
       to: "reviewed_closed",
-      note: optText(args.note, 1000),
+      note,
+    });
+    await writeAudit(ctx, {
+      orgId: org.orgId,
+      entity: "work_order",
+      entityId: found.wo._id,
+      action: "billing_set",
+      actorUserId: org.user._id,
+      to: JSON.stringify({
+        billAmountCents: value.billAmountCents,
+        costCents: value.costCents,
+        account: account?.name ?? null,
+        billPropertyLevel: value.billPropertyLevel,
+        noOwnerCharge: value.noOwnerCharge,
+      }),
     });
   },
 });
@@ -1128,6 +1294,11 @@ export const addExpense = mutation({
     }
     if (args.quantity !== undefined && !(Number.isFinite(args.quantity) && args.quantity > 0)) {
       throw new ConvexError("Quantity must be more than zero.");
+    }
+    // SWEEP (company card, false) or REIMB (technician repaid, true) is required on new material
+    // lines (ASSUMPTION A3). Rows saved before this rule keep reimbursable undefined.
+    if (args.kind === "material" && args.reimbursable === undefined) {
+      throw new ConvexError({ message: "Choose SWEEP or REIMB for this material.", field: "reimbursable" });
     }
     if (args.receiptFileId) {
       const file = await ctx.db.get(args.receiptFileId);
@@ -1279,10 +1450,12 @@ export async function attachWorkOrderFile(
 
 /** Technician submits the job. Refuses, listing everything missing, until requirements are met. */
 export const submitCompleted = mutation({
-  args: { workOrderId: v.id("workOrders") },
+  args: { workOrderId: v.id("workOrders"), workCompletedDescription: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const { org, wo } = await ownJob(ctx, args.workOrderId);
     assertWorkOrderTransition(wo.status, "completed");
+    // What the technician did; it becomes the memo on the owner statement (ASSUMPTION A30).
+    const workCompletedDescription = (args.workCompletedDescription ?? "").trim();
 
     const [files, time, notes] = await Promise.all([
       ctx.db.query("workOrderFiles").withIndex("by_work_order", (q) => q.eq("workOrderId", wo._id)).take(MAX_FILES_PER_WO),
@@ -1302,10 +1475,14 @@ export const submitCompleted = mutation({
     if (wo.requiredOnSubmit.notes && !notes.some((n) => n.authorUserId === org.user._id)) {
       missing.push("a note");
     }
+    if (!workCompletedDescription) missing.push("a description of the work completed");
     if (missing.length) throw new ConvexError(`Can't submit yet. Missing: ${missing.join(", ")}.`);
+    if (workCompletedDescription.length > MAX_WORK_DESCRIPTION) {
+      throw new ConvexError({ message: "Keep the description under 2,000 characters.", field: "workCompletedDescription" });
+    }
 
     const now = Date.now();
-    await ctx.db.patch(wo._id, { status: "completed", completedAt: now, updatedAt: now });
+    await ctx.db.patch(wo._id, { status: "completed", completedAt: now, updatedAt: now, workCompletedDescription });
     await writeAudit(ctx, {
       orgId: org.orgId,
       entity: "work_order",

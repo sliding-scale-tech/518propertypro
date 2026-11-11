@@ -11,6 +11,7 @@ import { ConfirmDialog, Drawer, Textarea, Timeline, WaitNote, cx } from "@/compo
 import { errorMessage, toast } from "@/components/ui/toast";
 import { browserTimeZone } from "@/components/dashboard/format";
 import { CallDetails } from "@/components/work-orders/format";
+import { BillingBlock, CloseBillForm } from "@/components/work-orders/close-bill-form";
 import { TenantPreferredTime, WindowPicker, type WindowValue } from "@/components/work-orders/window-picker";
 import type { ItemRef } from "./board";
 import { StatusPill } from "./chips";
@@ -32,7 +33,7 @@ import {
 } from "./shared";
 
 type Detail = NonNullable<FunctionReturnType<typeof api.board.detail>>;
-type Step = "view" | "create" | "info" | "withdraw" | "reject";
+type Step = "view" | "create" | "info" | "withdraw" | "reject" | "close" | "billing";
 type Media = { id: string; url: string | null; kind: "photo" | "video"; canRemove?: boolean };
 
 /** Small "x" overlay for a thumbnail: hover/focus on desktop, always visible on touch. */
@@ -366,7 +367,7 @@ function DrawerBody({
   const reopen = useMutation(api.maintenance.reopen);
   const woRequestInfo = useMutation(api.workOrders.requestInfo);
   const woSendBack = useMutation(api.workOrders.sendBack);
-  const reviewClose = useMutation(api.workOrders.reviewClose);
+  // Closing (workOrders.reviewClose) now goes through the billing step: CloseBillForm.
 
   const isRequest = d.kind === "request";
   const requestId = (isRequest ? d.id : d.linkedRequest?.id) as Id<"maintenanceRequests"> | undefined;
@@ -644,6 +645,14 @@ function DrawerBody({
         </div>
       </Labeled>
 
+      {!isRequest && d.billing && rawStatus === "reviewed_closed" ? (
+        <Labeled label="Billing">
+          <div className="rounded-[12px] border border-slate-200 px-3.5 py-3">
+            <BillingBlock billing={d.billing} onEdit={() => setStep("billing")} />
+          </div>
+        </Labeled>
+      ) : null}
+
       <div className="flex flex-col gap-3 text-[13px]">
         <Meta label="Location" value={d.propertyName ?? "—"} href={d.propertyId ? `/properties?property=${d.propertyId}` : undefined} link="View property" />
         <Meta label="Unit" value={d.unitNumber ?? "—"} href={d.propertyId ? `/properties?property=${d.propertyId}` : undefined} link="View unit" />
@@ -777,8 +786,21 @@ function DrawerBody({
       ) : (
         et.expenses.map((e) => (
           <div key={e._id} className="rounded-[10px] bg-slate-50 px-3.5 py-3">
-            <div className="text-[13px] font-medium text-slate-800">
-              {e.description} · {fmtMoney(e.amount)}
+            <div className="flex flex-wrap items-center gap-2 text-[13px] font-medium text-slate-800">
+              <span>
+                {e.description} · {fmtMoney(e.amount)}
+              </span>
+              {e.kind === "material" && e.reimbursable !== null ? (
+                <span
+                  title={e.reimbursable ? "The technician paid and is reimbursed" : "Paid on the company card"}
+                  className={cx(
+                    "rounded px-1.5 py-0.5 text-[10.5px] font-semibold tracking-wide",
+                    e.reimbursable ? "bg-amber-100 text-amber-800" : "bg-slate-200 text-slate-700",
+                  )}
+                >
+                  {e.reimbursable ? "REIMB" : "SWEEP"}
+                </span>
+              ) : null}
             </div>
             <div className="mt-0.5 text-[11.5px] text-slate-500">
               Submitted by {e.submittedBy}
@@ -1017,11 +1039,7 @@ function DrawerBody({
     actions = (
       <>
         {f.canSignOff ? (
-          <ActionBtn
-            tone="primary"
-            disabled={busy}
-            onClick={() => void run(() => reviewClose({ workOrderId: d.id as Id<"workOrders"> }), `${d.number} closed.`)}
-          >
+          <ActionBtn tone="primary" disabled={busy} onClick={() => setStep("close")}>
             Confirm as Completed
           </ActionBtn>
         ) : (
@@ -1128,6 +1146,44 @@ function DrawerBody({
           mode={forwarded ? "admin" : "am"}
           onDone={back}
           onCancel={back}
+        />
+      </div>
+    );
+  }
+
+  // Close with billing (Confirm as Completed), or edit billing on a closed, unbilled work order.
+  const billingStep =
+    !isRequest && ((step === "close" && statusKey === "completed" && f.canSignOff) || (step === "billing" && !!d.billing?.canEdit));
+  if (billingStep) {
+    const closing = step === "close";
+    return (
+      <div className="flex min-h-full flex-1 flex-col bg-white">
+        {header}
+        <CloseBillForm
+          title={closing ? "Confirm as Completed" : "Edit billing"}
+          hint={
+            closing
+              ? "Closes the work order and sets what goes on the owner statement."
+              : "Changes what goes on the owner statement. Allowed until the work order is billed."
+          }
+          bodyClassName="flex-1 px-5 py-4"
+          mode={closing ? "close" : "edit"}
+          workOrderId={d.id as Id<"workOrders">}
+          woNumber={d.numberRaw}
+          billing={d.billing}
+          suggestedDescription={d.expensesTab?.technicianExpenseNote ?? null}
+          onDone={back}
+          onCancel={back}
+          renderFooter={({ submit, busy: saving, label }) => (
+            <Footer>
+              <ActionBtn tone="primary" disabled={saving} onClick={submit}>
+                {saving ? "Saving…" : label}
+              </ActionBtn>
+              <ActionBtn tone="outline" disabled={saving} onClick={back}>
+                Back
+              </ActionBtn>
+            </Footer>
+          )}
         />
       </div>
     );

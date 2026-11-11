@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 
 /**
  * Job roles live in their own dependency-free module so schema.ts (which cannot import authz,
@@ -26,16 +26,33 @@ export const jobRoleValidator = v.union(
 );
 
 /**
- * The three user types the UI shows. Each maps onto a membership role plus job roles, which the
+ * The four user types the UI shows. Each maps onto a membership role plus job roles, which the
  * backend keeps using; the mapping lives here (pure, no server imports) so the UI can share it.
  */
-export type AppRole = "admin" | "asset_manager" | "technician";
+export type AppRole = "admin" | "asset_manager" | "technician" | "accountant";
+
+export const APP_ROLES: ReadonlyArray<AppRole> = ["admin", "asset_manager", "technician", "accountant"];
 
 export const appRoleValidator = v.union(
   v.literal("admin"),
   v.literal("asset_manager"),
   v.literal("technician"),
+  v.literal("accountant"),
 );
+
+/**
+ * Server-side check for an app role sent by a client. Mutations take the role as a plain string
+ * and run it through this, so a missing or unknown value gets a clear ConvexError instead of the
+ * generic failure Convex's argument validator would produce.
+ */
+export function parseAppRole(value: string | null | undefined): AppRole {
+  const trimmed = (value ?? "").trim();
+  if (!trimmed) throw new ConvexError("Pick a role for this person.");
+  if (!(APP_ROLES as ReadonlyArray<string>).includes(trimmed)) {
+    throw new ConvexError("Pick a valid role: Admin, Asset manager, Technician or Accountant.");
+  }
+  return trimmed as AppRole;
+}
 
 const ADMIN_JOB_ROLES: ReadonlyArray<string> = ["executive", "maintenance_lead", "simplr_admin"];
 
@@ -44,6 +61,7 @@ export function appRoleOf(role: string, jobRoles: ReadonlyArray<string>): AppRol
   if (role === "admin" || jobRoles.some((r) => ADMIN_JOB_ROLES.includes(r))) return "admin";
   if (jobRoles.includes("asset_manager")) return "asset_manager";
   if (jobRoles.includes("technician")) return "technician";
+  if (jobRoles.includes("accountant")) return "accountant";
   return null;
 }
 
@@ -56,6 +74,8 @@ export function jobRolesFor(appRole: AppRole): { role: "admin" | "member"; jobRo
       return { role: "member", jobRoles: ["asset_manager"] };
     case "technician":
       return { role: "member", jobRoles: ["technician"] };
+    case "accountant":
+      return { role: "member", jobRoles: ["accountant"] };
   }
 }
 

@@ -15,4 +15,7 @@ export const auditEntityValidator = v.union(
   v.literal("resident"),
   v.literal("property"),
   v.literal("conversation"),
+  v.literal("owner"),
+  v.literal("ledger_entry"),
+  v.literal("ledger_account"),
 );

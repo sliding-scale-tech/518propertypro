@@ -54,8 +54,8 @@ export function TechniciansCard({ rows }: { rows: Tech[] | undefined }) {
         title="Technicians"
         icon={<HardHat />}
         right={
-          <Link href="/team?role=technician" className="font-medium text-primary hover:underline">
-            Team →
+          <Link href="/technicians" className="font-medium text-primary hover:underline">
+            Manage →
           </Link>
         }
       />

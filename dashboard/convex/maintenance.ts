@@ -8,6 +8,7 @@ import type { OrgContext } from "./authz";
 import { amScope, canSeeUnit, EMPTY_AM_SCOPE } from "./amScope";
 import type { AmScope } from "./amScope";
 import { nextNumber } from "./counters";
+import { photoEmailForRequest } from "./photoEmails";
 import { scheduleEmergencyAlert, scheduleNotify, staffRecipientIds } from "./notify";
 import { toE164 } from "./phone";
 import { isSmsAllowed } from "./twilioApi";
@@ -18,6 +19,8 @@ import { clampSeverity } from "./severity";
 import { tenantMessage } from "./sarahConfigRead";
 import { normalizeUnitKey } from "./units";
 import { exactUnitInProperty } from "./sarahTools";
+// Import cycle with workOrders.ts (it imports from here): safe, forTechnician is only called inside handlers.
+import { forTechnician } from "./workOrders";
 
 /**
  * Maintenance requests (F4): the intake record Sarah (or a person) creates. Separate from a
@@ -576,6 +579,9 @@ export const createFromCall = internalMutation({
     // A resident's question / non-repair need (Sarah's log_task_request). Filed as a request in the
     // same work-order format, marked with a "Question" kind answer so the AM can tell it apart.
     isQuestion: v.optional(v.boolean()),
+    // The number Sarah read back and the caller confirmed (log_maintenance_request confirmed_phone).
+    // Validated again here; one that is not a real phone number is ignored, never stored.
+    smsConfirmPhone: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<CreatedFromCall> => {
     let propertyId = args.propertyId;
@@ -596,6 +602,7 @@ export const createFromCall = internalMutation({
 
     const issueType = requireText(args.issueType, "Issue type", 40);
     const description = requireText(args.description, "Description", MAX_TEXT);
+    const smsConfirmPhone = args.smsConfirmPhone ? (toE164(args.smsConfirmPhone) ?? undefined) : undefined;
     const fields = {
       conversationId,
       callerName: optText(args.callerName, 120),
@@ -620,6 +627,7 @@ export const createFromCall = internalMutation({
       severityReason: optText(args.severityReason, 500),
       mediaRequested: args.mediaRequested,
       photosPending: args.photosPending,
+      smsConfirmPhone,
     };
     const outOfScope = issueType === "tenant_responsibility";
 
@@ -805,7 +813,10 @@ export const photoRequestFromCall = internalMutation({
     callbackNumber: v.optional(v.string()),
     callerEmail: v.optional(v.string()),
   },
-  handler: async (ctx, args): Promise<{ recorded: true; number: number } | { recorded: false }> => {
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{ recorded: true; number: number; photoEmail: string | null } | { recorded: false }> => {
     const req = (
       await ctx.db
         .query("maintenanceRequests")
@@ -848,7 +859,8 @@ export const photoRequestFromCall = internalMutation({
         note: "Caller agreed to send photos; asset manager told",
       });
     }
-    return { recorded: true, number: req.number };
+    // Where Sarah tells them to email the photos: the unit's asset manager's address, or none.
+    return { recorded: true, number: req.number, photoEmail: await photoEmailForRequest(ctx, req) };
   },
 });
 
@@ -2309,10 +2321,12 @@ export async function maintenanceOverview(ctx: QueryCtx, org: OrgContext) {
   } else if (view === "technician") {
     for (const s of woStatuses) {
       wos.push(
-        ...(await ctx.db
-          .query("workOrders")
-          .withIndex("by_technician_and_status", (q) => q.eq("technicianUserId", org.user._id).eq("status", s))
-          .take(200)),
+        ...(
+          await ctx.db
+            .query("workOrders")
+            .withIndex("by_technician_and_status", (q) => q.eq("technicianUserId", org.user._id).eq("status", s))
+            .take(200)
+        ).map(forTechnician), // never bill / cost / billed keys for a technician
       );
     }
   } else if (view === "accountant") {

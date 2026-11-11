@@ -35,6 +35,7 @@ import {
 import { writeAudit } from "./audit";
 import { addMonths, localDateKey, monthKeyOf, startOfLocalDay } from "./tourSchedule";
 import { tenantPreferredTimeText } from "./workOrderWindow";
+import { billingView } from "./workOrderBilling";
 
 /**
  * The unified Work orders board: one board, two records. A maintenance request and a work order
@@ -1061,6 +1062,7 @@ export const detail = query({
         workOrder: linkedWo ? { id: linkedWo._id, number: `WO-${linkedWo.number}`, status: linkedWo.status } : null,
         linkedRequest: null as { id: string; number: string; status: string } | null,
         expensesTab: null,
+        billing: null,
         flags: {
           canAct: acts,
           canManage: pat,
@@ -1190,6 +1192,8 @@ export const detail = query({
       workOrder: null as { id: string; number: string; status: string } | null,
       linkedRequest: linked ? { id: linked._id as string, number: `MR-${linked.number}`, status: linked.status } : null,
       expensesTab: await expensesTabFor(ctx, wo, files, time, expenses, notes, org),
+      // Owner-statement billing (staff only: the board is admin / asset manager).
+      billing: await billingView(ctx, org, wo),
       flags: {
         canAct: manage,
         canManage: manage,

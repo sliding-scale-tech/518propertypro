@@ -140,7 +140,7 @@ export function AdminDashboard() {
         { label: "Work Orders", value: dash.propertiesSnapshot.workOrders, href: "/work-orders", icon: <Home /> },
         { label: "Total Units", value: dash.propertiesSnapshot.totalUnits, href: "/properties", icon: <Building2 /> },
         { label: "Asset Managers", value: dash.propertiesSnapshot.assetManagers, href: "/asset-managers", icon: <Users /> },
-        { label: "Active Technicians", value: dash.propertiesSnapshot.activeTechnicians, href: "/team?role=technician", icon: <PenSquare /> },
+        { label: "Active Technicians", value: dash.propertiesSnapshot.activeTechnicians, href: "/technicians", icon: <PenSquare /> },
       ].filter((t) => t.value !== null)
     : [];
 
