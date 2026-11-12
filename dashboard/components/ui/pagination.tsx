@@ -29,6 +29,10 @@ export type PaginationProps = {
   /** Accessible name of the navigation landmark, e.g. "Rent payments pages". */
   label?: string;
   className?: string;
+  /** Text of the page-size select (default "Rows per page"), e.g. "Buildings per page". */
+  sizeLabel?: string;
+  /** What is counted, added after the range: "Showing 1–10 of 57 buildings" (default: nothing). */
+  noun?: string;
 };
 
 // Same look as the original Pager (components/asset-managers/shared.tsx): joined bordered buttons.
@@ -53,6 +57,8 @@ export function Pagination({
   pageSizes = PAGE_SIZES,
   label = "Pagination",
   className,
+  sizeLabel = "Rows per page",
+  noun,
 }: PaginationProps) {
   const sizeId = useId();
   const cursorMode = total === undefined;
@@ -74,12 +80,13 @@ export function Pagination({
     <nav aria-label={label} className={cx("flex flex-wrap items-center justify-between gap-3 px-1 pt-4", className)}>
       <p className="text-[13px] text-muted-foreground" aria-live="polite">
         {rangeLabel(from, to, cursorMode ? null : total)}
+        {noun ? ` ${noun}` : null}
       </p>
       <div className="flex flex-wrap items-center gap-3">
         {onPageSize ? (
           <div className="flex items-center gap-2">
             <span id={sizeId} className="text-[12.5px] text-muted-foreground">
-              Rows per page
+              {sizeLabel}
             </span>
             <div className="w-[84px]">
               <Listbox

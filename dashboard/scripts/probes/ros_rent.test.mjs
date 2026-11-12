@@ -419,14 +419,9 @@ test("uniqueness: at most one non-voided payment per unit per rent month", async
   await mark(s);
   await refused(mark(s, { receivedDate: "2026-10-05", method: "cash" }), "unitId", "Unit 1st Floor at 108 Jackson Avenue already has rent marked received for October 2026.");
   assert.equal(payments(s.t).length, 1, "nothing written");
-  // another rent month of the same unit is fine, but not received in a month that already has rent
-  // dated in it (both would land on the same statement: MEDIUM-1 double-count guard)
-  await refused(
-    mark(s, { month: "2026-09", receivedDate: "2026-10-02" }),
-    "unitId",
-    "Unit 1st Floor at 108 Jackson Avenue already has rent dated in October 2026 (marked received for October 2026). Check it before adding another payment.",
-  );
-  await mark(s, { month: "2026-09", receivedDate: "2026-09-28" });
+  // another rent month of the same unit is fine, even received in the same month (MEDIUM-1 only
+  // guards against rent entered by hand in the ledger)
+  await mark(s, { month: "2026-09", receivedDate: "2026-10-02" });
   assert.equal(payments(s.t).length, 2);
   // undo, then it can be marked again
   const oct = payments(s.t).find((e) => e.rentForMonth === "2026-10");
@@ -657,7 +652,7 @@ test("list: one row per unit of the org, statuses, greyed-out reasons, summary, 
   assert.deepStrictEqual([locked.locked, locked.lockedReason, locked.statementId], [true, "On the October 2026 final statement.", "s_oct"]);
 });
 
-test("MEDIUM-1: never a second Rent Income row dated in the received month (ledger row or another rent month's payment)", async () => {
+test("MEDIUM-1: never a payment on top of a Rent Income row entered by hand in the ledger dated in the received month", async () => {
   // u2 has a hand-entered Rent Income row dated 9/22 (legacy_u2, no rent month): it is matched by the
   // month it is DATED, so October rent received in September would be counted twice on September's statement.
   const s = setup();
@@ -665,7 +660,7 @@ test("MEDIUM-1: never a second Rent Income row dated in the received month (ledg
   await refused(
     sameMonth({ month: "2026-10", receivedDate: "2026-09-25" }),
     "unitId",
-    "Unit 2nd Floor at 108 Jackson Avenue already has rent dated in September 2026 (entered in the ledger). Check it before adding another payment.",
+    "Unit 2nd Floor at 108 Jackson Avenue already has rent entered in the ledger dated in September 2026. Check it on the Ledger page before adding another payment.",
   );
   assert.equal(payments(s.t).length, 0);
   // received in October: no rent dated in October yet -> fine
@@ -677,33 +672,61 @@ test("MEDIUM-1: never a second Rent Income row dated in the received month (ledg
   // another account (not Rent Income) doesn't count
   const s3 = setup({ entries: [{ ...tables().ledgerEntries[0], _id: "laundry_u10", unitId: "u10", date: "2026-10-03", accountId: "a_laundry" }] });
   await mark(s3, { unitId: "u10", receivedDate: "2026-10-04" });
-  // bulk: all or nothing, with the same message for the failing unit
+  // only source "manual" counts: another source on the Rent Income account (e.g. Stripe) dated in
+  // the received month doesn't (November rent received 10/4, a Stripe row dated 10/3)
+  const s5 = setup({ entries: [{ ...tables().ledgerEntries[0], _id: "stripe_u10", unitId: "u10", date: "2026-10-03", source: "stripe" }] });
+  await mark(s5, { unitId: "u10", month: "2026-11", receivedDate: "2026-10-04" });
+  assert.equal(payments(s5.t).length, 1);
+  // bulk: all or nothing, with the same message for the failing unit (u2 has the 9/22 ledger row)
   const s4 = setup();
-  await mark(s4, { unitId: "u10", month: "2026-10", receivedDate: "2026-10-02" });
   await assert.rejects(
-    L.markMany(s4.ctx, ORG, { unitIds: ["u1", "u10"], month: "2026-09", receivedDate: "2026-10-05", method: "cash" }, TODAY, s4.deps),
+    L.markMany(s4.ctx, ORG, { unitIds: ["u1", "u2"], month: "2026-10", receivedDate: "2026-09-25", method: "cash" }, TODAY, s4.deps),
     (e) => {
       assert.deepStrictEqual(e.data.problems, [
         {
-          unitId: "u10",
-          message: "Unit 10 at 108 Jackson Avenue already has rent dated in October 2026 (marked received for October 2026). Check it before adding another payment.",
+          unitId: "u2",
+          message: "Unit 2nd Floor at 108 Jackson Avenue already has rent entered in the ledger dated in September 2026. Check it on the Ledger page before adding another payment.",
         },
       ]);
       return true;
     },
   );
-  assert.equal(payments(s4.t).length, 1, "nothing written");
-  // a date edit into a month that already has rent dated in it is refused too (the row itself never counts)
+  assert.equal(payments(s4.t).length, 0, "nothing written");
+  // a date edit into a month with rent entered by hand dated in it is refused too (the row itself never counts)
+  await mark(s4, { unitId: "u2", month: "2026-10", receivedDate: "2026-10-01" });
   const octRow = payments(s4.t)[0];
-  await mark(s4, { unitId: "u10", month: "2026-09", receivedDate: "2026-09-29" });
-  const sepRow = payments(s4.t).find((e) => e.rentForMonth === "2026-09");
   await refused(
-    L.updateOne(s4.ctx, ORG, { entryId: sepRow._id, receivedDate: "2026-10-06" }, TODAY, s4.deps),
+    L.updateOne(s4.ctx, ORG, { entryId: octRow._id, receivedDate: "2026-09-26" }, TODAY, s4.deps),
     "receivedDate",
-    "Unit 10 at 108 Jackson Avenue already has rent dated in October 2026 (marked received for October 2026). Check it before adding another payment.",
+    "Unit 2nd Floor at 108 Jackson Avenue already has rent entered in the ledger dated in September 2026. Check it on the Ledger page before adding another payment.",
   );
   await L.updateOne(s4.ctx, ORG, { entryId: octRow._id, receivedDate: "2026-10-09" }, TODAY, s4.deps);
   assert.equal(octRow.date, "2026-10-09", "moving within the same month is fine");
+});
+
+test("MEDIUM-1: two rent payments for different rent months received in the same month are allowed", async () => {
+  // a tenant pays November and December rent on 11/28: both land on the November statement, which is right
+  const s = setup();
+  await mark(s, { unitId: "u10", month: "2026-11", receivedDate: "2026-11-10" });
+  await mark(s, { unitId: "u10", month: "2026-12", receivedDate: "2026-11-10" });
+  assert.deepStrictEqual(
+    payments(s.t)
+      .filter((e) => e.unitId === "u10")
+      .map((e) => [e.rentForMonth, e.date]),
+    [
+      ["2026-11", "2026-11-10"],
+      ["2026-12", "2026-11-10"],
+    ],
+  );
+  // and in bulk
+  await L.markMany(s.ctx, ORG, { unitIds: ["u1"], month: "2026-11", receivedDate: "2026-11-10", method: "cash" }, TODAY, s.deps);
+  await L.markMany(s.ctx, ORG, { unitIds: ["u1"], month: "2026-12", receivedDate: "2026-11-10", method: "cash" }, TODAY, s.deps);
+  // moving a payment's date into a month that has another payment is fine too
+  const dec = payments(s.t).find((e) => e.unitId === "u10" && e.rentForMonth === "2026-12");
+  await L.updateOne(s.ctx, ORG, { entryId: dec._id, receivedDate: "2026-10-30" }, TODAY, s.deps);
+  assert.equal(dec.date, "2026-10-30");
+  // still at most one per unit per rent month
+  await refused(mark(s, { unitId: "u10", month: "2026-12", receivedDate: "2026-11-11" }), "unitId", "Unit 10 at 108 Jackson Avenue already has rent marked received for December 2026.");
 });
 
 test("LOW-1: rent months before the owner's first statement month, or more than 24 months ago, can't be marked", async () => {
@@ -1154,4 +1177,45 @@ test("LOW-2: the ledger refuses ANY edit of a row whose current account is Rent 
   );
   // Delete (voidEntry) stays allowed
   assert.doesNotMatch(ledger.slice(ledger.indexOf("export const voidEntry")), /entryEditProblem/);
+});
+
+// =================================================================================================
+// Payments page grouping (components/finance/payments-search.ts): pages count buildings
+// =================================================================================================
+
+test("Payments page: rows grouped by building in list order, greyed-out units split off, never split by paging", async () => {
+  const S = await import("../../components/finance/payments-search.ts");
+  const PG = await import("../../components/ui/pagination-model.ts");
+  const row = (unitId, propertyId, status, reason = null) => ({ unitId, propertyId, status, reason, canMark: status === "unpaid" });
+  const rows = [
+    row("a1", "pA", "paid"),
+    row("a2", "pA", "unpaid"),
+    row("a3", "pA", "not_markable", "Vacant on the roster"),
+    row("a4", "pA", "not_markable", "Owner collects rent directly"),
+    row("a5", "pA", "not_markable", "Vacant on the roster"),
+    row("b1", "pB", "unpaid"),
+    row("c1", "pC", "not_markable", "Statements start in September 2026"),
+  ];
+  const groups = S.groupByProperty(rows);
+  assert.deepStrictEqual(groups.map((g) => g.propertyId), ["pA", "pB", "pC"]);
+  assert.deepStrictEqual(groups[0].active.map((r) => r.unitId), ["a1", "a2"]);
+  assert.deepStrictEqual(groups[0].notMarkable.map((r) => r.unitId), ["a3", "a4", "a5"]);
+  assert.equal(groups[2].active.length, 0);
+  // distinct reasons, first letter lower-cased only (month names keep their capital)
+  assert.equal(S.reasonsSummary(groups[0].notMarkable), "vacant on the roster, owner collects rent directly");
+  assert.equal(S.reasonsSummary(groups[2].notMarkable), "statements start in September 2026");
+  // "x of y paid" leaves greyed-out units out
+  const prog = S.paidProgressByProperty(rows);
+  assert.deepStrictEqual(prog.get("pA"), { paid: 1, due: 2 });
+  assert.deepStrictEqual(prog.get("pB"), { paid: 0, due: 1 });
+  assert.equal(prog.get("pC"), undefined);
+  // paging by building: 2 buildings per page keeps every unit of a building together
+  const p1 = PG.paginate(groups, 1, 2);
+  assert.deepStrictEqual(p1.rows.flatMap((g) => g.rows).map((r) => r.unitId), ["a1", "a2", "a3", "a4", "a5", "b1"]);
+  assert.equal(p1.total, 3);
+  assert.deepStrictEqual(S.selectableOnPage(p1.rows.flatMap((g) => g.rows), 100), ["a2", "b1"]);
+  // page sizes count buildings
+  assert.deepStrictEqual(S.BUILDING_PAGE_SIZES, [10, 25, 50]);
+  assert.equal(PG.readPageSize("25", S.BUILDING_PAGE_SIZES, S.DEFAULT_BUILDING_PAGE_SIZE), 25);
+  assert.equal(PG.readPageSize("100", S.BUILDING_PAGE_SIZES, S.DEFAULT_BUILDING_PAGE_SIZE), 10);
 });

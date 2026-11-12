@@ -3,7 +3,7 @@
 import { useQuery } from "convex/react";
 import { Columns3, LayoutList, Plus, Search } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useState, useSyncExternalStore } from "react";
+import { Suspense, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { RequireView } from "@/components/require-view";
@@ -13,7 +13,8 @@ import { ExceptionsDrawer } from "@/components/board/exceptions-drawer";
 import { NewWorkOrderDrawer } from "@/components/board/new-wo-drawer";
 import { PRIORITY_LEVELS, tableStatusFromParam, type Severity, type TableStatus } from "@/components/board/shared";
 import { WorkOrderDrawer } from "@/components/board/wo-drawer";
-import { Btn, cx } from "@/components/ui";
+import { Btn, cx, useUrlPaging } from "@/components/ui";
+import { KANBAN_STEP } from "@/components/board/board";
 
 type View = "table" | "kanban";
 const VIEW_KEY = "wo-view";
@@ -66,20 +67,33 @@ function WorkOrdersInner() {
   const [search, setSearch] = useState("");
   const [priority, setPriority] = useState<"all" | Severity>("all");
   const [techId, setTechId] = useState("all");
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(15);
+  // Table page and size live in the URL (?page= / ?size=, default 50).
+  const paging = useUrlPaging();
+  const { page, pageSize } = paging;
+  // Kanban: cards shown per column (each starts at KANBAN_STEP; "Show 20 more" raises one column).
+  const [moreCards, setMoreCards] = useState<{ key: string; limits: Record<string, number> }>({ key: "", limits: {} });
   const [item, setItem] = useState<ItemRef | null>(null);
   const [itemOpen, setItemOpen] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
   const [excOpen, setExcOpen] = useState(false);
 
+  // The latest paging controls (they close over the current URL), read inside the timer so a lane,
+  // view or drawer change made while it waits is not overwritten with stale params.
+  const latestPaging = useRef(paging);
   useEffect(() => {
+    latestPaging.current = paging;
+  });
+
+  useEffect(() => {
+    // Nothing to apply (e.g. on mount, or the text already matches): leave ?page= alone.
+    if (searchText.trim() === search) return;
     const t = setTimeout(() => {
       setSearch(searchText.trim());
-      setPage(1);
+      latestPaging.current.resetPage();
     }, 300);
     return () => clearTimeout(t);
-  }, [searchText]);
+    // Only typed text and the applied search matter; `paging` is read from a ref.
+  }, [searchText, search]);
 
   const setParam = (key: string, value: string | null) => {
     const next = new URLSearchParams(params.toString());
@@ -107,7 +121,10 @@ function WorkOrdersInner() {
     assetManagerUserId: amMember ? (amMember.userId as Id<"users">) : undefined,
   };
 
-  const kanban = useQuery(api.board.kanban, view === "kanban" ? filters : "skip");
+  // Column limits belong to one set of filters: a different filter starts every column at 20 again.
+  const filterKey = JSON.stringify(filters);
+  const limits = moreCards.key === filterKey ? moreCards.limits : {};
+  const kanban = useQuery(api.board.kanban, view === "kanban" ? { ...filters, limits } : "skip");
   const table = useQuery(api.board.table, view === "table" ? { ...filters, status, page, pageSize } : "skip");
   const data = view === "kanban" ? kanban : table;
   const exceptionCount = kanban?.exceptions.count ?? 0;
@@ -158,7 +175,7 @@ function WorkOrdersInner() {
           value={priority}
           onChange={(v) => {
             setPriority(v as typeof priority);
-            setPage(1);
+            paging.resetPage();
           }}
           options={[
             { value: "all", label: "All Priorities" },
@@ -172,7 +189,7 @@ function WorkOrdersInner() {
             value={techId}
             onChange={(v) => {
               setTechId(v);
-              setPage(1);
+              paging.resetPage();
             }}
             options={[
               { value: "all", label: "All Technicians" },
@@ -216,8 +233,12 @@ function WorkOrdersInner() {
           value={status}
           counts={table.counts}
           onChange={(v) => {
-            setPage(1);
-            setParam("lane", v === "all" ? null : v);
+            const next = new URLSearchParams(params.toString());
+            next.delete("page");
+            if (v === "all") next.delete("lane");
+            else next.set("lane", v);
+            const qs = next.toString();
+            router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
           }}
         />
       ) : null}
@@ -230,16 +251,24 @@ function WorkOrdersInner() {
         kanban.scope === "none" ? (
           <NoBoard />
         ) : (
-          <Kanban columns={kanban.columns} onOpen={openItem} />
+          <Kanban
+            columns={kanban.columns}
+            onOpen={openItem}
+            capped={kanban.capped}
+            cap={kanban.cap}
+            onMore={(columnKey, shown) =>
+              setMoreCards((m) => ({
+                key: filterKey,
+                limits: { ...(m.key === filterKey ? m.limits : {}), [columnKey]: shown + KANBAN_STEP },
+              }))
+            }
+          />
         )
       ) : table ? (
         <WorkOrderTable
           data={table}
-          onPage={setPage}
-          onPageSize={(n) => {
-            setPageSize(n);
-            setPage(1);
-          }}
+          onPage={paging.setPage}
+          onPageSize={paging.setPageSize}
           onOpen={openItem}
         />
       ) : null}

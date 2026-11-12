@@ -1,15 +1,13 @@
 "use client";
 
-import { usePaginatedQuery, useQuery } from "convex/react";
+import { useQuery } from "convex/react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   ChevronDown,
   ChevronRight,
-  ChevronsDown,
   Clock3,
   Filter,
   Globe2,
-  Loader2,
   MoreVertical,
   Phone,
   PhoneCall,
@@ -23,7 +21,9 @@ import { Dropdown } from "@/components/ui/dropdown";
 import { RequireView } from "@/components/require-view";
 import { areaLabel } from "@/components/dashboard/format";
 import { ConversationTranscript } from "@/components/transcript";
-import { Btn, Card, CardHead, Chips, Kpi, KpiRow, PageHeader, Pill, type Tone } from "@/components/ui";
+import { Card, CardHead, Chips, Kpi, KpiRow, PageHeader, Pagination, Pill, type Tone } from "@/components/ui";
+import { Spinner } from "@/components/finance/form-bits";
+import { useCursorPaging } from "@/lib/use-cursor-paging";
 import {
   AssigneeCell,
   TourLine,
@@ -122,11 +122,13 @@ type Qualification = {
 
 function LeadsPageInner() {
   // TODO(★ leads scoping): all AMs currently see all leads; revisit.
-  const {
-    results: history,
-    status: historyStatus,
-    loadMore,
-  } = usePaginatedQuery(api.conversations.history, {}, { initialNumItems: 15 });
+  // One page of calls at a time (cursor paging: Previous / Next). The filters below narrow the
+  // calls on the page shown.
+  const paging = useCursorPaging();
+  const historyPage = useQuery(api.conversations.history, {
+    paginationOpts: { numItems: paging.pageSize, cursor: paging.cursor },
+  });
+  const history = historyPage?.page;
   const usage = useQuery(api.conversations.usage);
   const funnel = useQuery(api.conversations.funnel);
   const [selected, setSelected] = useState<Id<"conversations"> | null>(null);
@@ -141,6 +143,8 @@ function LeadsPageInner() {
     const f = new URLSearchParams(window.location.search).get("filter");
     return f === "mine" || f === "unassigned" ? f : "all";
   });
+
+  const filtersActive = intentFilter !== "all" || outcomeFilter !== "all" || assignFilter !== "all" || search.trim() !== "";
 
   const filtered = useMemo(() => {
     if (!history) return history;
@@ -185,7 +189,10 @@ function LeadsPageInner() {
           <Chips<AssignFilter>
             label="Filter by assignment"
             value={assignFilter}
-            onChange={setAssignFilter}
+            onChange={(v) => {
+              setAssignFilter(v);
+              paging.reset();
+            }}
             options={[
               { value: "all", label: "All" },
               { value: "mine", label: "Mine" },
@@ -197,13 +204,19 @@ function LeadsPageInner() {
           <div className="flex flex-wrap gap-3">
             <Dropdown
               value={intentFilter}
-              onChange={setIntentFilter}
+              onChange={(v) => {
+                setIntentFilter(v);
+                paging.reset();
+              }}
               options={INTENT_DROPDOWN_OPTIONS}
               buttonClassName="h-10 min-w-32"
             />
             <button
               type="button"
-              onClick={() => setOwnerOnly((v) => !v)}
+              onClick={() => {
+                setOwnerOnly((v) => !v);
+                paging.reset();
+              }}
               aria-pressed={ownerOnly}
               className={`h-10 rounded-xl border px-3 text-[13px] ${
                 ownerOnly
@@ -215,7 +228,10 @@ function LeadsPageInner() {
             </button>
             <Dropdown
               value={outcomeFilter}
-              onChange={setOutcomeFilter}
+              onChange={(v) => {
+                setOutcomeFilter(v);
+                paging.reset();
+              }}
               options={OUTCOME_DROPDOWN_OPTIONS}
               buttonClassName="h-10 min-w-36"
             />
@@ -225,7 +241,10 @@ function LeadsPageInner() {
               <Search className="absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <input
                 value={search}
-                onChange={(event) => setSearch(event.target.value)}
+                onChange={(event) => {
+                  setSearch(event.target.value);
+                  paging.reset();
+                }}
                 placeholder="Search calls..."
                 className="h-10 w-full rounded-xl border border-input bg-card pr-3 pl-9 text-[13.5px] outline-none placeholder:text-faint focus:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
               />
@@ -240,10 +259,22 @@ function LeadsPageInner() {
           </div>
         </div>
 
+        {filtered === undefined ? <Spinner label="Loading leads…" /> : null}
+
         {filtered?.length === 0 ? (
           <div className="py-16 text-center text-sm text-muted-foreground">
-            No calls match this filter.
+            {history?.length === 0 && paging.page === 1
+              ? "No leads yet."
+              : history?.length
+                ? "No calls on this page match these filters. Try the next page, or clear a filter."
+                : "No leads on this page."}
           </div>
+        ) : null}
+
+        {filtered && filtered.length > 0 && filtersActive ? (
+          <p role="status" className="border-b border-border px-5 py-2 text-xs text-muted-foreground">
+            Filters apply to the calls on this page. Use Next to see more.
+          </p>
         ) : null}
 
         <div className="space-y-3 p-4 sm:hidden">
@@ -289,17 +320,28 @@ function LeadsPageInner() {
         </div>
       </section>
 
-      {historyStatus !== "Exhausted" ? (
-        <div className="flex justify-center">
-          <Btn onClick={() => loadMore(15)} disabled={historyStatus !== "CanLoadMore"}>
-            {historyStatus === "LoadingMore" ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <ChevronsDown className="h-3.5 w-3.5" />
-            )}
-            {historyStatus === "LoadingMore" ? "Loading…" : "Show more"}
-          </Btn>
-        </div>
+      {historyPage ? (
+        <Pagination
+          label="Lead pages"
+          className="pt-0"
+          page={paging.page}
+          pageSize={paging.pageSize}
+          rowsOnPage={historyPage.page.length}
+          rowsBefore={paging.rowsBefore}
+          hasNext={!historyPage.isDone}
+          onPage={(p) => {
+            setSelected(null);
+            paging.goTo(p, {
+              rowsOnPage: historyPage.page.length,
+              hasNext: !historyPage.isDone,
+              continueCursor: historyPage.continueCursor,
+            });
+          }}
+          onPageSize={(n) => {
+            setSelected(null);
+            paging.setPageSize(n);
+          }}
+        />
       ) : null}
     </div>
   );

@@ -84,3 +84,62 @@ export function applyPaymentsView<T extends SearchableRow>(
 export function selectableOnPage<T extends { canMark: boolean; unitId: string }>(pageRows: readonly T[], max: number): string[] {
   return pageRows.filter((r) => r.canMark).slice(0, max).map((r) => r.unitId);
 }
+
+/** The page sizes of the Payments page: buildings per page (a building is never split). */
+export const BUILDING_PAGE_SIZES: readonly number[] = [10, 25, 50];
+export const DEFAULT_BUILDING_PAGE_SIZE = 10;
+
+/** One building on the Payments page: its rows in list order, split into the shown and greyed-out ones. */
+export type PropertyGroup<T> = {
+  propertyId: string;
+  rows: T[];
+  /** Paid and unpaid rows (listed one per line). */
+  active: T[];
+  /** Not-markable rows (folded into one line under the building). */
+  notMarkable: T[];
+};
+
+/**
+ * Rows grouped by building, in the order the buildings first appear (rentPayments.list sorts by
+ * team, building and unit, so a building's rows are together). Paging counts these groups.
+ */
+export function groupByProperty<T extends { propertyId: string; status: SearchableRow["status"] }>(rows: readonly T[]): PropertyGroup<T>[] {
+  const groups: PropertyGroup<T>[] = [];
+  const byId = new Map<string, PropertyGroup<T>>();
+  for (const r of rows) {
+    let g = byId.get(r.propertyId);
+    if (!g) {
+      g = { propertyId: r.propertyId, rows: [], active: [], notMarkable: [] };
+      byId.set(r.propertyId, g);
+      groups.push(g);
+    }
+    g.rows.push(r);
+    (r.status === "not_markable" ? g.notMarkable : g.active).push(r);
+  }
+  return groups;
+}
+
+/** Per building: paid and unpaid counts (the "3 of 12 paid" in the building header). */
+export function paidProgressByProperty(rows: readonly { propertyId: string; status: SearchableRow["status"] }[]): Map<string, { paid: number; due: number }> {
+  const out = new Map<string, { paid: number; due: number }>();
+  for (const r of rows) {
+    if (r.status === "not_markable") continue;
+    const p = out.get(r.propertyId) ?? { paid: 0, due: 0 };
+    p.due += 1;
+    if (r.status === "paid") p.paid += 1;
+    out.set(r.propertyId, p);
+  }
+  return out;
+}
+
+/** The distinct reasons of greyed-out rows, in order, for the folded line: "vacant on the roster, owner collects rent". */
+export function reasonsSummary(rows: readonly { reason: string | null }[]): string {
+  const seen: string[] = [];
+  for (const r of rows) {
+    const reason = (r.reason ?? "").trim();
+    // "Vacant on the roster" -> "vacant on the roster" (only the first letter: month names keep theirs)
+    const lower = reason.charAt(0).toLowerCase() + reason.slice(1);
+    if (lower !== "" && !seen.includes(lower)) seen.push(lower);
+  }
+  return seen.join(", ");
+}

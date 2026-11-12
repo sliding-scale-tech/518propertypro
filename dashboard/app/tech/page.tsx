@@ -2,17 +2,24 @@
 
 import { useQuery } from "convex/react";
 import { ClipboardList, Loader2 } from "lucide-react";
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { RequireView } from "@/components/require-view";
 import { JobCard } from "@/components/tech/job-card";
 import { TechBadge, TechCard, TechPageTitle, TechSeg } from "@/components/tech/ui";
+import { Pagination, paginate, useUrlPaging } from "@/components/ui";
 import { api } from "@/convex/_generated/api";
 
 type Tab = "open" | "done";
 
+/** Jobs per page: a short page is easier to scroll on a phone. The page number is in the URL (?page=). */
+const JOBS_PER_PAGE = 20;
+/** workOrders.list returns at most this many jobs; a full list means older ones are not shown. */
+const LIST_LIMIT = 300;
+
 function MyJobs() {
   const [tab, setTab] = useState<Tab>("open");
   const jobs = useQuery(api.workOrders.list, {});
+  const paging = useUrlPaging();
 
   // Jobs Pat sent back or asked about come first; the server's order is kept within each group.
   const open = (jobs ?? [])
@@ -21,7 +28,8 @@ function MyJobs() {
     .sort((a, b) => Number(!!b.j.actionRequired) - Number(!!a.j.actionRequired) || a.i - b.i)
     .map(({ j }) => j);
   const done = (jobs ?? []).filter((j) => ["completed", "reviewed_closed"].includes(j.status));
-  const shown = tab === "open" ? open : done;
+  const paged = paginate(tab === "open" ? open : done, paging.page, JOBS_PER_PAGE);
+  const shown = paged.rows;
   const today = new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
 
   return (
@@ -38,7 +46,10 @@ function MyJobs() {
       <TechSeg
         label="Job list"
         value={tab}
-        onChange={setTab}
+        onChange={(t) => {
+          setTab(t);
+          paging.resetPage();
+        }}
         options={[
           { value: "open", label: `Open (${open.length})` },
           { value: "done", label: `Done (${done.length})` },
@@ -61,12 +72,29 @@ function MyJobs() {
           </div>
         </TechCard>
       ) : (
-        <ul className="flex flex-col gap-4">
-          {shown.map((j) => (
-            <JobCard key={j._id} job={{ ...j, address: j.propertyAddress }} />
-          ))}
-        </ul>
+        <>
+          <ul className="flex flex-col gap-4">
+            {shown.map((j) => (
+              <JobCard key={j._id} job={{ ...j, address: j.propertyAddress }} />
+            ))}
+          </ul>
+          <Pagination
+            label="Jobs pages"
+            page={paged.page}
+            pageSize={JOBS_PER_PAGE}
+            total={paged.total}
+            onPage={(p) => {
+              paging.setPage(p);
+              window.scrollTo({ top: 0 });
+            }}
+          />
+        </>
       )}
+      {jobs !== undefined && jobs.length >= LIST_LIMIT ? (
+        <p role="status" className="text-center text-xs text-muted-foreground">
+          Showing your {LIST_LIMIT} most urgent jobs. Older ones are not listed here.
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -74,7 +102,9 @@ function MyJobs() {
 export default function TechPage() {
   return (
     <RequireView views={["technician", "admin"]}>
-      <MyJobs />
+      <Suspense fallback={null}>
+        <MyJobs />
+      </Suspense>
     </RequireView>
   );
 }

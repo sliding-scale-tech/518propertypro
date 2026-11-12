@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation } from "convex/react";
-import { useId, useMemo, useState } from "react";
+import { useId, useMemo, useState, type ReactNode } from "react";
 import { api } from "@/convex/_generated/api";
 import {
   MAX_PAYMENT_NOTE,
@@ -223,6 +223,8 @@ export function BulkMarkDialog({
   earliest,
   onClose,
   onDone,
+  title = "Mark selected rent received",
+  note,
 }: {
   units: PaymentUnit[];
   month: string;
@@ -230,6 +232,10 @@ export function BulkMarkDialog({
   earliest: string;
   onClose: () => void;
   onDone: () => void;
+  /** Default "Mark selected rent received"; "Mark all paid" names the building. */
+  title?: string;
+  /** Extra line under the list (e.g. only the first 100 units are marked). */
+  note?: ReactNode;
 }) {
   const markMany = useMutation(api.rentPayments.markManyReceived);
   const [receivedDate, setReceivedDate] = useState(today);
@@ -288,7 +294,7 @@ export function BulkMarkDialog({
 
   return (
     <Modal
-      title="Mark selected rent received"
+      title={title}
       eyebrow={`${formatMonth(month)} rent`}
       onClose={onClose}
       footer={
@@ -321,6 +327,7 @@ export function BulkMarkDialog({
               </li>
             ))}
           </ul>
+          {note ? <p className="mt-2 text-xs font-medium text-foreground">{note}</p> : null}
         </div>
         {problems.length > 0 ? (
           <div role="alert" className="rounded-xl border border-danger-ink/30 bg-danger-soft px-3.5 py-3 text-[12.5px] text-danger-ink">

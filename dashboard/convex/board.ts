@@ -674,7 +674,7 @@ async function loadItems(ctx: QueryCtx, org: OrgContext, includeClosed: boolean)
   const base = await loadScope(ctx, org);
   const { view, scope } = base;
   const L = makeLookups(ctx);
-  if (!view) return { view, scope, L, items: [] as Item[] };
+  if (!view) return { view, scope, L, items: [] as Item[], capped: false };
 
   const requests = [...base.requests];
   const wos = [...base.wos];
@@ -712,7 +712,13 @@ async function loadItems(ctx: QueryCtx, org: OrgContext, includeClosed: boolean)
     if (key) items.push(await requestItem(L, scope, r, key));
   }
   for (const w of wos) items.push(await workOrderItem(ctx, L, scope, w));
-  return { view, scope, L, items };
+  // Each status is read up to CAP rows, newest first. When a status filled its read, older items
+  // of that status are not on the board: say so instead of presenting the total as complete.
+  const perStatus = new Map<string, number>();
+  for (const r of requests) perStatus.set(`r:${r.status}`, (perStatus.get(`r:${r.status}`) ?? 0) + 1);
+  for (const w of wos) perStatus.set(`w:${w.status}`, (perStatus.get(`w:${w.status}`) ?? 0) + 1);
+  const capped = [...perStatus.values()].some((n) => n >= CAP);
+  return { view, scope, L, items, capped };
 }
 
 type BoardFilters = {
@@ -756,8 +762,13 @@ const KANBAN_COLUMNS: Array<{ key: StatusKey; title: string; subtitle: string }>
   { key: "completed", title: "Completed (Needs Sign Off)", subtitle: "Work completed by technician, awaiting admin sign off." },
 ];
 
+/** Cards each Kanban column starts with, and the step of "Show 20 more" (client). */
+const KANBAN_START = 20;
+
 const emptyKanban = () => ({
   scope: "none" as "none" | "admin" | "asset_manager",
+  capped: false,
+  cap: CAP,
   columns: KANBAN_COLUMNS.map((c) => ({ ...c, count: 0, cards: [] as KanbanCard[] })),
   exceptions: { count: 0 },
 });
@@ -770,15 +781,29 @@ export type KanbanCard = Omit<Item, "src" | "status" | "statusKey" | "technician
 /**
  * The Figma board: five columns (see KANBAN_COLUMNS). Closed and rejected items are Table only.
  * Filters (all optional): search (title / unit / property / MR-WO number), priority,
- * technicianUserId, propertyId, assetManagerUserId (admin view only). Each column is capped at 300.
+ * technicianUserId, propertyId, assetManagerUserId (admin view only). Each column returns `limits[key]`
+ * cards (default 20); at most 300 per status are read at all (`capped` says when that bites).
  * Card sort: emergency first, then oldest first.
  */
 export const kanban = query({
-  args: filterArgs,
+  args: {
+    ...filterArgs,
+    // Cards to return per column (key = column key); a column not listed starts at KANBAN_START.
+    // The client's "Show 20 more" raises one column's limit. `count` stays the column's full size.
+    limits: v.optional(
+      v.object({
+        am_review: v.optional(v.number()),
+        admin_review: v.optional(v.number()),
+        escalated: v.optional(v.number()),
+        in_progress: v.optional(v.number()),
+        completed: v.optional(v.number()),
+      }),
+    ),
+  },
   handler: async (ctx, args) => {
     const org = await currentOrg(ctx);
     if (!org) return emptyKanban();
-    const { view, items, L } = await loadItems(ctx, org, false);
+    const { view, items, L, capped } = await loadItems(ctx, org, false);
     if (!view) return emptyKanban();
 
     const kept = applyFilters(items, args, view);
@@ -788,7 +813,8 @@ export const kanban = query({
         .filter((i) => i.statusKey === def.key)
         .sort((a, b) => SEVERITY_RANK[a.priorityLevel] - SEVERITY_RANK[b.priorityLevel] || a.createdAt - b.createdAt);
       const cards: KanbanCard[] = [];
-      for (const i of inCol.slice(0, CAP)) {
+      const limit = Math.min(CAP, Math.max(1, Math.floor(args.limits?.[def.key as keyof NonNullable<typeof args.limits>] ?? KANBAN_START)));
+      for (const i of inCol.slice(0, limit)) {
         let commentCount = 0;
         let attachmentCount = 0;
         if (i.src.kind === "request") {
@@ -823,6 +849,9 @@ export const kanban = query({
     return {
       scope: view,
       columns,
+      // true: a status holds more than CAP items, so the oldest are not listed (counts too).
+      capped,
+      cap: CAP,
       exceptions: { count: view === "admin" ? items.filter((i) => i.src.kind === "request" && i.src.r.inExceptionQueue).length : 0 },
     };
   },
@@ -857,10 +886,10 @@ export const table = query({
   handler: async (ctx, args) => {
     const pageSize = Math.min(100, Math.max(1, Math.floor(args.pageSize ?? 15)));
     const emptyCounts = { all: 0, am_review: 0, admin_review: 0, escalated: 0, in_progress: 0, completed: 0, closed: 0, rejected: 0 };
-    const empty = { rows: [], counts: emptyCounts, total: 0, page: 1, pageSize, pageCount: 1 };
+    const empty = { rows: [], counts: emptyCounts, total: 0, page: 1, pageSize, pageCount: 1, capped: false, cap: CAP };
     const org = await currentOrg(ctx);
     if (!org) return empty;
-    const { view, items } = await loadItems(ctx, org, true);
+    const { view, items, capped } = await loadItems(ctx, org, true);
     if (!view) return empty;
 
     const kept = applyFilters(items, args, view);
@@ -899,7 +928,8 @@ export const table = query({
       createdAt: i.createdAt,
       covering: i.covering,
     }));
-    return { rows, counts, total, page, pageSize, pageCount };
+    // capped: some status holds more than `cap` items, so the oldest are not in the total.
+    return { rows, counts, total, page, pageSize, pageCount, capped, cap: CAP };
   },
 });
 

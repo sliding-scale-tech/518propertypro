@@ -4,6 +4,8 @@ import { internalMutation, mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { writeAudit } from "./audit";
 import { currentOrg, viewFor } from "./authz";
+import type { OrgContext } from "./authz";
+import { callbacksView, countByStatus, pageOf } from "./tenantViews";
 import { scheduleEmergencyAlert, scheduleNotify, staffRecipientIds } from "./notify";
 import { ensureLeadConversation } from "./conversations";
 import { upsertArgs, upsertQualification } from "./qualifications";
@@ -510,42 +512,90 @@ export const logUnmatchedCaller = internalMutation({
   },
 });
 
+/**
+ * The callbacks the caller may see, newest first, with no cap: the admin view sees the team's, an
+ * asset manager only the ones assigned to them. null = this view has no access.
+ */
+async function readableCallbacks(ctx: QueryCtx, org: OrgContext) {
+  const view = viewFor(org.isAdmin, org.jobRoles);
+  if (view !== "admin" && view !== "asset_manager") return null;
+  let rows: Doc<"callbackContacts">[];
+  if (view === "admin") {
+    rows = await ctx.db
+      .query("callbackContacts")
+      .withIndex("by_org_and_created", (q) => q.eq("orgId", org.orgId))
+      .order("desc")
+      .collect();
+  } else {
+    rows = (
+      await ctx.db
+        .query("callbackContacts")
+        .withIndex("by_assignee_and_status", (q) => q.eq("assignedUserId", org.user._id))
+        .collect()
+    )
+      .filter((r) => r.orgId === org.orgId)
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }
+  const assignees = new Map<string, Doc<"users"> | null>();
+  return await Promise.all(
+    rows.map(async (r) => {
+      let assignee: Doc<"users"> | null = null;
+      if (r.assignedUserId) {
+        if (!assignees.has(r.assignedUserId)) assignees.set(r.assignedUserId, await ctx.db.get(r.assignedUserId));
+        assignee = assignees.get(r.assignedUserId) ?? null;
+      }
+      return {
+        id: r._id,
+        callerName: r.callerName ?? null,
+        callbackNumber: r.callbackNumber ?? r.callerNumber ?? null,
+        callerEmail: r.callerEmail ?? null,
+        reason: r.reason,
+        issueSummary: r.issueSummary,
+        status: r.status,
+        assignedUserId: r.assignedUserId ?? null,
+        assignedName: assignee ? [assignee.firstName, assignee.lastName].filter(Boolean).join(" ") || null : null,
+        assignedToMe: r.assignedUserId === org.user._id,
+        conversationId: r.conversationId ?? null,
+        createdAt: r.createdAt,
+      };
+    }),
+  );
+}
+
 /** Callback contacts: the admin view sees the team's, an asset manager only theirs. Newest first. */
 export const callbacks = query({
   args: { status: v.optional(v.union(v.literal("open"), v.literal("called_back"), v.literal("closed"))) },
   handler: async (ctx, args) => {
     const org = await currentOrg(ctx);
     if (!org) return [];
-    const view = viewFor(org.isAdmin, org.jobRoles);
-    if (view !== "admin" && view !== "asset_manager") return [];
-    const rows = await ctx.db
-      .query("callbackContacts")
-      .withIndex("by_org_and_created", (q) => q.eq("orgId", org.orgId))
-      .order("desc")
-      .take(300);
-    const visible = rows.filter(
-      (r) =>
-        (view === "admin" || r.assignedUserId === org.user._id) && (!args.status || r.status === args.status),
-    );
-    return await Promise.all(
-      visible.map(async (r) => {
-        const assignee = r.assignedUserId ? await ctx.db.get(r.assignedUserId) : null;
-        return {
-          id: r._id,
-          callerName: r.callerName ?? null,
-          callbackNumber: r.callbackNumber ?? r.callerNumber ?? null,
-          callerEmail: r.callerEmail ?? null,
-          reason: r.reason,
-          issueSummary: r.issueSummary,
-          status: r.status,
-          assignedUserId: r.assignedUserId ?? null,
-          assignedName: assignee ? [assignee.firstName, assignee.lastName].filter(Boolean).join(" ") || null : null,
-          assignedToMe: r.assignedUserId === org.user._id,
-          conversationId: r.conversationId ?? null,
-          createdAt: r.createdAt,
-        };
-      }),
-    );
+    const rows = await readableCallbacks(ctx, org);
+    if (!rows) return [];
+    return args.status ? rows.filter((r) => r.status === args.status) : rows;
+  },
+});
+
+type CallbackRow = NonNullable<Awaited<ReturnType<typeof readableCallbacks>>>[number];
+
+/**
+ * One page of the Callbacks tab: same read scope as `callbacks` (checked first), then status and
+ * search over the whole set. `total` is the true count; `counts` are per status for the viewer
+ * (ignoring search) so the status chips can show them. Newest first.
+ */
+export const callbacksPage = query({
+  args: {
+    status: v.optional(v.union(v.literal("open"), v.literal("called_back"), v.literal("closed"), v.literal("all"))),
+    search: v.optional(v.string()),
+    page: v.optional(v.number()),
+    pageSize: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const org = await currentOrg(ctx);
+    const rows = org ? await readableCallbacks(ctx, org) : null;
+    if (!rows) {
+      return { ...pageOf<CallbackRow>([], 1, args.pageSize), counts: countByStatus([]) };
+    }
+    const filtered = callbacksView(rows, { q: args.search, status: args.status });
+    return { ...pageOf(filtered, args.page, args.pageSize), counts: countByStatus(rows) };
   },
 });
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useAction, useMutation, useQuery } from "convex/react";
+import type { FunctionReturnType } from "convex/server";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ArrowLeft,
@@ -22,12 +23,13 @@ import {
   Pencil,
   RotateCcw,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import QRCode from "react-qr-code";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { errorMessage, useToast } from "@/components/toast";
-import { Btn, Modal } from "@/components/ui";
+import { Btn, Modal, Pagination } from "@/components/ui";
+import { useCursorPaging } from "@/lib/use-cursor-paging";
 import { severityBand, type SeverityBand } from "@/convex/severity";
 import { RequireView } from "@/components/require-view";
 
@@ -80,7 +82,6 @@ const STATUS_COPY: Record<string, { label: string; tone: string }> = {
 
 function WhatsAppPageInner() {
   const toast = useToast();
-  const threads = useQuery(api.whatsapp.threads);
   const stats = useQuery(api.whatsapp.stats);
 
   const connect = useAction(api.whatsapp.connect);
@@ -246,7 +247,7 @@ function WhatsAppPageInner() {
         </div>
       )}
 
-      <Inbox threads={threads} selected={selected} onSelect={setSelected} />
+      <Inbox needsYou={stats?.escalated ?? 0} selected={selected} onSelect={setSelected} />
 
       <AnimatePresence>
         {showQr && (
@@ -312,7 +313,12 @@ function QrDialog({
   );
 }
 
-type ThreadRow = NonNullable<ReturnType<typeof useQuery<typeof api.whatsapp.threads>>>[number];
+type ThreadRow = NonNullable<FunctionReturnType<typeof api.whatsapp.threadById>>;
+
+/** Messages shown when a conversation opens, and added by each "Load earlier messages". */
+const CHAT_STEP = 50;
+/** Most messages the server returns for one conversation (it clamps `limit` to this). */
+const CHAT_MAX = 1000;
 
 const FILTERS: Array<{ value: StatusFilter; label: string }> = [
   { value: "all", label: "All" },
@@ -322,19 +328,28 @@ const FILTERS: Array<{ value: StatusFilter; label: string }> = [
 ];
 
 function Inbox({
-  threads,
+  needsYou,
   selected,
   onSelect,
 }: {
-  threads: ThreadRow[] | undefined;
+  /** Threads waiting on staff, across the whole inbox (not just this page). */
+  needsYou: number;
   selected: Id<"waThreads"> | null;
   onSelect: (id: Id<"waThreads"> | null) => void;
 }) {
   const [filter, setFilter] = useState<StatusFilter>("all");
+  const paging = useCursorPaging();
+  // The filter runs on the server, so every page holds threads of the chosen status.
+  const page = useQuery(api.whatsapp.threads, { status: filter, cursor: paging.cursor, pageSize: paging.pageSize });
+  const visible = page?.page;
+  // The open conversation is fetched on its own, so it stays open whichever page or filter is showing.
+  const thread = useQuery(api.whatsapp.threadById, selected ? { threadId: selected } : "skip") ?? null;
+  const listRef = useRef<HTMLDivElement>(null);
 
-  const visible = threads?.filter((t) => (filter === "all" ? true : t.status === filter));
-  const needsYou = threads?.filter((t) => t.status === "escalated").length ?? 0;
-  const thread = threads?.find((t) => t._id === selected) ?? null;
+  // A new page starts at the top of the list.
+  useEffect(() => {
+    listRef.current?.scrollTo({ top: 0 });
+  }, [paging.cursor]);
 
   return (
     <div className="flex h-[calc(100dvh-24rem)] min-h-[460px] overflow-hidden rounded-xl border border-border bg-card shadow-sm">
@@ -357,7 +372,10 @@ function Inbox({
             {FILTERS.map((f) => (
               <button
                 key={f.value}
-                onClick={() => setFilter(f.value)}
+                onClick={() => {
+                  setFilter(f.value);
+                  paging.reset();
+                }}
                 className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
                   filter === f.value
                     ? "bg-accent text-foreground"
@@ -370,12 +388,17 @@ function Inbox({
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto">
+        <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto">
+          {visible === undefined && (
+            <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading conversations…
+            </div>
+          )}
           {visible?.length === 0 && (
             <div className="flex flex-col items-center justify-center py-16 text-center">
               <InboxIcon className="mb-2 h-8 w-8 text-muted-foreground/40" />
               <p className="text-sm text-muted-foreground">
-                {threads?.length === 0 ? "No conversations yet." : "Nothing in this filter."}
+                {filter === "all" && paging.page === 1 ? "No conversations yet." : "Nothing in this filter."}
               </p>
             </div>
           )}
@@ -450,12 +473,32 @@ function Inbox({
             );
           })}
         </div>
+        {page ? (
+          <div className="shrink-0 border-t border-border px-2 pb-3">
+            <Pagination
+              label="Conversation pages"
+              page={paging.page}
+              pageSize={paging.pageSize}
+              rowsOnPage={page.page.length}
+              rowsBefore={paging.rowsBefore}
+              hasNext={!page.isDone}
+              onPage={(p) =>
+                paging.goTo(p, {
+                  rowsOnPage: page.page.length,
+                  hasNext: !page.isDone,
+                  continueCursor: page.continueCursor,
+                })
+              }
+              onPageSize={paging.setPageSize}
+            />
+          </div>
+        ) : null}
       </div>
 
       {/* Detail */}
       <div className={`min-w-0 flex-1 ${selected ? "block" : "hidden sm:block"}`}>
         {thread ? (
-          <ChatPane thread={thread} onBack={() => onSelect(null)} />
+          <ChatPane key={thread._id} thread={thread} onBack={() => onSelect(null)} />
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-3">
             <MessageCircle className="h-10 w-10 text-muted-foreground/30" />
@@ -468,7 +511,13 @@ function Inbox({
 }
 
 function ChatPane({ thread, onBack }: { thread: ThreadRow; onBack: () => void }) {
-  const messages = useQuery(api.whatsapp.messages, { threadId: thread._id });
+  const [limit, setLimit] = useState(CHAT_STEP);
+  const data = useQuery(api.whatsapp.messages, { threadId: thread._id, limit });
+  // Keep the messages on screen while a larger window loads, so "Load earlier" does not blank the chat.
+  const [held, setHeld] = useState(data);
+  if (data && data !== held) setHeld(data);
+  const messages = held?.messages;
+  const hasMore = held?.hasMore ?? false;
   const resumeBot = useMutation(api.whatsapp.resumeBot);
   const takeOver = useMutation(api.whatsapp.takeOver);
   const markRead = useMutation(api.whatsapp.markRead);
@@ -479,6 +528,10 @@ function ChatPane({ thread, onBack }: { thread: ThreadRow; onBack: () => void })
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // Scroll position taken when earlier messages are requested, so they land above without a jump.
+  const anchor = useRef<{ height: number; top: number } | null>(null);
+  const newestId = messages?.[messages.length - 1]?._id;
 
   const isClosed = thread.status === "closed";
 
@@ -486,11 +539,25 @@ function ChatPane({ thread, onBack }: { thread: ThreadRow; onBack: () => void })
     if (thread.unreadCount > 0) void markRead({ threadId: thread._id });
   }, [thread._id, thread.unreadCount, markRead]);
 
-  // Jump to the newest message whenever the thread or its length changes, so a live reply
-  // does not land below the fold.
+  // Jump to the newest message when the chat opens and when a live reply arrives (not on
+  // "Load earlier messages", which keeps the reader's place).
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });
+  }, [newestId]);
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    const a = anchor.current;
+    if (!el || !a) return;
+    el.scrollTop = a.top + (el.scrollHeight - a.height);
+    anchor.current = null;
   }, [messages?.length]);
+
+  const loadEarlier = () => {
+    const el = scrollRef.current;
+    if (el) anchor.current = { height: el.scrollHeight, top: el.scrollTop };
+    setLimit((n) => n + CHAT_STEP);
+  };
 
   const saveName = async () => {
     const name = nameDraft.trim();
@@ -611,7 +678,33 @@ function ChatPane({ thread, onBack }: { thread: ThreadRow; onBack: () => void })
       )}
 
       {/* Messages */}
-      <div className="flex-1 space-y-3 overflow-y-auto p-4">
+      <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4">
+        {hasMore && messages && messages.length >= CHAT_MAX && (
+          <p role="status" className="text-center text-xs text-muted-foreground">
+            Showing the latest {CHAT_MAX.toLocaleString("en-US")} messages
+          </p>
+        )}
+        {hasMore && !(messages && messages.length >= CHAT_MAX) && (
+          <div className="flex justify-center">
+            <button
+              type="button"
+              onClick={loadEarlier}
+              disabled={data === undefined}
+              className="flex items-center gap-1.5 rounded-lg border border-input px-3 py-1.5 text-xs hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {data === undefined && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              Load earlier messages
+            </button>
+          </div>
+        )}
+        {messages === undefined && (
+          <div className="flex items-center justify-center gap-2 py-6 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading messages…
+          </div>
+        )}
+        {messages?.length === 0 && (
+          <p className="py-6 text-center text-sm text-muted-foreground">No messages in this conversation yet.</p>
+        )}
         {messages?.map((m) => (
           <div key={m._id} className={m.sender === "customer" ? "text-left" : "text-right"}>
             <span

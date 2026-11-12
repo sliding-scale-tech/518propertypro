@@ -14,12 +14,14 @@ import {
   Sparkles,
   Trash2,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { errorMessage, useToast } from "@/components/toast";
 import { RequireView } from "@/components/require-view";
-import { Btn, Modal, PageHeader } from "@/components/ui";
+import { Btn, Modal, PageHeader, Pagination, SearchBox, Select, paginate, readSort, useUrlPaging, useUrlSearch } from "@/components/ui";
+import { DOC_SORT_DEFAULT, DOC_SORT_KEYS, docsView } from "@/components/docs/docs-view";
 
 const SYNC_LABELS: Record<string, { label: string; className: string }> = {
   pending: { label: "Queued", className: "bg-muted text-muted-foreground" },
@@ -56,8 +58,38 @@ function relativeDate(timestamp: number) {
   return `Updated ${days} days ago`;
 }
 
+const DOC_SORT_OPTIONS = [
+  { key: "updated", dir: "desc", label: "Recently updated" },
+  { key: "updated", dir: "asc", label: "Least recently updated" },
+  { key: "title", dir: "asc", label: "Title A to Z" },
+  { key: "title", dir: "desc", label: "Title Z to A" },
+] as const;
+
 function DocsPageInner() {
   const docs = useQuery(api.docs.list);
+  const router = useRouter();
+  const pathname = usePathname();
+  const params = useSearchParams();
+  const search = useUrlSearch();
+  const paging = useUrlPaging();
+  const sort = readSort(params.get("sort"), params.get("dir"), DOC_SORT_KEYS, DOC_SORT_DEFAULT);
+  const visible = docs ? docsView(docs, { q: search.q, sort }) : undefined;
+  const paged = visible ? paginate(visible, paging.page, paging.pageSize) : undefined;
+  const changeSort = (value: string) => {
+    const [key, dir] = value.split(":");
+    const isDefault = key === DOC_SORT_DEFAULT.key && dir === DOC_SORT_DEFAULT.dir;
+    const next = new URLSearchParams(params.toString());
+    if (isDefault) {
+      next.delete("sort");
+      next.delete("dir");
+    } else {
+      next.set("sort", key);
+      next.set("dir", dir);
+    }
+    next.delete("page");
+    const qs = next.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname);
+  };
   const save = useMutation(api.docs.save);
   const remove = useAction(api.docs.remove);
   const ensureSeeded = useAction(api.agents.ensureSeeded);
@@ -97,8 +129,42 @@ function DocsPageInner() {
         </div>
       ) : null}
 
+      {docs === undefined ? (
+        <p className="py-10 text-center text-sm text-muted-foreground">Loading knowledge…</p>
+      ) : null}
+
+      {docs && docs.length > 0 ? (
+        <div className="grid gap-3 sm:grid-cols-[1fr_220px]">
+          <SearchBox
+            id="docs-search"
+            label="Search knowledge"
+            placeholder="Search titles and text"
+            value={search.input}
+            onChange={search.setInput}
+            onClear={search.clear}
+          />
+          <Select
+            aria-label="Sort knowledge"
+            value={`${sort.key}:${sort.dir}`}
+            onChange={(e) => changeSort(e.target.value)}
+          >
+            {DOC_SORT_OPTIONS.map((o) => (
+              <option key={`${o.key}:${o.dir}`} value={`${o.key}:${o.dir}`}>
+                {o.label}
+              </option>
+            ))}
+          </Select>
+        </div>
+      ) : null}
+
+      {docs && docs.length > 0 && visible?.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-border bg-card py-12 text-center text-sm text-muted-foreground">
+          No knowledge matches “{search.q.trim()}”.
+        </div>
+      ) : null}
+
       <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
-        {docs?.map((doc, index) => {
+        {paged?.rows.map((doc, index) => {
           const badge = SYNC_LABELS[doc.syncState] ?? SYNC_LABELS.pending;
           const tone = CARD_TONES[index % CARD_TONES.length];
           const Icon = tone.icon;
@@ -134,6 +200,18 @@ function DocsPageInner() {
           );
         })}
       </div>
+
+      {paged ? (
+        <Pagination
+          label="Knowledge pages"
+          className="pt-0"
+          page={paged.page}
+          pageSize={paging.pageSize}
+          total={paged.total}
+          onPage={paging.setPage}
+          onPageSize={paging.setPageSize}
+        />
+      ) : null}
 
       <AnimatePresence>
         {selected ? (
@@ -343,7 +421,10 @@ function KnowledgeModal({
 export default function DocsPage() {
   return (
     <RequireView views={["admin"]}>
-      <DocsPageInner />
+      {/* The list keeps its search, sort and page in the URL (useSearchParams). */}
+      <Suspense fallback={null}>
+        <DocsPageInner />
+      </Suspense>
     </RequireView>
   );
 }

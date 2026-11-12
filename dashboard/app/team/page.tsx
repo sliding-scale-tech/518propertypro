@@ -1,26 +1,27 @@
 "use client";
 
 import { useAction, useMutation, useQuery } from "convex/react";
-import { motion } from "framer-motion";
-import { Globe, Mail, RefreshCw, Shield, Users, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { Globe, Mail, RefreshCw, Users, X } from "lucide-react";
+import { Suspense, useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import { errorMessage, useToast } from "@/components/toast";
-import { AppRoleBadge } from "@/components/team/member-details";
 import { MemberDrawer } from "@/components/team/member-drawer";
 import { LeadRouting } from "@/components/team/lead-routing";
+import { MembersList } from "@/components/team/members-list";
 import { AuditTab } from "@/components/team/audit-tab";
-import { Avatar, Btn, Card, CardHead, Chips, Input, PageHeader, Seg, Select, Toggle } from "@/components/ui";
-import {
-  InvitePanel,
-  ROLE_FILTERS,
-  inviteTypeLabel,
-  matchesRoleFilter,
-  parseRoleFilter,
-  type RoleFilter,
-} from "@/components/team/invite-panel";
+import { Btn, Card, CardHead, Input, PageHeader, Seg, Select } from "@/components/ui";
+import { InvitePanel, inviteTypeLabel } from "@/components/team/invite-panel";
 
 export default function TeamPage() {
+  // The member list keeps its search, role filter, sort and page in the URL (useSearchParams).
+  return (
+    <Suspense fallback={null}>
+      <TeamPageInner />
+    </Suspense>
+  );
+}
+
+function TeamPageInner() {
   /* A live query now that the roster is rows in this database rather than in Clerk — the page
      updates itself the moment someone accepts an invite, with nothing to refetch by hand. */
   const data = useQuery(api.team.overview);
@@ -38,10 +39,6 @@ export default function TeamPage() {
   const [busy, setBusy] = useState(false);
   // Which member row is open in the side drawer (by membership, so it follows live updates).
   const [openId, setOpenId] = useState<string | null>(null);
-  const [roleFilter, setRoleFilter] = useState<RoleFilter>(() => {
-    if (typeof window === "undefined") return "all";
-    return parseRoleFilter(new URLSearchParams(window.location.search).get("role"));
-  });
   // ?tab=audit deep link (the old /audit redirects here). Read from window to avoid a Suspense boundary.
   const [tab, setTabState] = useState<"members" | "audit">(() => {
     if (typeof window === "undefined") return "members";
@@ -144,111 +141,20 @@ export default function TeamPage() {
 
           <InvitePanel />
 
-          <Card>
-            <CardHead
-              title={
-                <>
-                  Members <span className="text-muted-foreground">({data.members.length})</span>
-                </>
-              }
-              icon={<Shield />}
-              hint={`The Tours switch decides whether Sarah books tours for someone. ${
-                data.isAdmin ? "You can switch anyone's." : "You can switch your own; an Admin can switch anyone's."
-              }`}
-            />
-
-            <div className="mb-4">
-              <Chips
-                label="Filter by role"
-                value={roleFilter}
-                onChange={(next) => {
-                  setRoleFilter(next);
-                  const params = new URLSearchParams(window.location.search);
-                  if (next === "all") params.delete("role");
-                  else params.set("role", next);
-                  const qs = params.toString();
-                  window.history.replaceState(null, "", qs ? `/team?${qs}` : "/team");
-                }}
-                options={ROLE_FILTERS.map((f) => ({
-                  value: f.value,
-                  label: `${f.label} (${data.members.filter((m) => matchesRoleFilter(f.value, m)).length})`,
-                })).filter((o) => o.value !== "none" || roleFilter === "none" || data.members.some((m) => m.appRole === null))}
-              />
-            </div>
-
-            <div className="space-y-2">
-              {data.members.filter((m) => matchesRoleFilter(roleFilter, m)).length === 0 ? (
-                <p className="rounded-2xl border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
-                  No one with this role yet.
-                </p>
-              ) : null}
-              {data.members
-                .filter((m) => matchesRoleFilter(roleFilter, m))
-                .map((member) => {
-                  const canSwitch = data.isAdmin || member.isSelf;
-                  return (
-                    <motion.div
-                      key={member.membershipId}
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      className="flex items-center rounded-2xl border border-border transition-colors hover:bg-muted/50"
-                    >
-                      {/* The whole row opens the drawer. The Tours switch is a sibling, not a child, so
-                          it works on its own without opening it. */}
-                      <button
-                        type="button"
-                        onClick={() => setOpenId(member.membershipId)}
-                        aria-label={`Open details for ${member.name}`}
-                        className="flex min-w-0 flex-1 items-center gap-3 rounded-2xl px-4 py-3 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
-                      >
-                        {member.imageUrl ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img src={member.imageUrl} alt="" className="h-[30px] w-[30px] shrink-0 rounded-full object-cover" />
-                        ) : (
-                          <Avatar
-                            name={member.name}
-                            tone={
-                              member.appRole === "admin"
-                                ? "warn"
-                                : member.appRole === "technician"
-                                  ? "ok"
-                                  : member.appRole === "accountant"
-                                    ? "vio"
-                                    : "acc"
-                            }
-                          />
-                        )}
-                        <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium">
-                          <span className="truncate">{member.name}</span>
-                          {member.isSelf ? <span className="text-xs font-normal text-muted-foreground">you</span> : null}
-                          <AppRoleBadge appRole={member.appRole} />
-                        </span>
-                      </button>
-                      <div
-                        className="flex shrink-0 items-center gap-2 py-3 pr-4"
-                        title={canSwitch ? undefined : "Only an Admin can change a teammate's tours"}
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <span className="text-xs font-medium text-muted-foreground">Tours</span>
-                        <Toggle
-                          label={`Tours for ${member.name}`}
-                          checked={member.takingTours}
-                          disabled={busy || !canSwitch}
-                          onChange={() =>
-                            void run(
-                              () => setTakingTours({ userId: member.userId, takingTours: !member.takingTours }),
-                              member.takingTours
-                                ? `${member.isSelf ? "You are" : `${member.name} is`} no longer taking tours`
-                                : `${member.isSelf ? "You are" : `${member.name} is`} taking tours again`,
-                            )
-                          }
-                        />
-                      </div>
-                    </motion.div>
-                  );
-                })}
-            </div>
-          </Card>
+          <MembersList
+            members={data.members}
+            isAdmin={data.isAdmin}
+            busy={busy}
+            onOpen={setOpenId}
+            onToggleTours={(member) =>
+              void run(
+                () => setTakingTours({ userId: member.userId, takingTours: !member.takingTours }),
+                member.takingTours
+                  ? `${member.isSelf ? "You are" : `${member.name} is`} no longer taking tours`
+                  : `${member.isSelf ? "You are" : `${member.name} is`} taking tours again`,
+              )
+            }
+          />
 
           <MemberDrawer
             member={openMember}

@@ -173,12 +173,20 @@ export const list = query({
       .query("properties")
       .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
       .collect();
+    // One read of the team's units, grouped by building (was one query per property).
+    const allUnits = await ctx.db
+      .query("units")
+      .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
+      .collect();
+    const unitsByProperty = new Map<Id<"properties">, Doc<"units">[]>();
+    for (const u of allUnits) {
+      const bucket = unitsByProperty.get(u.propertyId);
+      if (bucket) bucket.push(u);
+      else unitsByProperty.set(u.propertyId, [u]);
+    }
     const out = [];
     for (const p of rows) {
-      const units = await ctx.db
-        .query("units")
-        .withIndex("by_property", (q) => q.eq("propertyId", p._id))
-        .collect();
+      const units = unitsByProperty.get(p._id) ?? [];
       const yourUnits = scope
         ? units.filter((u) => scope.managed.has(u._id) || scope.covering.has(u._id)).length
         : units.length;
@@ -188,6 +196,8 @@ export const list = query({
         name: p.name,
         address: p.address,
         isPilot: p.isPilot ?? false,
+        // The client roster / team the building is on (the list's Team filter and column).
+        category: p.category,
         utilityGasPhone: p.utilityGasPhone,
         petsAllowed: p.petsAllowed,
         defaultAssetManagerUserId: p.defaultAssetManagerUserId,

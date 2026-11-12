@@ -1,17 +1,21 @@
 "use client";
 
 import { useConvex, useQuery } from "convex/react";
+import type { FunctionReturnType } from "convex/server";
 import { errorMessage } from "@/components/ui/toast";
-import { Download, Loader2 } from "lucide-react";
+import { Download } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
-import { Btn, Card, CardHead, DatePicker, Input, Select } from "@/components/ui";
+import { Btn, Card, CardHead, DatePicker, Input, Pagination, Select } from "@/components/ui";
 import { formatWhen } from "@/components/maintenance/shared";
+import { useCursorPaging } from "@/lib/use-cursor-paging";
+import { Spinner } from "@/components/finance/form-bits";
 
 type Row = Doc<"auditEvents">;
 type Entity = Row["entity"];
+type AuditPage = FunctionReturnType<typeof api.audit.list>;
 
 const ENTITIES: Entity[] = [
   "request",
@@ -40,7 +44,10 @@ function csvCell(value: string | undefined): string {
   return `"${v.replace(/"/g, '""')}"`;
 }
 
-function exportCsv(rows: Row[]) {
+/** Most rows "Export all matching" reads before it stops. */
+const EXPORT_ALL_CAP = 20_000;
+
+function exportCsv(rows: Row[], fileName = "audit-log.csv") {
   const header = ["Time", "Actor", "Action", "Entity", "Entity ID", "From", "To", "Note"];
   const lines = rows.map((r) =>
     [new Date(r.at).toISOString(), r.actorLabel, r.action, r.entity, r.entityId, r.from, r.to, r.note]
@@ -53,7 +60,7 @@ function exportCsv(rows: Row[]) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = "audit-log.csv";
+  a.download = fileName;
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -68,41 +75,50 @@ export function AuditTab() {
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
 
+  // One page at a time (50 rows; the server fixes the size): Previous / Next, filters kept.
+  const paging = useCursorPaging();
   const [rows, setRows] = useState<Row[]>([]);
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [isDone, setIsDone] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [isDone, setIsDone] = useState(true);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const gen = useRef(0);
 
   const filterKey = `${entity}|${action.trim()}|${actor}|${fromDate}|${toDate}`;
+  const loadedFilter = useRef<string | null>(null);
 
-  const loadMore = useCallback(
-    async (reset: boolean) => {
-      const myGen = reset ? ++gen.current : gen.current;
+  // The audit.list filters for the current form values.
+  const currentFilters = useCallback(
+    () => ({
+      entity: entity === "all" ? undefined : entity,
+      action: action.trim() || undefined,
+      actorUserId: actor === "all" ? undefined : (actor as Id<"users">),
+      from: fromDate ? new Date(`${fromDate}T00:00:00`).getTime() : undefined,
+      to: toDate ? new Date(`${toDate}T23:59:59.999`).getTime() : undefined,
+    }),
+    [entity, action, actor, fromDate, toDate],
+  );
+
+  const loadPage = useCallback(
+    async (cursor: string | null) => {
+      const myGen = ++gen.current;
       setLoading(true);
       setError(null);
       try {
-        let cur: string | null = reset ? null : cursor;
+        let cur: string | null = cursor;
         let collected: Row[] = [];
         let done = false;
-        // Filtered pages can come back short or empty: keep paging until something shows or the log ends.
+        // Filtered pages can come back short or empty: keep reading until something shows or the log ends.
         while (!done && collected.length === 0) {
-          const res = await convex.query(api.audit.list, {
-            entity: entity === "all" ? undefined : entity,
-            action: action.trim() || undefined,
-            actorUserId: actor === "all" ? undefined : (actor as Id<"users">),
-            from: fromDate ? new Date(`${fromDate}T00:00:00`).getTime() : undefined,
-            to: toDate ? new Date(`${toDate}T23:59:59.999`).getTime() : undefined,
-            cursor: cur,
-          });
+          const res: AuditPage = await convex.query(api.audit.list, { ...currentFilters(), cursor: cur });
           if (myGen !== gen.current) return;
           collected = res.page;
           cur = res.continueCursor;
           done = res.isDone;
         }
-        setRows((prev) => (reset ? collected : [...prev, ...collected]));
-        setCursor(cur);
+        if (myGen !== gen.current) return;
+        setRows(collected);
+        setNextCursor(cur);
         setIsDone(done);
       } catch (e) {
         if (myGen === gen.current) setError(errorMessage(e));
@@ -110,18 +126,79 @@ export function AuditTab() {
         if (myGen === gen.current) setLoading(false);
       }
     },
-    [convex, cursor, entity, action, actor, fromDate, toDate],
+    [convex, currentFilters],
   );
 
-  // Reload from the top whenever a filter changes (debounced for the action text).
-  const loadRef = useRef(loadMore);
+  // Load the page shown whenever the page or a filter changes (the action text waits for a pause in typing).
+  const loadRef = useRef(loadPage);
   useEffect(() => {
-    loadRef.current = loadMore;
+    loadRef.current = loadPage;
   });
+  const { cursor } = paging;
   useEffect(() => {
-    const t = setTimeout(() => void loadRef.current(true), 300);
+    const filterChanged = loadedFilter.current !== filterKey;
+    loadedFilter.current = filterKey;
+    const t = setTimeout(() => void loadRef.current(cursor), filterChanged ? 300 : 0);
     return () => clearTimeout(t);
-  }, [filterKey]);
+  }, [filterKey, cursor]);
+
+  // Export every row matching the current filters: read all pages client-side, then download once.
+  const [exportCount, setExportCount] = useState<number | null>(null);
+  const [exportNote, setExportNote] = useState<string | null>(null);
+  const exportRun = useRef(0);
+  useEffect(
+    () => () => {
+      exportRun.current++; // leaving the tab cancels a running export
+    },
+    [],
+  );
+
+  const exportAll = async () => {
+    const myRun = ++exportRun.current;
+    const filters = currentFilters(); // filters as they were when the export started
+    const all: Row[] = [];
+    let cur: string | null = null;
+    let done = false;
+    let capped = false;
+    setExportNote(null);
+    setExportCount(0);
+    try {
+      while (!done) {
+        const res: AuditPage = await convex.query(api.audit.list, { ...filters, cursor: cur });
+        if (myRun !== exportRun.current) return; // cancelled
+        all.push(...res.page);
+        cur = res.continueCursor;
+        done = res.isDone;
+        setExportCount(Math.min(all.length, EXPORT_ALL_CAP));
+        if (all.length >= EXPORT_ALL_CAP && !done) {
+          capped = true;
+          break;
+        }
+      }
+      exportCsv(all.slice(0, EXPORT_ALL_CAP), "audit-log-all.csv");
+      setExportNote(
+        capped
+          ? `Stopped at ${EXPORT_ALL_CAP.toLocaleString("en-US")} rows. Narrow the date range or filters to export the rest.`
+          : `Exported ${all.length.toLocaleString("en-US")} rows.`,
+      );
+    } catch (e) {
+      if (myRun === exportRun.current) setExportNote(`Export failed: ${errorMessage(e)}`);
+    } finally {
+      if (myRun === exportRun.current) setExportCount(null);
+    }
+  };
+  const cancelExport = () => {
+    exportRun.current++;
+    setExportCount(null);
+    setExportNote("Export cancelled.");
+  };
+  const exporting = exportCount !== null;
+
+  // A changed filter goes back to page 1.
+  const filter = <T,>(set: (v: T) => void) => (v: T) => {
+    set(v);
+    paging.reset();
+  };
 
   const actorOptions = [
     { value: "all", label: "Anyone" },
@@ -139,16 +216,44 @@ export function AuditTab() {
           title="Audit log"
           hint="Every change, newest first."
           right={
-            <Btn sm disabled={rows.length === 0} onClick={() => exportCsv(rows)}>
-              <Download className="h-3.5 w-3.5" /> Export CSV
-            </Btn>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {exporting ? (
+                <>
+                  <span role="status" className="text-xs text-muted-foreground">
+                    Exporting… {exportCount.toLocaleString("en-US")} rows
+                  </span>
+                  <Btn sm onClick={cancelExport}>
+                    Cancel
+                  </Btn>
+                </>
+              ) : (
+                <>
+                  {exportNote ? (
+                    <span role="status" className="text-xs text-muted-foreground">
+                      {exportNote}
+                    </span>
+                  ) : null}
+                  <Btn
+                    sm
+                    disabled={loading || rows.length === 0}
+                    onClick={() => void exportAll()}
+                    title="Reads every page matching the filters, up to 20,000 rows"
+                  >
+                    <Download className="h-3.5 w-3.5" /> Export all matching (CSV)
+                  </Btn>
+                </>
+              )}
+              <Btn sm disabled={rows.length === 0} onClick={() => exportCsv(rows)} title="Exports the rows on this page">
+                <Download className="h-3.5 w-3.5" /> Export this page (CSV)
+              </Btn>
+            </div>
           }
         />
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
           <Select
             aria-label="Entity"
             value={entity}
-            onChange={(e) => setEntity(e.target.value as Entity | "all")}
+            onChange={(e) => filter(setEntity)(e.target.value as Entity | "all")}
           >
             {entityOptions.map((o) => (
               <option key={o.value} value={o.value}>
@@ -160,17 +265,17 @@ export function AuditTab() {
             placeholder="Action (exact)"
             aria-label="Action"
             value={action}
-            onChange={(e) => setAction(e.target.value)}
+            onChange={(e) => filter(setAction)(e.target.value)}
           />
-          <Select aria-label="Actor" value={actor} onChange={(e) => setActor(e.target.value)}>
+          <Select aria-label="Actor" value={actor} onChange={(e) => filter(setActor)(e.target.value)}>
             {actorOptions.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
               </option>
             ))}
           </Select>
-          <DatePicker aria-label="From date" value={fromDate} onChange={setFromDate} />
-          <DatePicker aria-label="To date" value={toDate} onChange={setToDate} />
+          <DatePicker aria-label="From date" value={fromDate} onChange={filter(setFromDate)} />
+          <DatePicker aria-label="To date" value={toDate} onChange={filter(setToDate)} />
         </div>
       </Card>
 
@@ -211,10 +316,17 @@ export function AuditTab() {
                 </tr>
               );
             })}
+            {loading && rows.length === 0 ? (
+              <tr>
+                <td colSpan={6}>
+                  <Spinner label="Loading the audit log…" />
+                </td>
+              </tr>
+            ) : null}
             {!loading && rows.length === 0 ? (
               <tr>
                 <td colSpan={6} className="px-4 py-10 text-center text-muted-foreground">
-                  No events match.
+                  {filterKey === "all||all||" ? "No events yet." : "No events match these filters."}
                 </td>
               </tr>
             ) : null}
@@ -222,15 +334,22 @@ export function AuditTab() {
         </table>
       </div>
 
-      <div className="flex justify-center">
-        {loading ? (
-          <Loader2 className="h-5 w-5 animate-spin text-primary" />
-        ) : !isDone ? (
-          <Btn onClick={() => void loadMore(false)}>Load more</Btn>
-        ) : rows.length > 0 ? (
-          <span className="text-xs text-faint">End of log</span>
-        ) : null}
-      </div>
+      {/* A disabled fieldset disables Previous / Next while a page loads. */}
+      <fieldset disabled={loading} className="m-0 min-w-0 border-0 p-0">
+        <Pagination
+          label="Audit log pages"
+          className="pt-0"
+          page={paging.page}
+          pageSize={paging.pageSize}
+          rowsOnPage={rows.length}
+          rowsBefore={paging.rowsBefore}
+          hasNext={!isDone}
+          onPage={(p) => {
+            if (loading) return;
+            paging.goTo(p, { rowsOnPage: rows.length, hasNext: !isDone, continueCursor: nextCursor });
+          }}
+        />
+      </fieldset>
     </div>
   );
 }

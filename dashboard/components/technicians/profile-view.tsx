@@ -11,7 +11,8 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { PriorityChip } from "@/components/board/chips";
 import { toast } from "@/components/toast";
 import { Btn, Card, ConfirmDialog, Input, Modal, PageHeader, Select, Textarea, cx } from "@/components/ui";
-import { ActionMenu, LabelValue, Pager, UnderlineTabs, fmtStamp, useDebounced } from "@/components/asset-managers/shared";
+import { ActionMenu, LabelValue, UnderlineTabs, fmtStamp, useDebounced } from "@/components/asset-managers/shared";
+import { Pagination } from "@/components/ui";
 import { E164_RE, EMAIL_RE, INVALID, TechStatusBadge, WO_STATUS_OPTIONS, WoStatusPill, type WoStatusGroup } from "./shared";
 
 type Tab = "overview" | "work-orders";
@@ -537,7 +538,7 @@ function WorkOrdersTab({ userId, technicianName, initialStatus }: { userId: Id<"
           </table>
         </div>
         <div className="border-t border-border px-5 pb-1">
-          <Pager page={data?.page ?? 1} pageCount={data?.pageCount ?? 1} total={data?.total ?? 0} pageSize={WO_PAGE} noun="work orders" onPage={setPage} />
+          <Pagination label="Work orders pages" page={data?.page ?? 1} pageSize={WO_PAGE} total={data?.total ?? 0} onPage={setPage} />
         </div>
         <div className="flex flex-wrap items-center gap-3 px-5 pt-4">
           <Btn variant="pri" className="h-11 px-5" onClick={() => setModalRows([...selected.values()])}>

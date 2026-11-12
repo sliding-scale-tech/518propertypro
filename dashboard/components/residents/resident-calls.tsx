@@ -3,9 +3,11 @@
 import { useMutation, useQuery } from "convex/react";
 import { AlertTriangle, CheckCircle2, ClipboardList, Gauge } from "lucide-react";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { readChoice } from "@/components/residents/tenant-list-params";
+import { useKept, useTenantUrl } from "@/components/residents/use-tenant-url";
 import { errorMessage, useToast } from "@/components/toast";
 import { ConversationTranscript } from "@/components/transcript";
 import {
@@ -21,15 +23,29 @@ import {
   Kpi,
   KpiRow,
   LabeledField,
+  Pagination,
   Pill,
+  SearchBox,
   Select,
+  SortHeader,
   Textarea,
+  ariaSortOf,
+  readSort,
+  toggleSort,
+  useUrlPaging,
+  useUrlSearch,
   type Column,
   type Tone,
 } from "@/components/ui";
 import { SEVERITY_RUBRIC, severityBand, type SeverityBand } from "@/convex/severity";
 
 const BAND_TONE: Record<SeverityBand, Tone> = { high: "bad", medium: "warn", low: "neutral" };
+
+const SORT_KEYS = ["when", "caller", "severity", "duration", "status"] as const;
+type SortKey = (typeof SORT_KEYS)[number];
+const SORT_DEFAULT = { key: "when", dir: "desc" } as const;
+const STATUS_CHOICES = ["open", "resolved", "all"] as const;
+const SEVERITY_CHOICES = ["all", "high", "medium", "low"] as const;
 
 const SEVERITY_LABELS: Record<SeverityBand, string> = {
   high: "High (7-10)",
@@ -102,7 +118,6 @@ function ScorePill({ severity }: { severity: number }) {
 /** Non-maintenance resident calls: filters, severity override, resolve, admin-only delete. */
 export function ResidentCalls() {
   const toast = useToast();
-  const issues = useQuery(api.tenants.issues);
   const stats = useQuery(api.tenants.stats);
   const updateIssue = useMutation(api.tenants.updateIssue);
   const removeIssue = useMutation(api.tenants.removeIssue);
@@ -111,33 +126,53 @@ export function ResidentCalls() {
   // tenants.updateIssue is admin-view only on the server; AMs get a read-only drawer.
   const canEdit = access?.view === "admin";
 
-  const [severityFilter, setSeverityFilter] = useState("all");
-  const [typeFilter, setTypeFilter] = useState("all");
-  const [statusFilter, setStatusFilter] = useState("open");
-  const [selected, setSelected] = useState<string | null>(null);
+  const url = useTenantUrl();
+  const search = useUrlSearch();
+  const paging = useUrlPaging();
+  const statusFilter = readChoice(url.params.get("status"), STATUS_CHOICES, "open");
+  const severityFilter = readChoice(url.params.get("severity"), SEVERITY_CHOICES, "all");
+  const typeFilter = url.params.get("type") ?? "all";
+  const sort = readSort(url.params.get("sort"), url.params.get("dir"), SORT_KEYS, SORT_DEFAULT);
+  // The open drawer keeps its own copy of the row, so it stays put if a save moves the row off this page.
+  const [selected, setSelected] = useState<IssueRow | null>(null);
 
-  const filtered = useMemo(() => {
-    if (!issues) return undefined;
-    return issues.filter((issue) => {
-      if (statusFilter !== "all" && issue.status !== statusFilter) return false;
-      if (severityFilter !== "all" && severityBand(issue.severity) !== severityFilter) return false;
-      if (typeFilter !== "all" && callTypeOf(issue) !== typeFilter) return false;
-      return true;
-    });
-  }, [issues, severityFilter, statusFilter, typeFilter]);
+  const result = useQuery(api.tenants.issuesPage, {
+    status: statusFilter,
+    severity: severityFilter === "all" ? undefined : severityFilter,
+    type: typeFilter === "all" ? undefined : typeFilter,
+    search: search.q.trim() || undefined,
+    sortKey: sort.key,
+    sortDir: sort.dir,
+    page: paging.page,
+    pageSize: paging.pageSize,
+  });
+  const { value: data, stale } = useKept(result);
 
-  const types = useMemo(
-    () => [...new Set((issues ?? []).map(callTypeOf).filter(Boolean))].sort(),
-    [issues],
-  );
+  const types = data?.types ?? [];
+  const typeOptions = typeFilter !== "all" && !types.includes(typeFilter) ? [...types, typeFilter].sort() : types;
+  const current = (selected && data?.rows.find((i) => i.key === selected.key)) || selected;
 
-  const current = issues?.find((i) => i.key === selected) ?? null;
+  const onSort = (key: SortKey) => {
+    const next = toggleSort(sort, key);
+    const isDefault = next.key === SORT_DEFAULT.key && next.dir === SORT_DEFAULT.dir;
+    url.set({ sort: isDefault ? null : next.key, dir: isDefault ? null : next.dir });
+  };
+  const sortable = (key: SortKey, label: string) => ({
+    header: <SortHeader label={label} sortKey={key} sort={sort} onSort={onSort} />,
+    sort: ariaSortOf(sort, key),
+  });
+  const filtersActive =
+    search.q.trim() !== "" || statusFilter !== "open" || severityFilter !== "all" || typeFilter !== "all";
+  const clearAll = () => {
+    search.setInput("");
+    url.set({ q: null, status: null, severity: null, type: null });
+  };
 
   const columns: Column<IssueRow>[] = [
-    { key: "when", header: "When", className: "whitespace-nowrap text-muted-foreground", render: (i) => formatWhen(i.createdAt) },
+    { key: "when", ...sortable("when", "When"), className: "whitespace-nowrap text-muted-foreground", render: (i) => formatWhen(i.createdAt) },
     {
       key: "caller",
-      header: "Caller",
+      ...sortable("caller", "Caller"),
       render: (i) => (
         <div>
           <div className="font-medium">{i.callerName ?? "—"}</div>
@@ -156,11 +191,11 @@ export function ResidentCalls() {
         </div>
       ),
     },
-    { key: "sev", header: "Severity", render: (i) => <ScorePill severity={i.severity} /> },
-    { key: "dur", header: "Duration", className: "tabular-nums", render: (i) => formatDuration(i.durationSec) },
+    { key: "sev", ...sortable("severity", "Severity"), render: (i) => <ScorePill severity={i.severity} /> },
+    { key: "dur", ...sortable("duration", "Duration"), className: "tabular-nums", render: (i) => formatDuration(i.durationSec) },
     {
       key: "status",
-      header: "Status",
+      ...sortable("status", "Status"),
       render: (i) => <Pill tone={i.status === "open" ? "warn" : "ok"}>{i.statusLabel}</Pill>,
     },
     {
@@ -199,8 +234,23 @@ export function ResidentCalls() {
       ) : null}
 
       <Card>
+        <div className="mb-3">
+          <SearchBox
+            id="calls-search"
+            label="Search resident calls"
+            value={search.input}
+            onChange={search.setInput}
+            onClear={search.clear}
+            placeholder="Search caller, unit, reason, phone or request number"
+          />
+        </div>
         <div className="mb-3.5 flex flex-wrap gap-2">
-          <Select aria-label="Filter by severity" className="w-44" value={severityFilter} onChange={(e) => setSeverityFilter(e.target.value)}>
+          <Select
+            aria-label="Filter by severity"
+            className="w-44"
+            value={severityFilter}
+            onChange={(e) => url.set({ severity: e.target.value === "all" ? null : e.target.value })}
+          >
             <option value="all">All severities</option>
             {Object.entries(SEVERITY_LABELS).map(([value, label]) => (
               <option key={value} value={value}>
@@ -208,35 +258,71 @@ export function ResidentCalls() {
               </option>
             ))}
           </Select>
-          <Select aria-label="Filter by call type" className="w-44" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+          <Select
+            aria-label="Filter by call type"
+            className="w-44"
+            value={typeFilter}
+            onChange={(e) => url.set({ type: e.target.value === "all" ? null : e.target.value })}
+          >
             <option value="all">All call types</option>
-            {types.map((t) => (
+            {typeOptions.map((t) => (
               <option key={t} value={t}>
                 {labelize(t)}
               </option>
             ))}
           </Select>
-          <Select aria-label="Filter by status" className="w-36" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          <Select
+            aria-label="Filter by status"
+            className="w-36"
+            value={statusFilter}
+            onChange={(e) => url.set({ status: e.target.value === "open" ? null : e.target.value })}
+          >
             <option value="open">Open</option>
             <option value="resolved">Resolved</option>
             <option value="all">All</option>
           </Select>
         </div>
-        {filtered === undefined ? (
-          <p className="text-sm text-muted-foreground">Loading…</p>
+        {data === undefined ? (
+          <p className="text-sm text-muted-foreground">Loading resident calls…</p>
         ) : (
-          <DataTable
-            caption="Resident calls"
-            columns={columns}
-            rows={filtered}
-            rowKey={(i) => i.key}
-            onRowClick={(i) => setSelected(i.key)}
-            empty={
-              issues?.length === 0
-                ? "No resident calls logged yet. Sarah adds them here as they call in."
-                : "No issues match this filter."
-            }
-          />
+          <div className={stale ? "opacity-60 transition-opacity" : "transition-opacity"} aria-busy={stale}>
+            <DataTable
+              caption="Resident calls"
+              columns={columns}
+              rows={data.rows}
+              rowKey={(i) => i.key}
+              onRowClick={(i) => setSelected(i)}
+              empty={
+                data.overall === 0 ? (
+                  "No resident calls logged yet. Sarah adds them here as they call in."
+                ) : search.q.trim() !== "" ? (
+                  <span>
+                    No resident calls match &ldquo;{search.q.trim()}&rdquo;.{" "}
+                    <button type="button" onClick={clearAll} className="font-medium text-primary hover:underline">
+                      Clear search and filters
+                    </button>
+                  </span>
+                ) : (
+                  <span>
+                    No issues match this filter.{" "}
+                    {filtersActive ? (
+                      <button type="button" onClick={clearAll} className="font-medium text-primary hover:underline">
+                        Clear filters
+                      </button>
+                    ) : null}
+                  </span>
+                )
+              }
+            />
+            <Pagination
+              label="Resident calls pages"
+              page={data.page}
+              pageSize={data.pageSize}
+              total={data.total}
+              onPage={paging.setPage}
+              onPageSize={paging.setPageSize}
+            />
+          </div>
         )}
       </Card>
 

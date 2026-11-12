@@ -15,6 +15,7 @@ import { isSmsAllowed } from "./twilioApi";
 import { createPublicLink, peekPublicLink } from "./publicLinks";
 import { sha256 } from "./team";
 import { findResidentsByPhone } from "./residents";
+import { sortExceptionRows } from "./exceptionOrder";
 import { clampSeverity } from "./severity";
 import { tenantMessage } from "./sarahConfigRead";
 import { normalizeUnitKey } from "./units";
@@ -1246,20 +1247,39 @@ export const get = query({
   },
 });
 
-/** Requests that couldn't be routed safely, plus assigned-but-AM-unavailable ones. Admin view. */
+/** Most exception rows read at once; when the queue is longer the page says so (`capped`). */
+const EXCEPTIONS_READ_CAP = 1000;
+
+/**
+ * Requests that couldn't be routed safely, plus assigned-but-AM-unavailable ones. Admin view.
+ * Paged on the server (page is 1-based, default 25 per page, max 100). Rows are ordered by routing
+ * reason group (groups with an emergency first, so every emergency is on page 1 before any
+ * non-emergency; each group stays contiguous), then severity, then oldest.
+ * `reasonCounts` covers the whole queue, not just the page.
+ */
 export const exceptions = query({
-  args: {},
-  handler: async (ctx) => {
+  args: { page: v.optional(v.number()), pageSize: v.optional(v.number()) },
+  handler: async (ctx, args) => {
     const org = await requireAdminView(ctx);
-    const rows = await ctx.db
+    const pageSize = Math.min(100, Math.max(1, Math.floor(args.pageSize ?? 25)));
+    const read = await ctx.db
       .query("maintenanceRequests")
       .withIndex("by_exception", (q) => q.eq("orgId", org.orgId).eq("inExceptionQueue", true))
       .order("desc")
-      .take(LIST_CAP);
-    const open = rows
-      .filter((r) => OPEN.includes(r.status))
-      .sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || a.createdAt - b.createdAt);
-    return await enrich(ctx, open);
+      .take(EXCEPTIONS_READ_CAP + 1);
+    const capped = read.length > EXCEPTIONS_READ_CAP;
+    const reasonOf = (r: Doc<"maintenanceRequests">) => r.routeReason ?? "other";
+    const open = sortExceptionRows(
+      read.slice(0, EXCEPTIONS_READ_CAP).filter((r) => OPEN.includes(r.status)),
+      (r) => ({ reason: reasonOf(r), severityRank: SEVERITY_RANK[r.severity], createdAt: r.createdAt }),
+    );
+    const reasonCounts: Record<string, number> = {};
+    for (const r of open) reasonCounts[reasonOf(r)] = (reasonCounts[reasonOf(r)] ?? 0) + 1;
+    const total = open.length;
+    const pageCount = Math.max(1, Math.ceil(total / pageSize));
+    const page = Math.min(pageCount, Math.max(1, Math.floor(args.page ?? 1)));
+    const rows = await enrich(ctx, open.slice((page - 1) * pageSize, page * pageSize));
+    return { rows, total, page, pageSize, pageCount, reasonCounts, capped, cap: EXCEPTIONS_READ_CAP };
   },
 });
 

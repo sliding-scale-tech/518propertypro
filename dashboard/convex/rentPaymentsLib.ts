@@ -534,10 +534,12 @@ async function planMark(
       .collect()
   ).find((e) => e.orgId === org.orgId && e.source !== "rent_payment" && e.voided !== true && rentIds.has(e.accountId));
   if (byHand) return { ok: false, field: "unitId", message: RENT_PAY_MSG.alreadyInLedger(label, month) };
-  // ...and never a second Rent Income row DATED in the received month: a row entered by hand is
-  // matched to the month it is dated in, so both would count for that month's statement.
-  const sameMonth = await rentDatedInMonth(ctx, org, rentIds, unit._id, monthOf(receivedDate), null);
-  if (sameMonth) return { ok: false, field: "unitId", message: RENT_PAY_MSG.alreadyDatedInMonth(label, monthOf(receivedDate), sameMonth) };
+  // ...and never on top of a Rent Income row entered by hand DATED in the received month: that row
+  // is matched to the month it is dated in, so both would count for that month's statement. (Other
+  // payments from this page don't count: two rent months may be received on the same day.)
+  if (await manualRentDatedInMonth(ctx, org, rentIds, unit._id, monthOf(receivedDate), null)) {
+    return { ok: false, field: "unitId", message: RENT_PAY_MSG.alreadyDatedInMonth(label, monthOf(receivedDate)) };
+  }
 
   const lock = receivedDateLockProblem(receivedDate, {
     name: property.name,
@@ -550,33 +552,27 @@ async function planMark(
 }
 
 /**
- * A non-voided Rent Income row of the unit (entered in the ledger, or a rent payment for any rent
- * month) dated in `month`, other than `exceptId`; null = none. `rentForMonth` null = entered in
- * the ledger.
+ * Is there a non-voided Rent Income row of the unit entered by hand in the ledger (legacy, source
+ * "manual") dated in `month`, other than `exceptId`? Rent payments from the Payments page are left
+ * out on purpose: they are already kept to one per unit per rent month, and a tenant may pay two
+ * rent months on the same day (Nov + Dec rent on 11/28).
  */
-async function rentDatedInMonth(
+async function manualRentDatedInMonth(
   ctx: Ctx,
   org: PayOrg,
   rentIds: Set<string>,
   unitId: Id<"units">,
   month: string,
   exceptId: string | null,
-): Promise<{ rentForMonth: string | null } | null> {
-  const rows = (
-    await ctx.db
-      .query("ledgerEntries")
-      .withIndex("by_unit_and_date", (q) => q.eq("unitId", unitId).gte("date", monthStart(month)).lte("date", monthEnd(month)))
-      .collect()
-  ).filter(
+): Promise<boolean> {
+  const rows = await ctx.db
+    .query("ledgerEntries")
+    .withIndex("by_unit_and_date", (q) => q.eq("unitId", unitId).gte("date", monthStart(month)).lte("date", monthEnd(month)))
+    .collect();
+  return rows.some(
     (e) =>
-      e.orgId === org.orgId &&
-      e.voided !== true &&
-      e._id !== exceptId &&
-      (e.source === "rent_payment" || rentIds.has(e.accountId)),
+      e.orgId === org.orgId && e.voided !== true && e._id !== exceptId && e.source === "manual" && rentIds.has(e.accountId),
   );
-  if (rows.length === 0) return null;
-  const first = [...rows].sort((a, b) => cmpStr(a.date, b.date) || cmpStr(a._id, b._id))[0];
-  return { rentForMonth: first.source === "rent_payment" ? (first.rentForMonth ?? null) : null };
 }
 
 async function insertPayment(
@@ -729,13 +725,12 @@ export async function updateOne(ctx: WriteCtx, org: PayOrg, args: UpdateArgs, to
       startMonth: links[0].startMonth ?? null,
     });
     if (lock) throw fieldError("receivedDate", lock);
-    // Moving it into a month that already has other rent dated in it: the same double-count guard as marking.
+    // Moving it into a month that has rent entered by hand dated in it: the same double-count guard as marking.
     const newMonth = monthOf(next.receivedDate);
     if (newMonth !== monthOf(entry.date) && entry.unitId !== undefined) {
-      const other = await rentDatedInMonth(ctx, org, await rentAccountIds(ctx, org), entry.unitId, newMonth, entry._id);
-      if (other) {
+      if (await manualRentDatedInMonth(ctx, org, await rentAccountIds(ctx, org), entry.unitId, newMonth, entry._id)) {
         const unit = await ctx.db.get(entry.unitId);
-        throw fieldError("receivedDate", RENT_PAY_MSG.alreadyDatedInMonth(unitLabelOf(unit, property), newMonth, other));
+        throw fieldError("receivedDate", RENT_PAY_MSG.alreadyDatedInMonth(unitLabelOf(unit, property), newMonth));
       }
     }
   }

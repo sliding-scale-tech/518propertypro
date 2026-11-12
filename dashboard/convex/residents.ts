@@ -7,6 +7,7 @@ import { currentOrg, requireAdminView, viewFor } from "./authz";
 import type { OrgContext } from "./authz";
 import { amScope, canSeeUnit } from "./amScope";
 import { requireE164, toE164 } from "./phone";
+import { RESIDENT_SORT_DEFAULT, pageOf, residentsView } from "./tenantViews";
 
 /**
  * Residents (F3): the tenant directory behind Sarah's caller-ID match and the Residents page.
@@ -95,6 +96,39 @@ async function present(ctx: QueryCtx, rows: Array<{ resident: Doc<"residents">; 
 
 // --- Reads ----------------------------------------------------------------
 
+/**
+ * Every resident the caller may read (no cap, so nothing is silently cut), or null when their
+ * view has no resident access. The admin view and accountants see the whole team; an asset
+ * manager only residents of units they manage or cover (read-only), taken from the session user
+ * and never from a client-supplied id.
+ */
+async function readableResidents(
+  ctx: QueryCtx,
+  org: OrgContext,
+  view: ReturnType<typeof viewFor>,
+): Promise<Doc<"residents">[] | null> {
+  if (view === "admin" || view === "accountant") {
+    return await ctx.db
+      .query("residents")
+      .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
+      .collect();
+  }
+  if (view === "asset_manager") {
+    const scope = await amScope(ctx, org);
+    const residents: Doc<"residents">[] = [];
+    for (const unitId of [...scope.managed, ...scope.covering]) {
+      residents.push(
+        ...(await ctx.db
+          .query("residents")
+          .withIndex("by_unit", (q) => q.eq("unitId", unitId))
+          .collect()),
+      );
+    }
+    return residents;
+  }
+  return null;
+}
+
 export const list = query({
   args: {
     propertyId: v.optional(v.id("properties")),
@@ -107,28 +141,8 @@ export const list = query({
     if (!org) return [];
     const view = viewFor(org.isAdmin, org.jobRoles);
 
-    let residents: Doc<"residents">[];
-    if (view === "admin" || view === "accountant") {
-      residents = await ctx.db
-        .query("residents")
-        .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
-        .take(2000);
-    } else if (view === "asset_manager") {
-      // Scope comes from the units this user manages, never from a client-supplied id.
-      // Managed units plus the ones they cover while a colleague is out (read-only).
-      const scope = await amScope(ctx, org);
-      residents = [];
-      for (const unitId of [...scope.managed, ...scope.covering]) {
-        residents.push(
-          ...(await ctx.db
-            .query("residents")
-            .withIndex("by_unit", (q) => q.eq("unitId", unitId))
-            .collect()),
-        );
-      }
-    } else {
-      return [];
-    }
+    const residents = await readableResidents(ctx, org, view);
+    if (!residents) return [];
 
     const units = new Map<string, Doc<"units">>();
     const rows: Array<{ resident: Doc<"residents">; unit: Doc<"units"> }> = [];
@@ -159,6 +173,77 @@ export const list = query({
     return await present(ctx, rows);
   },
 });
+
+/**
+ * One page of the Residents tab: the same read scope as `list` (checked first, same rules), then
+ * search / status / property / team filters and a sort over the WHOLE scoped set, so `total` is
+ * the true count and no resident is cut off. Sort defaults to name A-Z; status to active only.
+ */
+export const listPage = query({
+  args: {
+    propertyId: v.optional(v.id("properties")),
+    search: v.optional(v.string()),
+    status: v.optional(v.union(v.literal("active"), v.literal("inactive"), v.literal("all"))),
+    team: v.optional(v.union(v.literal("gold"), v.literal("silver"), v.literal("make_up"))),
+    sortKey: v.optional(v.union(v.literal("name"), v.literal("unit"), v.literal("lease"), v.literal("status"))),
+    sortDir: v.optional(v.union(v.literal("asc"), v.literal("desc"))),
+    page: v.optional(v.number()),
+    pageSize: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const org = await currentOrg(ctx);
+    const view = org ? viewFor(org.isAdmin, org.jobRoles) : null;
+    const residents = org && view ? await readableResidents(ctx, org, view) : null;
+    if (!org || !residents) {
+      return { ...pageOf<ResidentPageRow>([], 1, args.pageSize), showPhones: false, showEmail: false };
+    }
+
+    const units = new Map<string, Doc<"units"> | null>();
+    const properties = new Map<string, Doc<"properties"> | null>();
+    const all: ResidentPageRow[] = [];
+    for (const resident of residents) {
+      let unit = units.get(resident.unitId);
+      if (unit === undefined) {
+        unit = await ctx.db.get(resident.unitId);
+        units.set(resident.unitId, unit);
+      }
+      if (!unit) continue;
+      let property = properties.get(unit.propertyId);
+      if (property === undefined) {
+        property = await ctx.db.get(unit.propertyId);
+        properties.set(unit.propertyId, property);
+      }
+      all.push({
+        ...resident,
+        unitNumber: unit.unitNumber,
+        propertyId: unit.propertyId,
+        propertyName: property?.name ?? "Unknown",
+        category: property?.category,
+      });
+    }
+
+    const filtered = residentsView(all, {
+      q: args.search,
+      status: args.status,
+      propertyId: args.propertyId,
+      team: args.team,
+      sort: { key: args.sortKey ?? RESIDENT_SORT_DEFAULT.key, dir: args.sortDir ?? RESIDENT_SORT_DEFAULT.dir },
+    });
+    return {
+      ...pageOf(filtered, args.page, args.pageSize),
+      // Whether any resident in the filtered list has these details (columns stay steady across pages).
+      showPhones: filtered.some((r) => r.phones.length > 0),
+      showEmail: filtered.some((r) => !!r.email),
+    };
+  },
+});
+
+type ResidentPageRow = Doc<"residents"> & {
+  unitNumber: string;
+  propertyId: Id<"properties">;
+  propertyName: string;
+  category: Doc<"properties">["category"];
+};
 
 export const get = query({
   args: { residentId: v.id("residents") },

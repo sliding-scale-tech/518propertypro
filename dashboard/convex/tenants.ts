@@ -9,6 +9,7 @@ import type { Doc } from "./_generated/dataModel";
 import { amScope, canSeeUnit } from "./amScope";
 import { findResidentsByPhone } from "./residents";
 import { STATUS_LABEL, requestStatusKey, workOrderStatusKey, type StatusKey } from "./board";
+import { CALL_SORT_DEFAULT, callTypeOf, callsView, pageOf } from "./tenantViews";
 
 /**
  * A resident-call row is either a maintenance request raised from a phone call (the normal
@@ -173,6 +174,49 @@ export const issues = query({
     if (view !== "admin" && view !== "asset_manager") return [];
     const rows = await loadCallRows(ctx, org);
     return rows.sort((a, b) => b.severity - a.severity || b.createdAt - a.createdAt);
+  },
+});
+
+/**
+ * One page of the Resident calls tab. Same read scope as `issues` (admin and asset manager only,
+ * the asset manager's units via loadCallRows), then status / severity / call-type filters, search
+ * and a sort over the WHOLE set, so `total` is the true count. Newest first by default.
+ * `types` lists every call type present (before filtering) for the type filter.
+ */
+export const issuesPage = query({
+  args: {
+    status: v.optional(v.union(v.literal("open"), v.literal("resolved"), v.literal("all"))),
+    severity: v.optional(v.union(v.literal("high"), v.literal("medium"), v.literal("low"))),
+    type: v.optional(v.string()),
+    search: v.optional(v.string()),
+    sortKey: v.optional(
+      v.union(v.literal("when"), v.literal("caller"), v.literal("severity"), v.literal("duration"), v.literal("status")),
+    ),
+    sortDir: v.optional(v.union(v.literal("asc"), v.literal("desc"))),
+    page: v.optional(v.number()),
+    pageSize: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const org = await currentOrg(ctx);
+    const view = org ? viewFor(org.isAdmin, org.jobRoles) : null;
+    // Resident-call detail is not for technicians or accountants.
+    if (!org || (view !== "admin" && view !== "asset_manager")) {
+      return { ...pageOf<CallRow>([], 1, args.pageSize), types: [] as string[], overall: 0 };
+    }
+    const rows = await loadCallRows(ctx, org);
+    const filtered = callsView(rows, {
+      q: args.search,
+      status: args.status,
+      severity: args.severity,
+      type: args.type,
+      sort: { key: args.sortKey ?? CALL_SORT_DEFAULT.key, dir: args.sortDir ?? CALL_SORT_DEFAULT.dir },
+    });
+    return {
+      ...pageOf(filtered, args.page, args.pageSize),
+      types: [...new Set(rows.map(callTypeOf).filter(Boolean))].sort(),
+      // Every call the viewer can see, ignoring filters (tells "no calls yet" from "no match").
+      overall: rows.length,
+    };
   },
 });
 

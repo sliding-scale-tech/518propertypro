@@ -5,8 +5,10 @@ import {
   internalQuery,
   mutation,
   query,
+  type QueryCtx,
 } from "./_generated/server";
 import { internal } from "./_generated/api";
+import type { Doc } from "./_generated/dataModel";
 import * as waha from "./wahaApi";
 import { clampSeverity } from "./severity";
 
@@ -18,49 +20,97 @@ export const session = query({
   handler: (ctx) => ctx.db.query("waSession").first(),
 });
 
+/** Thread list filter: one status, or everything. */
+const threadFilterValidator = v.union(
+  v.literal("all"),
+  v.literal("bot"),
+  v.literal("escalated"),
+  v.literal("closed"),
+);
+
+/** Rows per page: 25, 50 (default) or 100; anything else means 50. */
+function pageSizeOf(raw: number | null | undefined): number {
+  return raw === 25 || raw === 100 ? raw : 50;
+}
+
+/** A thread with what the inbox row and the chat header show: lead, issue and the latest message. */
+async function withDetails(ctx: QueryCtx, t: Doc<"waThreads">) {
+  const lead = await ctx.db
+    .query("waLeads")
+    .withIndex("by_thread", (q) => q.eq("threadId", t._id))
+    .first();
+  const issue = await ctx.db
+    .query("waIssues")
+    .withIndex("by_thread", (q) => q.eq("threadId", t._id))
+    .first();
+  const last = await ctx.db
+    .query("waMessages")
+    .withIndex("by_thread", (q) => q.eq("threadId", t._id))
+    .order("desc")
+    .first();
+  return {
+    ...t,
+    lead,
+    issue,
+    lastMessagePreview: last?.text ?? null,
+    lastMessageSender: last?.sender ?? null,
+  };
+}
+
+/**
+ * One page of the inbox, newest activity first, optionally one status. Paged with an opaque cursor
+ * (null for the first page); a status filter runs after the indexed read, so a page can come back
+ * short while more follow (check isDone).
+ */
 export const threads = query({
-  args: {},
-  handler: async (ctx) => {
-    const rows = await ctx.db
+  args: {
+    status: v.optional(threadFilterValidator),
+    cursor: v.optional(v.union(v.string(), v.null())),
+    pageSize: v.optional(v.union(v.number(), v.null())),
+  },
+  handler: async (ctx, args) => {
+    const status = args.status && args.status !== "all" ? args.status : null;
+    const result = await ctx.db
       .query("waThreads")
       .withIndex("by_last_message")
       .order("desc")
-      .collect();
-
-    return Promise.all(
-      rows.map(async (t) => {
-        const lead = await ctx.db
-          .query("waLeads")
-          .withIndex("by_thread", (q) => q.eq("threadId", t._id))
-          .first();
-        const issue = await ctx.db
-          .query("waIssues")
-          .withIndex("by_thread", (q) => q.eq("threadId", t._id))
-          .first();
-        const msgs = await ctx.db
-          .query("waMessages")
-          .withIndex("by_thread", (q) => q.eq("threadId", t._id))
-          .collect();
-        const last = msgs[msgs.length - 1];
-        return {
-          ...t,
-          lead,
-          issue,
-          lastMessagePreview: last?.text ?? null,
-          lastMessageSender: last?.sender ?? null,
-        };
-      }),
-    );
+      .filter((q) => (status ? q.eq(q.field("status"), status) : q.eq(true, true)))
+      .paginate({ numItems: pageSizeOf(args.pageSize), cursor: args.cursor ?? null });
+    return {
+      page: await Promise.all(result.page.map((t) => withDetails(ctx, t))),
+      isDone: result.isDone,
+      continueCursor: result.continueCursor,
+    };
   },
 });
 
-export const messages = query({
+/** The open conversation's thread, wherever it falls in the paged list. Null if it is gone. */
+export const threadById = query({
   args: { threadId: v.id("waThreads") },
-  handler: (ctx, args) =>
-    ctx.db
+  handler: async (ctx, args) => {
+    const t = await ctx.db.get(args.threadId);
+    return t ? withDetails(ctx, t) : null;
+  },
+});
+
+/**
+ * The latest `limit` messages of a thread (oldest first, as a chat reads), and whether earlier
+ * ones exist. The page raises `limit` for "Load earlier messages".
+ */
+export const messages = query({
+  args: { threadId: v.id("waThreads"), limit: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    const limit =
+      typeof args.limit === "number" && Number.isFinite(args.limit)
+        ? Math.min(Math.max(Math.floor(args.limit), 1), 1000)
+        : 50;
+    const rows = await ctx.db
       .query("waMessages")
       .withIndex("by_thread", (q) => q.eq("threadId", args.threadId))
-      .collect(),
+      .order("desc")
+      .take(limit + 1);
+    return { messages: rows.slice(0, limit).reverse(), hasMore: rows.length > limit };
+  },
 });
 
 export const stats = query({

@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery } from "convex/react";
 import { History, Pencil, Plus, Trash2 } from "lucide-react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -11,7 +12,38 @@ import { AddUnitModal, type NewUnit } from "@/components/units/add-unit-modal";
 import { EditUnitModal } from "@/components/units/edit-unit-modal";
 import { formatRent, type Manager, type UnitRow } from "@/components/units/types";
 import { UnitHistory } from "@/components/units/unit-history";
-import { Btn, Card, CardHead, DataTable, IconBtn, Pill, Select, Toggle, type Column } from "@/components/ui";
+import { normalizeSearch } from "@/components/finance/payments-search";
+import {
+  UNIT_AVAILABILITY_FILTERS,
+  UNIT_SORT_DEFAULT,
+  UNIT_SORT_KEYS,
+  unitsView,
+  type UnitAvailabilityFilter,
+  type UnitSortKey,
+} from "@/components/properties/property-finders";
+import {
+  Btn,
+  Card,
+  CardHead,
+  DataTable,
+  IconBtn,
+  Pagination,
+  Pill,
+  SearchBox,
+  Select,
+  SortHeader,
+  Toggle,
+  ariaSortOf,
+  paginate,
+  readSort,
+  toggleSort,
+  useUrlPaging,
+  useUrlSearch,
+  type Column,
+} from "@/components/ui";
+
+// This list shares the page with the properties list's URL keys, so its own keys are prefixed.
+const P = "units_";
 
 /**
  * Unit inventory for one property. Every unit always has an asset manager: the select's first
@@ -58,10 +90,40 @@ export function UnitInventory({
     return map;
   }, [residents]);
 
-  const rows = useMemo(
-    () => [...(units ?? [])].sort((a, b) => a.unitNumber.localeCompare(b.unitNumber, undefined, { numeric: true })),
-    [units],
-  );
+  const rows = units ?? [];
+  const tenantsOf = (u: UnitRow) => tenantsByUnit.get(u._id) ?? [];
+
+  const router = useRouter();
+  const pathname = usePathname();
+  const params = useSearchParams();
+  const search = useUrlSearch(`${P}q`, `${P}page`);
+  const q = normalizeSearch(search.q);
+  const rawFilter = params.get(`${P}filter`) ?? "";
+  const filter = (UNIT_AVAILABILITY_FILTERS as readonly string[]).includes(rawFilter) ? (rawFilter as UnitAvailabilityFilter) : "";
+  const sort = readSort(params.get(`${P}sort`), params.get(`${P}dir`), UNIT_SORT_KEYS, UNIT_SORT_DEFAULT);
+  const paging = useUrlPaging(P);
+  /** Set URL params ("" removes one); any change goes back to page 1. */
+  const setParams = (updates: Record<string, string>) => {
+    const next = new URLSearchParams(params.toString());
+    for (const [k, v] of Object.entries(updates)) {
+      if (v) next.set(k, v);
+      else next.delete(k);
+    }
+    next.delete(`${P}page`);
+    const qs = next.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  };
+  const onSort = (key: UnitSortKey) => {
+    const nextSort = toggleSort(sort, key);
+    const isDefault = nextSort.key === UNIT_SORT_DEFAULT.key && nextSort.dir === UNIT_SORT_DEFAULT.dir;
+    setParams({ [`${P}sort`]: isDefault ? "" : nextSort.key, [`${P}dir`]: isDefault ? "" : nextSort.dir });
+  };
+  const sortable = (key: UnitSortKey, label: string, align: "left" | "right" = "left") => ({
+    header: <SortHeader label={label} sortKey={key} sort={sort} onSort={onSort} align={align} />,
+    sort: ariaSortOf(sort, key),
+  });
+  const visible = unitsView(rows, tenantsOf, { q, filter, sort });
+  const paged = paginate(visible, paging.page, paging.pageSize);
 
   const defaultName =
     managers.find((m) => m.userId === defaultAmId)?.name ??
@@ -120,7 +182,7 @@ export function UnitInventory({
   const columns: Column<UnitRow>[] = [
     {
       key: "unit",
-      header: "Unit",
+      ...sortable("unit", "Unit"),
       render: (u) => (
         <div>
           <span className="font-semibold">{u.unitNumber}</span>
@@ -134,17 +196,17 @@ export function UnitInventory({
     },
     {
       key: "tenant",
-      header: "Tenant",
+      ...sortable("tenant", "Tenant"),
       render: (u) => {
         const names = tenantsByUnit.get(u._id);
         return names?.length ? names.join(", ") : <span className="text-faint">{residents === undefined ? "…" : "Vacant"}</span>;
       },
     },
-    { key: "rent", header: "Rent", align: "right", className: "tabular-nums", render: (u) => formatRent(u.rent) },
-    { key: "am", header: "Asset manager", render: amCell },
+    { key: "rent", ...sortable("rent", "Rent", "right"), align: "right", className: "tabular-nums", render: (u) => formatRent(u.rent) },
+    { key: "am", ...sortable("manager", "Asset manager"), render: amCell },
     {
       key: "avail",
-      header: "Available",
+      ...sortable("available", "Available"),
       render: (u) =>
         canEdit || (canToggleOwn && u.isMine && !u.covering) ? (
           <Toggle
@@ -210,13 +272,58 @@ export function UnitInventory({
       {units === undefined ? (
         <p className="text-sm text-muted-foreground">Loading units…</p>
       ) : (
-        <DataTable
-          caption="Unit inventory"
-          columns={columns}
-          rows={rows}
-          rowKey={(u) => u._id}
-          empty="No units yet."
-        />
+        <>
+          {rows.length > 0 ? (
+            <div className="mb-4 grid gap-3 sm:grid-cols-2">
+              <SearchBox
+                id="units-search"
+                label="Search units"
+                value={search.input}
+                onChange={search.setInput}
+                onClear={search.clear}
+                placeholder="Search unit, tenant, asset manager or status"
+              />
+              <Select
+                aria-label="Show units"
+                value={filter}
+                onChange={(e) => setParams({ [`${P}filter`]: e.target.value || "" })}
+              >
+                <option value="">All units</option>
+                <option value="available">Available</option>
+                <option value="unavailable">Unavailable</option>
+                <option value="vacant">Vacant (no tenant)</option>
+              </Select>
+            </div>
+          ) : null}
+          <DataTable
+            caption="Unit inventory"
+            columns={columns}
+            rows={paged.rows}
+            rowKey={(u) => u._id}
+            empty={
+              rows.length === 0 ? (
+                "No units yet."
+              ) : q ? (
+                <span>
+                  No units match &ldquo;{search.q.trim()}&rdquo;.{" "}
+                  <button type="button" onClick={search.clear} className="font-medium text-primary hover:underline">
+                    Clear search
+                  </button>
+                </span>
+              ) : (
+                "No units match this filter."
+              )
+            }
+          />
+          <Pagination
+            label="Unit inventory pages"
+            page={paged.page}
+            pageSize={paged.pageSize}
+            total={paged.total}
+            onPage={paging.setPage}
+            onPageSize={paging.setPageSize}
+          />
+        </>
       )}
 
       {adding ? (

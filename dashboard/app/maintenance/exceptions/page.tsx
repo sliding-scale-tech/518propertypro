@@ -2,13 +2,13 @@
 
 import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { Suspense, useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { errorMessage, useToast } from "@/components/toast";
 import { Dropdown } from "@/components/ui/dropdown";
 import { RequireView } from "@/components/require-view";
-import { PageHeader } from "@/components/ui";
+import { PageHeader, Pagination, useUrlPaging } from "@/components/ui";
 import {
   Field,
   Modal,
@@ -95,7 +95,9 @@ function Exceptions() {
   const toast = useToast();
   const access = useQuery(api.team.myAccess);
   const canManage = access?.canManageMaintenance === true;
-  const rows = useQuery(api.maintenance.exceptions);
+  const paging = useUrlPaging();
+  const data = useQuery(api.maintenance.exceptions, { page: paging.page, pageSize: paging.pageSize });
+  const rows = data?.rows;
   const resolve = useMutation(api.maintenance.resolveException);
   const [resolving, setResolving] = useState<Id<"maintenanceRequests"> | null>(null);
   const [fallback, setFallback] = useState<Id<"maintenanceRequests"> | null>(null);
@@ -116,6 +118,12 @@ function Exceptions() {
         subtitle={`Requests that could not be routed safely.${!canManage ? " You have read-only access." : ""}`}
       />
 
+      {data?.capped ? (
+        <p role="status" className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2 text-[12.5px] text-amber-800">
+          Showing the {data.cap} most recent exceptions. Older ones are not listed until these are resolved.
+        </p>
+      ) : null}
+
       {rows === undefined ? (
         <p className="py-10 text-center text-sm text-muted-foreground">Loading…</p>
       ) : groups.length === 0 ? (
@@ -126,7 +134,8 @@ function Exceptions() {
         groups.map(([reason, items]) => (
           <section key={reason} className="space-y-2">
             <h2 className="text-sm font-semibold">
-              {REASON_LABEL[reason] ?? reason} <span className="font-normal text-muted-foreground">({items.length})</span>
+              {REASON_LABEL[reason] ?? reason}{" "}
+              <span className="font-normal text-muted-foreground">({data?.reasonCounts[reason] ?? items.length})</span>
             </h2>
             <div className="divide-y divide-border overflow-hidden rounded-[20px] border border-border bg-card">
               {items.map((r) => (
@@ -174,6 +183,17 @@ function Exceptions() {
         ))
       )}
 
+      {data && data.total > 0 ? (
+        <Pagination
+          label="Exceptions pages"
+          page={data.page}
+          pageSize={data.pageSize}
+          total={data.total}
+          onPage={paging.setPage}
+          onPageSize={paging.setPageSize}
+        />
+      ) : null}
+
       {resolving && (
         <UnitPickerDialog
           title="Resolve to unit"
@@ -198,7 +218,9 @@ function Exceptions() {
 export default function ExceptionsPage() {
   return (
     <RequireView views={["admin"]}>
-      <Exceptions />
+      <Suspense fallback={null}>
+        <Exceptions />
+      </Suspense>
     </RequireView>
   );
 }

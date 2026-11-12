@@ -93,14 +93,14 @@ export const RENT_PAY_MSG = {
   alreadyInLedger: (unitLabel: string, month: string): string =>
     `${unitLabel} already has rent recorded in the ledger for ${formatMonth(month)}. Check it on the Ledger page.`,
   /**
-   * Another Rent Income row of the unit (entered in the ledger, or a payment for another rent month)
-   * is DATED in the same calendar month as this payment's received date: both would land on the
-   * same statement, so one may be a double entry.
+   * A Rent Income row of the unit entered by hand in the ledger (legacy, source "manual", no rent
+   * month) is DATED in the same calendar month as this payment's received date: both would land on
+   * the same statement, so one may be a double entry. Payments from the Payments page never trigger
+   * this (they are kept to one per unit per rent month instead), so a tenant may pay two rent months
+   * on the same day.
    */
-  alreadyDatedInMonth: (unitLabel: string, receivedMonth: string, other: { rentForMonth: string | null }): string =>
-    `${unitLabel} already has rent dated in ${formatMonth(receivedMonth)} (${
-      other.rentForMonth ? `marked received for ${formatMonth(other.rentForMonth)}` : "entered in the ledger"
-    }). Check it before adding another payment.`,
+  alreadyDatedInMonth: (unitLabel: string, receivedMonth: string): string =>
+    `${unitLabel} already has rent entered in the ledger dated in ${formatMonth(receivedMonth)}. Check it on the Ledger page before adding another payment.`,
   /** Changing the received date after the property's owner changed. */
   ownerChanged: (property: string): string =>
     `${property} now belongs to a different owner, so this payment's date can't be changed. Undo it and mark it again.`,

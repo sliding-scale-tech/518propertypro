@@ -4,7 +4,6 @@ import type { FunctionReturnType } from "convex/server";
 import {
   AlertTriangle,
   CheckCircle2,
-  ChevronLeft,
   ChevronRight,
   Clock3,
   Eye,
@@ -17,8 +16,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import type { api } from "@/convex/_generated/api";
 import { toast } from "@/components/ui/toast";
-import { Avatar, cx } from "@/components/ui";
-import { DesignSelect } from "./design-select";
+import { Avatar, Pagination, cx } from "@/components/ui";
 import { PriorityChip, StatusPill } from "./chips";
 import { ago, fmtDay, fmtStamp, shortPerson, STATUS_LABELS, type StatusKey, type TableStatus } from "./shared";
 
@@ -108,9 +106,27 @@ function priorityBorder(level: string): string {
   return "border-l-sky-500";
 }
 
-export function Kanban({ columns, onOpen }: { columns: KanbanColumn[]; onOpen: (ref: ItemRef) => void }) {
+/** Cards a Kanban column starts with and gains per "Show more" (matches KANBAN_START in convex/board.ts). */
+export const KANBAN_STEP = 20;
+
+export function Kanban({
+  columns,
+  onOpen,
+  onMore,
+  capped,
+  cap,
+}: {
+  columns: KanbanColumn[];
+  onOpen: (ref: ItemRef) => void;
+  /** Show KANBAN_STEP more cards in this column. */
+  onMore: (columnKey: string, shown: number) => void;
+  /** Some status holds more than `cap` items, so the oldest are not on the board. */
+  capped?: boolean;
+  cap?: number;
+}) {
   return (
     <div className="-mx-1 overflow-x-auto px-1 pb-3">
+      {capped ? <CappedNote cap={cap} /> : null}
       <div className="flex min-w-max items-start gap-4">
         {columns.map((col) => {
           const style = COLUMN_STYLE[col.key] ?? COLUMN_STYLE.am_review!;
@@ -137,6 +153,24 @@ export function Kanban({ columns, onOpen }: { columns: KanbanColumn[]; onOpen: (
                 ) : (
                   col.cards.map((c) => <BoardCard key={c.id} card={c} onOpen={onOpen} />)
                 )}
+                {col.cards.length > 0 ? (
+                  <div className="flex flex-col items-center gap-1.5">
+                    <p className="text-[12px] text-slate-500" aria-live="polite">
+                      Showing {col.cards.length} of {col.count}
+                    </p>
+                    {col.cards.length < col.count && col.cards.length >= (cap ?? 300) ? (
+                      <p className="text-[12px] text-slate-500">Showing the most recent {cap ?? 300}</p>
+                    ) : col.cards.length < col.count ? (
+                      <button
+                        type="button"
+                        onClick={() => onMore(col.key, col.cards.length)}
+                        className="h-8 rounded-full border border-slate-200 bg-white px-3.5 text-[12.5px] font-medium text-slate-600 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                      >
+                        Show {Math.min(KANBAN_STEP, col.count - col.cards.length, (cap ?? 300) - col.cards.length)} more
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             </section>
           );
@@ -188,18 +222,14 @@ export function StatusChips({
   );
 }
 
-const PAGE_SIZES = [15, 30, 50];
-
-function pageList(current: number, count: number): Array<number | "gap-l" | "gap-r"> {
-  if (count <= 7) return Array.from({ length: count }, (_, i) => i + 1);
-  const out: Array<number | "gap-l" | "gap-r"> = [1];
-  const from = Math.max(2, current - 1);
-  const to = Math.min(count - 1, current + 1);
-  if (from > 2) out.push("gap-l");
-  for (let i = from; i <= to; i++) out.push(i);
-  if (to < count - 1) out.push("gap-r");
-  out.push(count);
-  return out;
+/** Honest note when a status holds more than the server reads: the oldest items are not listed. */
+export function CappedNote({ cap }: { cap?: number }) {
+  return (
+    <p role="status" className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2 text-[12.5px] text-amber-800">
+      Showing the most recent {cap ?? 300} items of each status. Older work orders are not listed here, so the totals
+      below cover only these.
+    </p>
+  );
 }
 
 export function WorkOrderTable({
@@ -213,7 +243,7 @@ export function WorkOrderTable({
   onPageSize: (size: number) => void;
   onOpen: (ref: ItemRef) => void;
 }) {
-  const { rows, total, page, pageSize, pageCount } = data;
+  const { rows, total, page, pageSize } = data;
   const [picked, setPicked] = useState<Record<string, boolean>>({});
   const [menu, setMenu] = useState<{ row: TableRow; left: number; top: number } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -251,11 +281,13 @@ export function WorkOrderTable({
     }
   };
 
-  const first = total === 0 ? 0 : (page - 1) * pageSize + 1;
-  const last = Math.min(page * pageSize, total);
-
   return (
     <div className="overflow-hidden rounded-[20px] border border-slate-200 bg-white">
+      {data.capped ? (
+        <div className="px-3 pt-3">
+          <CappedNote cap={data.cap} />
+        </div>
+      ) : null}
       <div className="overflow-x-auto">
         <table className="w-full min-w-[1040px] border-collapse text-left text-[13px]">
           <thead>
@@ -393,81 +425,16 @@ export function WorkOrderTable({
         </div>
       ) : null}
 
-      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-5 py-3.5 text-[12.5px] text-slate-500">
-        <span>
-          {total === 0 ? (
-            "Showing 0 work orders"
-          ) : (
-            <>
-              Showing <b className="font-semibold text-slate-700">{first}–{last}</b> of{" "}
-              <b className="font-semibold text-slate-700">{total}</b> work orders
-            </>
-          )}
-        </span>
-        <div className="flex items-center gap-1">
-          <PageBtn label="Previous page" disabled={page <= 1} onClick={() => onPage(page - 1)}>
-            <ChevronLeft className="h-4 w-4" />
-          </PageBtn>
-          {pageList(page, pageCount).map((p) =>
-            typeof p === "number" ? (
-              <button
-                key={p}
-                type="button"
-                aria-label={`Page ${p}`}
-                aria-current={p === page ? "page" : undefined}
-                onClick={() => onPage(p)}
-                className={cx(
-                  "inline-flex h-8 min-w-8 items-center justify-center rounded-lg px-2",
-                  p === page ? "border border-sky-200 bg-sky-50 font-medium text-sky-700" : "text-slate-600 hover:bg-slate-100",
-                )}
-              >
-                {p}
-              </button>
-            ) : (
-              <span key={p} className="px-1 text-slate-400">
-                …
-              </span>
-            ),
-          )}
-          <PageBtn label="Next page" disabled={page >= pageCount} onClick={() => onPage(page + 1)}>
-            <ChevronRight className="h-4 w-4" />
-          </PageBtn>
-          <span className="ml-2">
-            <DesignSelect
-              ariaLabel="Rows per page"
-              variant="page"
-              value={String(pageSize)}
-              onChange={(v) => onPageSize(Number(v))}
-              options={PAGE_SIZES.map((n) => ({ value: String(n), label: `${n} / page` }))}
-            />
-          </span>
-        </div>
-      </div>
+      <Pagination
+        label="Work orders pages"
+        className="border-t border-slate-100 px-5 pb-3.5"
+        page={page}
+        pageSize={pageSize}
+        total={total}
+        onPage={onPage}
+        onPageSize={onPageSize}
+      />
     </div>
-  );
-}
-
-function PageBtn({
-  children,
-  label,
-  disabled,
-  onClick,
-}: {
-  children: React.ReactNode;
-  label: string;
-  disabled?: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      disabled={disabled}
-      onClick={onClick}
-      className="inline-flex h-8 min-w-8 items-center justify-center rounded-lg px-2 text-slate-600 hover:bg-slate-100 disabled:opacity-40"
-    >
-      {children}
-    </button>
   );
 }
 

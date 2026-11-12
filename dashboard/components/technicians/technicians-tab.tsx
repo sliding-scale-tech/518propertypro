@@ -8,7 +8,8 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Btn, Card, ConfirmDialog, Drawer, Input, Select, cx } from "@/components/ui";
 import { toast } from "@/components/toast";
-import { ActionMenu, PersonAvatar, Pager, useDebounced } from "@/components/asset-managers/shared";
+import { ActionMenu, PersonAvatar, useDebounced } from "@/components/asset-managers/shared";
+import { Pagination } from "@/components/ui";
 import { EMAIL_RE, INVALID, TechStatusBadge } from "./shared";
 
 const PAGE_SIZE = 10;
@@ -340,7 +341,7 @@ export function TechniciansTab() {
             </tbody>
           </table>
         </div>
-        <Pager page={list?.page ?? 1} pageCount={list?.pageCount ?? 1} total={list?.total ?? 0} pageSize={PAGE_SIZE} onPage={setPage} />
+        <Pagination label="Technicians pages" page={list?.page ?? 1} pageSize={PAGE_SIZE} total={list?.total ?? 0} onPage={setPage} />
       </Card>
 
       <TechnicianDrawer userId={openUser} row={openRow} onClose={() => setOpenUser(null)} />

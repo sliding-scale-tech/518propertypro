@@ -6,7 +6,9 @@ import { useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { toast } from "@/components/ui/toast";
-import { Avatar, Card, CardHead, Chips, Pill, Select } from "@/components/ui";
+import { readChoice } from "@/components/residents/tenant-list-params";
+import { useKept, useTenantUrl } from "@/components/residents/use-tenant-url";
+import { Avatar, Card, CardHead, Chips, Pagination, Pill, SearchBox, Select, useUrlPaging, useUrlSearch } from "@/components/ui";
 
 type Status = "open" | "called_back" | "closed";
 type Filter = "all" | Status;
@@ -21,8 +23,19 @@ const EMAIL = /^[A-Za-z0-9._+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/;
  * being reduced to safe characters (no raw caller text goes into an href).
  */
 export function CallbacksList() {
-  const [filter, setFilter] = useState<Filter>("open");
-  const rows = useQuery(api.leads.callbacks, filter === "all" ? {} : { status: filter });
+  const url = useTenantUrl();
+  const search = useUrlSearch();
+  const paging = useUrlPaging();
+  const filter = readChoice<Filter>(url.params.get("status"), ["open", "called_back", "closed", "all"], "open");
+  const result = useQuery(api.leads.callbacksPage, {
+    status: filter,
+    search: search.q.trim() || undefined,
+    page: paging.page,
+    pageSize: paging.pageSize,
+  });
+  const { value: data, stale } = useKept(result);
+  const rows = data?.rows;
+  const counts = data?.counts;
   const setStatus = useMutation(api.leads.setCallbackStatus);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -45,16 +58,26 @@ export function CallbacksList() {
         icon={<PhoneIncoming />}
         hint="Callers Sarah could not match to a unit. Call them back, then update the status."
       />
+      <div className="mb-3">
+        <SearchBox
+          id="callbacks-search"
+          label="Search callbacks"
+          value={search.input}
+          onChange={search.setInput}
+          onClear={search.clear}
+          placeholder="Search caller, phone, email or issue"
+        />
+      </div>
       <div className="mb-4">
         <Chips<Filter>
           label="Filter by status"
           value={filter}
-          onChange={setFilter}
+          onChange={(next) => url.set({ status: next === "open" ? null : next })}
           options={[
-            { value: "open", label: "Open" },
-            { value: "called_back", label: "Called back" },
-            { value: "closed", label: "Closed" },
-            { value: "all", label: "All" },
+            { value: "open", label: counts ? `Open (${counts.open})` : "Open" },
+            { value: "called_back", label: counts ? `Called back (${counts.called_back})` : "Called back" },
+            { value: "closed", label: counts ? `Closed (${counts.closed})` : "Closed" },
+            { value: "all", label: counts ? `All (${counts.all})` : "All" },
           ]}
         />
       </div>
@@ -63,10 +86,21 @@ export function CallbacksList() {
         <p className="py-6 text-center text-sm text-muted-foreground">Loading callbacks…</p>
       ) : rows.length === 0 ? (
         <p className="rounded-2xl border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
-          {filter === "open" ? "No callbacks waiting. Nice." : "No callbacks match this filter."}
+          {search.q.trim() !== "" ? (
+            <>
+              No callbacks match &ldquo;{search.q.trim()}&rdquo;.{" "}
+              <button type="button" onClick={search.clear} className="font-medium text-primary hover:underline">
+                Clear search
+              </button>
+            </>
+          ) : filter === "open" ? (
+            "No callbacks waiting. Nice."
+          ) : (
+            "No callbacks match this filter."
+          )}
         </p>
       ) : (
-        <ul className="space-y-2">
+        <ul className={stale ? "space-y-2 opacity-60 transition-opacity" : "space-y-2 transition-opacity"} aria-busy={stale}>
           {rows.map((r) => {
             const tel = r.callbackNumber?.replace(/[^\d+]/g, "") ?? "";
             const email = r.callerEmail && EMAIL.test(r.callerEmail) ? r.callerEmail : null;
@@ -139,6 +173,16 @@ export function CallbacksList() {
           })}
         </ul>
       )}
+      {data ? (
+        <Pagination
+          label="Callbacks pages"
+          page={data.page}
+          pageSize={data.pageSize}
+          total={data.total}
+          onPage={paging.setPage}
+          onPageSize={paging.setPageSize}
+        />
+      ) : null}
     </Card>
   );
 }

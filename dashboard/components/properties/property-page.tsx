@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery } from "convex/react";
-import { Building2, Plus } from "lucide-react";
+import { ArrowLeft, Building2, Plus } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
@@ -9,10 +9,11 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Dialog } from "@/components/properties/dialog";
 import { PropertyForm } from "@/components/properties/property-form";
+import { PropertyList } from "@/components/properties/property-list";
 import { errorMessage, useToast } from "@/components/toast";
 import { UnitInventory } from "@/components/units/unit-inventory";
 import { useManagers } from "@/components/units/use-managers";
-import { Avatar, Btn, Card, CardHead, Chips, PageHeader, Select } from "@/components/ui";
+import { Avatar, Btn, Card, CardHead, PageHeader, Select } from "@/components/ui";
 
 type PropertyRow = NonNullable<ReturnType<typeof useProperties>>[number];
 function useProperties() {
@@ -35,8 +36,12 @@ export function PropertyPage() {
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  // `?property=<id>` opens one property; without it the list shows. A single property (an asset
+  // manager with one building) opens straight away.
   const wanted = search.get("property");
-  const property = properties?.find((p) => p._id === wanted) ?? properties?.[0];
+  const property =
+    properties?.find((p) => p._id === wanted) ?? (properties?.length === 1 && !wanted ? properties[0] : undefined);
+  const canGoBack = (properties?.length ?? 0) > 1;
 
   const select = (id: string) => router.replace(`/properties?property=${encodeURIComponent(id)}`, { scroll: false });
 
@@ -56,13 +61,15 @@ export function PropertyPage() {
       ) : (
         <div className="space-y-5">
           <div className="flex flex-wrap items-center gap-2">
-            {properties.length > 0 ? (
-              <Chips
-                label="Properties"
-                value={property?._id ?? ""}
-                options={properties.map((p) => ({ value: p._id, label: p.name }))}
-                onChange={select}
-              />
+            {property && canGoBack ? (
+              <Link
+                href="/properties"
+                scroll={false}
+                className="inline-flex items-center gap-1.5 text-[13px] font-medium text-primary hover:underline"
+              >
+                <ArrowLeft aria-hidden className="h-3.5 w-3.5" />
+                All properties
+              </Link>
             ) : null}
             {isAdmin ? (
               <Btn sm onClick={() => setAdding(true)}>
@@ -73,12 +80,7 @@ export function PropertyPage() {
           </div>
 
           {!property ? (
-            <Card>
-              <div className="py-6 text-center">
-                <Building2 className="mx-auto h-8 w-8 text-muted-foreground" />
-                <p className="mt-3 text-sm">No properties yet.</p>
-              </div>
-            </Card>
+            <PropertyList properties={properties} isAm={isAm} onOpen={(p) => select(p._id)} />
           ) : (
             <PropertyBody
               key={property._id}

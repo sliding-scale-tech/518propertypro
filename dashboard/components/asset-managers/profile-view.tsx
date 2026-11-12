@@ -15,7 +15,8 @@ import { toast } from "@/components/toast";
 import { Btn, Card, ConfirmDialog, Input, PageHeader, Textarea, cx } from "@/components/ui";
 import { ManagerAvailabilityModal } from "./manager-availability";
 import { ManageUnitsModal } from "./manage-units-modal";
-import { ActionMenu, LabelValue, Pager, StatusBadge, UnderlineTabs } from "./shared";
+import { Pagination, paginate, useUrlPaging } from "@/components/ui";
+import { ActionMenu, LabelValue, StatusBadge, UnderlineTabs } from "./shared";
 
 type Tab = "overview" | "work-orders" | "units";
 type Profile = NonNullable<FunctionReturnType<typeof api.assetManagers.profile>>;
@@ -386,7 +387,7 @@ function WorkOrdersTab({ userId }: { userId: Id<"users"> }) {
         </table>
       </div>
       <div className="border-t border-border px-5 pb-1">
-        <Pager page={data?.page ?? 1} pageCount={data?.pageCount ?? 1} total={data?.total ?? 0} pageSize={WO_PAGE} noun="work orders" onPage={setPage} />
+        <Pagination label="Work orders pages" page={data?.page ?? 1} pageSize={WO_PAGE} total={data?.total ?? 0} onPage={setPage} />
       </div>
     </Card>
   );
@@ -394,6 +395,9 @@ function WorkOrdersTab({ userId }: { userId: Id<"users"> }) {
 
 function UnitsTab({ userId, profile }: { userId: Id<"users">; profile: Profile }) {
   const units = useQuery(api.assetManagers.assignedUnits, { userId });
+  // The whole list stays loaded (the Manage assignment dialog needs every unit); only the table pages.
+  const paging = useUrlPaging("units_");
+  const paged = paginate(units ?? [], paging.page, paging.pageSize);
   const [manage, setManage] = useState<{ unitId?: Id<"units"> } | null>(null);
   const firstUnit = units?.[0];
   const th = "px-3 py-3 text-left text-[12px] font-medium text-muted-foreground";
@@ -418,7 +422,7 @@ function UnitsTab({ userId, profile }: { userId: Id<"users">; profile: Profile }
             ) : units.length === 0 ? (
               <tr><td colSpan={5} className="px-3 py-8 text-center text-muted-foreground">No units assigned yet.</td></tr>
             ) : (
-              units.map((u) => (
+              paged.rows.map((u) => (
                 <tr key={u.unitId} className="border-t border-border">
                   <td className="px-3 py-6 font-medium">{u.propertyName} · {u.unitNumber}</td>
                   <td className="px-3 py-6">{u.bedsBaths}</td>
@@ -436,6 +440,14 @@ function UnitsTab({ userId, profile }: { userId: Id<"users">; profile: Profile }
           </tbody>
         </table>
       </div>
+      <Pagination
+        label="Assigned units pages"
+        page={paged.page}
+        pageSize={paged.pageSize}
+        total={paged.total}
+        onPage={paging.setPage}
+        onPageSize={paging.setPageSize}
+      />
       <div className="mt-4 flex flex-wrap gap-3 border-t border-border pt-4">
         {firstUnit ? (
           <Link

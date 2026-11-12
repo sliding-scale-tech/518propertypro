@@ -25,30 +25,77 @@ async function adminOrgOrNull(ctx: QueryCtx) {
 
 // --- Reads ----------------------------------------------------------------
 
+/** Inbox filter: everything, escalated threads, or one channel. */
+const threadFilterValidator = v.union(
+  v.literal("all"),
+  v.literal("escalated"),
+  v.literal("sms"),
+  v.literal("whatsapp"),
+);
+
+/**
+ * One page of the team's threads, newest activity first. Paged with an opaque cursor (null for
+ * the first page); a filter runs after the indexed read, so a page can come back short while more
+ * follow (check isDone). Rows per page: 25, 50 (default) or 100.
+ */
 export const list = query({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    filter: v.optional(threadFilterValidator),
+    cursor: v.optional(v.union(v.string(), v.null())),
+    pageSize: v.optional(v.union(v.number(), v.null())),
+  },
+  handler: async (ctx, args) => {
     const org = await adminOrgOrNull(ctx);
-    if (!org) return [];
+    if (!org) return { page: [], isDone: true, continueCursor: "" };
+    const numItems = args.pageSize === 25 || args.pageSize === 100 ? args.pageSize : 50;
+    const filter = args.filter ?? "all";
     return ctx.db
       .query("threads")
       .withIndex("by_org_and_last_message", (q) => q.eq("orgId", org.orgId))
       .order("desc")
-      .take(500);
+      .filter((q) =>
+        filter === "escalated"
+          ? q.eq(q.field("status"), "escalated")
+          : filter === "sms" || filter === "whatsapp"
+            ? q.eq(q.field("channel"), filter)
+            : q.eq(true, true),
+      )
+      .paginate({ numItems, cursor: args.cursor ?? null });
   },
 });
 
-export const messages = query({
+/** The open conversation's thread, wherever it falls in the paged list; null if it is not this team's. */
+export const byId = query({
   args: { threadId: v.id("threads") },
   handler: async (ctx, args) => {
     const org = await adminOrgOrNull(ctx);
-    if (!org) return [];
+    if (!org) return null;
     const thread = await ctx.db.get(args.threadId);
-    if (!thread || thread.orgId !== org.orgId) return [];
-    return ctx.db
+    return thread && thread.orgId === org.orgId ? thread : null;
+  },
+});
+
+/**
+ * The latest `limit` messages of a thread (oldest first, as a chat reads), and whether earlier
+ * ones exist. The page raises `limit` for "Load earlier messages".
+ */
+export const messages = query({
+  args: { threadId: v.id("threads"), limit: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    const org = await adminOrgOrNull(ctx);
+    if (!org) return { messages: [], hasMore: false };
+    const thread = await ctx.db.get(args.threadId);
+    if (!thread || thread.orgId !== org.orgId) return { messages: [], hasMore: false };
+    const limit =
+      typeof args.limit === "number" && Number.isFinite(args.limit)
+        ? Math.min(Math.max(Math.floor(args.limit), 1), 1000)
+        : 50;
+    const rows = await ctx.db
       .query("smsMessages")
       .withIndex("by_thread", (q) => q.eq("threadId", args.threadId))
-      .collect();
+      .order("desc")
+      .take(limit + 1);
+    return { messages: rows.slice(0, limit).reverse(), hasMore: rows.length > limit };
   },
 });
 

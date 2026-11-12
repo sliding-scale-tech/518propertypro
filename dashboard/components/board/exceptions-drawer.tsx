@@ -6,7 +6,7 @@ import { useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { errorMessage, useToast } from "@/components/toast";
-import { Btn, Card, Drawer, DrawerSection, Field, Select, SevChip, Textarea } from "@/components/ui";
+import { Btn, Card, Drawer, DrawerSection, Field, Pagination, Select, SevChip, Textarea } from "@/components/ui";
 import { fmtDateTime, mrId } from "./shared";
 
 const REASON_LABEL: Record<string, string> = {
@@ -16,10 +16,10 @@ const REASON_LABEL: Record<string, string> = {
   "unit not active for maintenance intake": "Unit not active for maintenance intake",
 };
 
-type Row = NonNullable<ReturnType<typeof useExceptionRows>>[number];
+type Row = NonNullable<ReturnType<typeof useExceptionRows>>["rows"][number];
 
-function useExceptionRows(open: boolean) {
-  return useQuery(api.maintenance.exceptions, open ? {} : "skip");
+function useExceptionRows(open: boolean, page: number, pageSize: number) {
+  return useQuery(api.maintenance.exceptions, open ? { page, pageSize } : "skip");
 }
 
 function ResolveForm({ row, onDone }: { row: Row; onDone: () => void }) {
@@ -146,7 +146,11 @@ function FallbackForm({ row, onDone }: { row: Row; onDone: () => void }) {
 
 /** "N requests need routing" list (A14). Admin only; Pat resolves each to a unit or approves a fallback. */
 export function ExceptionsDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const rows = useExceptionRows(open);
+  // The drawer's own page (kept local: the Work Orders page already uses ?page= for its table).
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  const data = useExceptionRows(open, page, pageSize);
+  const rows = data?.rows;
   const [active, setActive] = useState<{ id: string; mode: "resolve" | "fallback" } | null>(null);
 
   const groups = useMemo(() => {
@@ -166,7 +170,7 @@ export function ExceptionsDrawer({ open, onClose }: { open: boolean; onClose: ()
         <p className="text-sm text-muted-foreground">Nothing needs routing.</p>
       ) : (
         groups.map(([reason, items]) => (
-          <DrawerSection key={reason} title={`${REASON_LABEL[reason] ?? reason} (${items.length})`}>
+          <DrawerSection key={reason} title={`${REASON_LABEL[reason] ?? reason} (${data?.reasonCounts[reason] ?? items.length})`}>
             <div className="flex flex-col gap-2.5">
               {items.map((r) => (
                 <Card key={r._id} className="!px-3.5 !py-3">
@@ -216,6 +220,25 @@ export function ExceptionsDrawer({ open, onClose }: { open: boolean; onClose: ()
           </DrawerSection>
         ))
       )}
+      {data?.capped ? (
+        <p role="status" className="text-xs text-amber-800">
+          Showing the {data.cap} most recent exceptions. Older ones are not listed until these are resolved.
+        </p>
+      ) : null}
+      {data && data.total > 0 ? (
+        <Pagination
+          label="Exceptions pages"
+          className="!pt-0"
+          page={data.page}
+          pageSize={data.pageSize}
+          total={data.total}
+          onPage={setPage}
+          onPageSize={(n) => {
+            setPageSize(n);
+            setPage(1);
+          }}
+        />
+      ) : null}
       <Link href="/maintenance/exceptions" className="text-[13px] font-medium text-primary hover:underline">
         Open the full exceptions page →
       </Link>

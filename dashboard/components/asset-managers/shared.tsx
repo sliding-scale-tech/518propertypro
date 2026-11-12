@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronLeft, ChevronRight, MoreHorizontal } from "lucide-react";
+import { MoreHorizontal } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Pill, cx } from "@/components/ui";
@@ -73,57 +73,6 @@ export function UnderlineTabs<T extends string>({
           </button>
         );
       })}
-    </div>
-  );
-}
-
-/** "Showing 1 to 10 of 42 records" + page buttons. */
-export function Pager({
-  page,
-  pageCount,
-  total,
-  pageSize,
-  noun = "records",
-  onPage,
-}: {
-  page: number;
-  pageCount: number;
-  total: number;
-  pageSize: number;
-  noun?: string;
-  onPage: (p: number) => void;
-}) {
-  const from = total === 0 ? 0 : (page - 1) * pageSize + 1;
-  const to = Math.min(total, page * pageSize);
-  const start = Math.max(1, Math.min(page - 2, pageCount - 4));
-  const pages = Array.from({ length: Math.min(5, pageCount) }, (_, i) => start + i);
-  const btn =
-    "inline-flex h-9 min-w-9 items-center justify-center border border-border bg-card px-2 text-[13px] transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-2 focus-visible:outline-ring";
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-3 px-1 pt-4">
-      <p className="text-[13px] text-muted-foreground">
-        Showing {from} to {to} of {total} {noun}
-      </p>
-      <div className="inline-flex">
-        <button type="button" aria-label="Previous page" disabled={page <= 1} onClick={() => onPage(page - 1)} className={cx(btn, "rounded-l-[10px]")}>
-          <ChevronLeft className="h-4 w-4" />
-        </button>
-        {pages.map((p) => (
-          <button
-            key={p}
-            type="button"
-            aria-label={`Page ${p}`}
-            aria-current={p === page ? "page" : undefined}
-            onClick={() => onPage(p)}
-            className={cx(btn, "-ml-px", p === page && "z-[1] border-primary bg-accent font-semibold text-primary")}
-          >
-            {p}
-          </button>
-        ))}
-        <button type="button" aria-label="Next page" disabled={page >= pageCount} onClick={() => onPage(page + 1)} className={cx(btn, "-ml-px rounded-r-[10px]")}>
-          <ChevronRight className="h-4 w-4" />
-        </button>
-      </div>
     </div>
   );
 }

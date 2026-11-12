@@ -24,7 +24,8 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Btn, Card, ConfirmDialog, Drawer, DrawerSection, Input, Select, Textarea, cx } from "@/components/ui";
 import { toast } from "@/components/toast";
-import { ActionMenu, PersonAvatar, Pager, StatusBadge, useDebounced } from "./shared";
+import { Pagination } from "@/components/ui";
+import { ActionMenu, PersonAvatar, StatusBadge, useDebounced } from "./shared";
 
 const PAGE_SIZE = 10;
 const EMAIL_RE = /^[^\s@<>"',;:()[\]\\]+@[^\s@<>"',;:()[\]\\]+\.[^\s@<>"',;:()[\]\\]{2,}$/;
@@ -338,7 +339,7 @@ export function ManagersTab() {
             </tbody>
           </table>
         </div>
-        <Pager page={list?.page ?? 1} pageCount={list?.pageCount ?? 1} total={list?.total ?? 0} pageSize={PAGE_SIZE} onPage={setPage} />
+        <Pagination label="Asset managers pages" page={list?.page ?? 1} pageSize={PAGE_SIZE} total={list?.total ?? 0} onPage={setPage} />
       </Card>
 
       <ProfileDrawer userId={openUser} row={openRow} onClose={() => setOpenUser(null)} />
