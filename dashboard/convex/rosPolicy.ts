@@ -8,6 +8,7 @@
 
 import {
   MAX_AMOUNT_CENTS,
+  PROPERTY_LEVEL,
   formatBps,
   formatCurrency,
   formatDate,
@@ -140,6 +141,12 @@ export const MSG = {
     `${woList(woNumbers)} (${property}) ${woNumbers.length === 1 ? "was" : "were"} completed before this owner's first statement month (${formatMonth(startMonth)}) and ${woNumbers.length === 1 ? "is" : "are"} left off this statement. Put ${woNumbers.length === 1 ? "it" : "them"} back from “Left off this statement” only if ${woNumbers.length === 1 ? "it wasn't" : "they weren't"} billed in Buildium.`,
   WO_BEFORE_START_MISSING_BILL: (woNumbers: number[], property: string, startMonth: string): string =>
     `${woList(woNumbers)} (${property}) ${woNumbers.length === 1 ? "was" : "were"} completed before this owner's first statement month (${formatMonth(startMonth)}) and ${woNumbers.length === 1 ? "has" : "have"} no bill amount, account or description, so ${woNumbers.length === 1 ? "it isn't" : "they aren't"} on this statement.`,
+  /** Rent payments received before the owner's first statement month, left off by default. `items` sorted. */
+  RENT_PAYMENT_BEFORE_START: (items: { unit: string | null; date: string }[], property: string, startMonth: string): string => {
+    const one = items.length === 1;
+    const list = items.map((i) => `${i.unit ? `Unit ${i.unit}` : PROPERTY_LEVEL}, ${formatDate(i.date)}`).join("; ");
+    return `${one ? "A rent payment" : `${items.length} rent payments`} received before this owner's first statement month (${formatMonth(startMonth)}) ${one ? "is" : "are"} left off this statement: ${list} (${property}). Put ${one ? "it" : "them"} back from “Left off this statement” only if ${one ? "it wasn't" : "they weren't"} billed in Buildium.`;
+  },
   START_MONTH_AFTER: (property: string, startMonth: string, month: string): string =>
     `Statements for ${property} start in ${formatMonth(startMonth)}, after ${formatMonth(month)}. Discard this draft, then check the first statement month.`,
   START_MONTH_DRAFT_OPEN: (property: string): string =>
@@ -438,6 +445,8 @@ export const ENTRY_MSG = {
   amountNotPositive: "The amount must be more than $0.00.",
   amountTooBig: "The amount can't be more than $1,000,000.00.",
   propertyChange: "To move a transaction to another property, delete it and add it again.",
+  /** A row on Rent Income (entered before the Payments page) can only be deleted here. */
+  rentRowLocked: "Rent can't be moved to another account. Delete it and record it on the Payments page.",
   billed: "This transaction is on a final statement and can't be changed. Add a correction in a later month instead.",
   notManual: "Only transactions entered by hand can be changed here.",
   voided: "This transaction was deleted.",
@@ -563,6 +572,14 @@ export function validateEntryFields(input: EntryFieldsRaw): FieldResult<EntryFie
 /** Every failing field (field -> message), for marking all bad fields at once. */
 export function validateEntryFieldsAll(input: EntryFieldsRaw): Record<string, string> {
   return allFailures(entryChecks(input));
+}
+
+/**
+ * ledger.update: null = the row may be edited. A row whose CURRENT account is Rent Income (entered
+ * by hand before the Payments page) can only be deleted, never edited or moved to another account.
+ */
+export function entryEditProblem(currentAccount: { systemKey?: string | null } | null): string | null {
+  return currentAccount?.systemKey === "rent_income" ? ENTRY_MSG.rentRowLocked : null;
 }
 
 // Roster-rent prefill (until Stripe) ---------------------------------------------------------------

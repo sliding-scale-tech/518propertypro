@@ -48,9 +48,10 @@ const CASES = {
     { propertyId: PID, workOrderId: "wo_6", message: "WO-13 (1 Main St) was completed before ..." },
     { kind: "href", href: "/work-orders/wo_6", label: "Open WO-13 →" },
   ],
+  RENT_PAYMENT_BEFORE_START: [{ propertyId: PID }, { kind: "scroll", anchor: "left-off", label: "Show left-off lines →" }],
   RENT_UNPAID: [
     { rentMonth: "2026-10" },
-    { kind: "href", href: `/owner-statements/payments?month=2026-10&owner=${OWNER}&status=unpaid`, label: "Open Payments page →" },
+    { kind: "href", href: `/payments?month=2026-10&owner=${OWNER}&status=unpaid`, label: "Open Payments page →" },
   ],
 };
 
@@ -108,6 +109,7 @@ test("anchors match what the targets use, and the owner id is URL-encoded", () =
   assert.equal(L.ANCHOR.startMonth("p"), "property-p-start");
   assert.equal(L.ANCHOR.deposits("p"), "property-p-deposits");
   assert.equal(L.ANCHOR.property("p"), "property-p");
+  assert.equal(L.ANCHOR.leftOff, "left-off");
   assert.equal(L.warningTarget({ code: "PAYEE_MISSING", message: "m" }, "a/b").href, "/owner-statements/owners/a%2Fb#owner-payee");
 });
 
@@ -124,7 +126,7 @@ test("splitWarnings carries propertyId and workOrderId, so the card can build th
   assert.deepStrictEqual(split.blocking, [{ code: "WO_MISSING_BILL", message: "WO-5 x", propertyId: PID, workOrderId: "wo_9" }]);
   assert.equal(L.warningTarget(split.info[0], OWNER).href, owner(`property-${PID}-deposits`));
   assert.equal(L.warningTarget(split.blocking[0], OWNER).href, "/work-orders/wo_9");
-  assert.equal(L.warningTarget(split.info[1], OWNER).href, `/owner-statements/payments?month=2026-09&owner=${OWNER}&status=unpaid`);
+  assert.equal(L.warningTarget(split.info[1], OWNER).href, `/payments?month=2026-09&owner=${OWNER}&status=unpaid`);
   // RENT_UNPAID without its month: no (broken) link
   assert.equal(L.warningTarget({ code: "RENT_UNPAID", message: "r" }, OWNER), null);
 });

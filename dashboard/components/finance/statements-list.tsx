@@ -8,11 +8,40 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { api } from "@/convex/_generated/api";
 import { formatCurrency } from "@/convex/rosFormat";
-import { Btn, Card, DataTable, Field, PageHeader, Pill, Select, type Column } from "@/components/ui";
+import { TEAM_LABELS, type Team } from "@/convex/rentPaymentsPolicy";
+import {
+  Btn,
+  Card,
+  Chips,
+  DataTable,
+  Field,
+  PageHeader,
+  Pagination,
+  Pill,
+  SearchBox,
+  Select,
+  SortHeader,
+  ariaSortOf,
+  paginate,
+  readSort,
+  toggleSort,
+  useUrlPaging,
+  useUrlSearch,
+  type Column,
+} from "@/components/ui";
 import { FinanceNav, useNow } from "./finance-nav";
 import { LinkBtn, Spinner } from "./form-bits";
 import { GenerateDialog } from "./generate-dialog";
+import {
+  STATEMENT_SORT_DEFAULT,
+  STATEMENT_SORT_KEYS,
+  STATEMENT_STATUS_KEYS,
+  statementsView,
+  type StatementSortKey,
+  type StatementStatusKey,
+} from "./list-finders";
 import { defaultStatementMonth, formatStamp, pickMonth, recentMonths } from "./months";
+import { normalizeSearch } from "./payments-search";
 
 type ListData = FunctionReturnType<typeof api.ownerStatements.list>;
 type OwnerRow = ListData["owners"][number];
@@ -64,7 +93,10 @@ export function StatusPill({ status }: { status: "draft" | "final" | "discarded"
   return <Pill tone="neutral">Not started</Pill>;
 }
 
-/** `/owner-statements`: statements by month (spec 6.2). */
+const TEAMS = Object.keys(TEAM_LABELS) as Team[];
+type StatusFilter = StatementStatusKey | "";
+
+/** `/owner-statements`: statements by month (spec 6.2), with search, filters, sorting and pages. */
 export function StatementsList() {
   const router = useRouter();
   const pathname = usePathname();
@@ -72,20 +104,47 @@ export function StatementsList() {
   const now = useNow();
   const months = recentMonths(now);
   const month = pickMonth(params.get("month"), months) ?? defaultStatementMonth(now);
+  const rawTeam = params.get("team") ?? "";
+  const team = (TEAMS as string[]).includes(rawTeam) ? rawTeam : "";
+  const rawStatus = params.get("status") ?? "";
+  const status: StatusFilter = (STATEMENT_STATUS_KEYS as readonly string[]).includes(rawStatus) ? (rawStatus as StatementStatusKey) : "";
+  const sort = readSort(params.get("sort"), params.get("dir"), STATEMENT_SORT_KEYS, STATEMENT_SORT_DEFAULT);
 
   const data = useQuery(api.ownerStatements.list, { month });
   const [generate, setGenerate] = useState<{ ownerId: string } | null>(null);
 
-  const setMonth = (m: string) => {
+  /** Set URL params ("" removes one; the default sort is left out); any change goes back to page 1. */
+  const setParams = (updates: Record<string, string>) => {
     const next = new URLSearchParams(params.toString());
-    next.set("month", m);
-    router.replace(`${pathname}?${next.toString()}`);
+    for (const [k, v] of Object.entries(updates)) {
+      if (v) next.set(k, v);
+      else next.delete(k);
+    }
+    next.delete("page");
+    const qs = next.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname);
   };
+  const onSort = (key: StatementSortKey) => {
+    const next = toggleSort(sort, key);
+    const isDefault = next.key === STATEMENT_SORT_DEFAULT.key && next.dir === STATEMENT_SORT_DEFAULT.dir;
+    setParams({ sort: isDefault ? "" : next.key, dir: isDefault ? "" : next.dir });
+  };
+
+  const search = useUrlSearch();
+  const q = normalizeSearch(search.q);
+  const view = statementsView(data ? rowsOf(data) : [], { q, team, status, sort });
+  const paging = useUrlPaging();
+  const paged = paginate(view.visible, paging.page, paging.pageSize);
+
+  const sortable = (key: StatementSortKey, label: string, align: "left" | "right" = "left") => ({
+    header: <SortHeader label={label} sortKey={key} sort={sort} onSort={onSort} align={align} />,
+    sort: ariaSortOf(sort, key),
+  });
 
   const columns: Column<Row>[] = [
     {
       key: "owner",
-      header: "Owner",
+      ...sortable("owner", "Owner"),
       render: (r) => (
         <span className="font-medium">
           {r.owner.legalName}
@@ -107,12 +166,12 @@ export function StatementsList() {
     },
     {
       key: "status",
-      header: "Status",
+      ...sortable("status", "Status"),
       render: (r) => <StatusPill status={r.statement ? r.statement.status : null} />,
     },
     {
       key: "ending",
-      header: "Ending cash",
+      ...sortable("ending", "Ending cash", "right"),
       align: "right",
       className: "tabular-nums",
       render: (r) =>
@@ -122,7 +181,7 @@ export function StatementsList() {
     },
     {
       key: "available",
-      header: "Available for payment",
+      ...sortable("available", "Available for payment", "right"),
       align: "right",
       className: "tabular-nums",
       render: (r) =>
@@ -132,7 +191,7 @@ export function StatementsList() {
     },
     {
       key: "updated",
-      header: "Updated",
+      ...sortable("updated", "Updated"),
       render: (r) => (r.statement ? <span className="text-muted-foreground">{formatStamp(r.statement.updatedAt)}</span> : ""),
     },
     {
@@ -156,6 +215,8 @@ export function StatementsList() {
     },
   ];
 
+  const filtered = Boolean(q || team || status);
+
   return (
     <div className="pb-10">
       <PageHeader
@@ -169,12 +230,32 @@ export function StatementsList() {
       />
       <FinanceNav active="statements" />
       <Card>
-        <div className="mb-4 flex flex-wrap items-end gap-3">
-          <Field label="Month" htmlFor="ros-month" className="w-[220px]">
-            <Select id="ros-month" value={month} onChange={(e) => e.target.value && setMonth(e.target.value)}>
+        <div className="mb-3">
+          <SearchBox
+            id="ros-search"
+            label="Search statements"
+            value={search.input}
+            onChange={search.setInput}
+            onClear={search.clear}
+            placeholder="Search owner, owner email, property or address"
+          />
+        </div>
+        <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <Field label="Month" htmlFor="ros-month">
+            <Select id="ros-month" value={month} onChange={(e) => e.target.value && setParams({ month: e.target.value })}>
               {months.map((m) => (
                 <option key={m.value} value={m.value}>
                   {m.label}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Team" htmlFor="ros-team">
+            <Select id="ros-team" value={team} onChange={(e) => setParams({ team: e.target.value || "" })}>
+              <option value="">All teams</option>
+              {TEAMS.map((t) => (
+                <option key={t} value={t}>
+                  {TEAM_LABELS[t]}
                 </option>
               ))}
             </Select>
@@ -183,20 +264,59 @@ export function StatementsList() {
         {data === undefined ? (
           <Spinner label="Loading statements…" />
         ) : (
-          <DataTable
-            caption={`Owner statements for ${month}`}
-            columns={columns}
-            rows={rowsOf(data)}
-            rowKey={(r) => r.key}
-            empty={
-              <span>
-                No owners yet. Add owners or import them first.{" "}
-                <Link href="/owner-statements/owners" className="font-medium text-primary hover:underline">
-                  Go to Owners
-                </Link>
-              </span>
-            }
-          />
+          <>
+            <Chips<StatusFilter>
+              label="Status"
+              value={status}
+              onChange={(v) => setParams({ status: v })}
+              options={[
+                { value: "", label: `All (${view.counts.all})` },
+                { value: "not_started", label: `Not started (${view.counts.not_started})` },
+                { value: "draft", label: `Draft (${view.counts.draft})` },
+                { value: "final", label: `Final (${view.counts.final})` },
+              ]}
+            />
+            <div className="mt-3">
+              <DataTable
+                caption={`Owner statements for ${month}`}
+                columns={columns}
+                rows={paged.rows}
+                rowKey={(r) => r.key}
+                // A row with a statement opens it (its Open / Generate buttons keep their own action).
+                rowClickable={(r) => r.statement !== null}
+                onRowClick={(r) => {
+                  if (r.statement) router.push(`/owner-statements/${r.statement.statementId}`);
+                }}
+                empty={
+                  q ? (
+                    <span>
+                      No statements match &ldquo;{search.q.trim()}&rdquo;.{" "}
+                      <button type="button" onClick={search.clear} className="font-medium text-primary hover:underline">
+                        Clear search
+                      </button>
+                    </span>
+                  ) : filtered ? (
+                    "No statements match these filters."
+                  ) : (
+                    <span>
+                      No owners yet. Add owners or import them first.{" "}
+                      <Link href="/owner-statements/owners" className="font-medium text-primary hover:underline">
+                        Go to Owners
+                      </Link>
+                    </span>
+                  )
+                }
+              />
+              <Pagination
+                label="Owner statements pages"
+                page={paged.page}
+                pageSize={paged.pageSize}
+                total={paged.total}
+                onPage={paging.setPage}
+                onPageSize={paging.setPageSize}
+              />
+            </div>
+          </>
         )}
       </Card>
       {generate ? (

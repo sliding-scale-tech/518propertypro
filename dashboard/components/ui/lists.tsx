@@ -64,25 +64,45 @@ export type Column<Row> = {
   render: (row: Row) => ReactNode;
   align?: "left" | "right";
   className?: string;
+  /** Sortable column: aria-sort on the header cell (the header renders a SortHeader). */
+  sort?: "ascending" | "descending" | "none";
 };
+
+/** Clicks and keys on a control inside a row (a button, link, checkbox, its label…) are the control's, not the row's. */
+const ROW_CONTROL = "button, a, input, select, textarea, label, [role='button'], [role='combobox'], [role='checkbox'], [data-no-row-click]";
+
+function fromControl(target: EventTarget, row: EventTarget): boolean {
+  if (target === row || !(target instanceof Element)) return false;
+  const hit = target.closest(ROW_CONTROL);
+  return hit !== null && hit !== row;
+}
 
 export function DataTable<Row>({
   columns,
   rows,
   rowKey,
   onRowClick,
+  rowClickable,
+  rowClassName,
   empty = "Nothing here yet.",
   caption,
 }: {
   columns: Column<Row>[];
   rows: Row[];
   rowKey: (row: Row) => string;
+  /** Click (or Enter / Space on the focused row). Clicks on a button, link or checkbox in the row don't count. */
   onRowClick?: (row: Row) => void;
+  /** Which rows react to onRowClick (default: every row). The others get no pointer cursor or tab stop. */
+  rowClickable?: (row: Row) => boolean;
+  /** Extra classes for a row (for example a selected row's background). */
+  rowClassName?: (row: Row) => string | false | null | undefined;
   empty?: ReactNode;
   /** Screen-reader table name. */
   caption?: string;
 }) {
-  const onKey = (e: KeyboardEvent, row: Row) => {
+  const onKey = (e: KeyboardEvent<HTMLTableRowElement>, row: Row) => {
+    // Only when the row itself has focus: Enter / Space on a control inside it belongs to the control.
+    if (e.target !== e.currentTarget) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       onRowClick?.(row);
@@ -98,6 +118,7 @@ export function DataTable<Row>({
               <th
                 key={c.key}
                 scope="col"
+                aria-sort={c.sort}
                 className={cx(
                   "bg-muted px-3.5 py-2.5 text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground",
                   c.align === "right" ? "text-right" : "text-left",
@@ -116,28 +137,41 @@ export function DataTable<Row>({
               </td>
             </tr>
           ) : (
-            rows.map((row) => (
-              <tr
-                key={rowKey(row)}
-                onClick={onRowClick ? () => onRowClick(row) : undefined}
-                onKeyDown={onRowClick ? (e) => onKey(e, row) : undefined}
-                tabIndex={onRowClick ? 0 : undefined}
-                className={cx(onRowClick && "cursor-pointer hover:bg-muted focus-visible:bg-muted focus-visible:outline-none")}
-              >
-                {columns.map((c) => (
-                  <td
-                    key={c.key}
-                    className={cx(
-                      "border-t border-border px-3.5 py-[11px] align-middle",
-                      c.align === "right" && "text-right",
-                      c.className,
-                    )}
-                  >
-                    {c.render(row)}
-                  </td>
-                ))}
-              </tr>
-            ))
+            rows.map((row) => {
+              const clickable = onRowClick !== undefined && (rowClickable ? rowClickable(row) : true);
+              return (
+                <tr
+                  key={rowKey(row)}
+                  onClick={
+                    clickable
+                      ? (e) => {
+                          if (!fromControl(e.target, e.currentTarget)) onRowClick?.(row);
+                        }
+                      : undefined
+                  }
+                  onKeyDown={clickable ? (e) => onKey(e, row) : undefined}
+                  tabIndex={clickable ? 0 : undefined}
+                  className={cx(
+                    clickable &&
+                      "cursor-pointer hover:bg-muted focus-visible:bg-muted focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring",
+                    rowClassName?.(row),
+                  )}
+                >
+                  {columns.map((c) => (
+                    <td
+                      key={c.key}
+                      className={cx(
+                        "border-t border-border px-3.5 py-[11px] align-middle",
+                        c.align === "right" && "text-right",
+                        c.className,
+                      )}
+                    >
+                      {c.render(row)}
+                    </td>
+                  ))}
+                </tr>
+              );
+            })
           )}
         </tbody>
       </table>

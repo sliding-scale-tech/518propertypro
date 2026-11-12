@@ -231,6 +231,12 @@ function fakeDb(tables) {
           rows = rows.filter((r) => conds.every((c) => c(r)));
           return api;
         },
+        // The indexes these tests use end in month (ownerStatementProperties) or date (ledgerEntries).
+        order: (dir) => {
+          rows.sort((a, b) => String(a.month ?? a.date ?? "").localeCompare(String(b.month ?? b.date ?? "")));
+          if (dir === "desc") rows.reverse();
+          return api;
+        },
         collect: async () => rows,
         first: async () => rows[0] ?? null,
         take: async (k) => rows.slice(0, k),
@@ -413,8 +419,14 @@ test("uniqueness: at most one non-voided payment per unit per rent month", async
   await mark(s);
   await refused(mark(s, { receivedDate: "2026-10-05", method: "cash" }), "unitId", "Unit 1st Floor at 108 Jackson Avenue already has rent marked received for October 2026.");
   assert.equal(payments(s.t).length, 1, "nothing written");
-  // another rent month of the same unit is fine (a payment received in October for September too)
-  await mark(s, { month: "2026-09", receivedDate: "2026-10-02" });
+  // another rent month of the same unit is fine, but not received in a month that already has rent
+  // dated in it (both would land on the same statement: MEDIUM-1 double-count guard)
+  await refused(
+    mark(s, { month: "2026-09", receivedDate: "2026-10-02" }),
+    "unitId",
+    "Unit 1st Floor at 108 Jackson Avenue already has rent dated in October 2026 (marked received for October 2026). Check it before adding another payment.",
+  );
+  await mark(s, { month: "2026-09", receivedDate: "2026-09-28" });
   assert.equal(payments(s.t).length, 2);
   // undo, then it can be marked again
   const oct = payments(s.t).find((e) => e.rentForMonth === "2026-10");
@@ -645,6 +657,132 @@ test("list: one row per unit of the org, statuses, greyed-out reasons, summary, 
   assert.deepStrictEqual([locked.locked, locked.lockedReason, locked.statementId], [true, "On the October 2026 final statement.", "s_oct"]);
 });
 
+test("MEDIUM-1: never a second Rent Income row dated in the received month (ledger row or another rent month's payment)", async () => {
+  // u2 has a hand-entered Rent Income row dated 9/22 (legacy_u2, no rent month): it is matched by the
+  // month it is DATED, so October rent received in September would be counted twice on September's statement.
+  const s = setup();
+  const sameMonth = (o) => mark(s, { unitId: "u2", ...o });
+  await refused(
+    sameMonth({ month: "2026-10", receivedDate: "2026-09-25" }),
+    "unitId",
+    "Unit 2nd Floor at 108 Jackson Avenue already has rent dated in September 2026 (entered in the ledger). Check it before adding another payment.",
+  );
+  assert.equal(payments(s.t).length, 0);
+  // received in October: no rent dated in October yet -> fine
+  await sameMonth({ month: "2026-10", receivedDate: "2026-10-01" });
+  // a voided row doesn't count
+  const s2 = setup({ entries: [{ ...tables().ledgerEntries[0], _id: "void_u10", unitId: "u10", date: "2026-10-03", voided: true }] });
+  await mark(s2, { unitId: "u10", receivedDate: "2026-10-04" });
+  assert.equal(payments(s2.t).length, 1);
+  // another account (not Rent Income) doesn't count
+  const s3 = setup({ entries: [{ ...tables().ledgerEntries[0], _id: "laundry_u10", unitId: "u10", date: "2026-10-03", accountId: "a_laundry" }] });
+  await mark(s3, { unitId: "u10", receivedDate: "2026-10-04" });
+  // bulk: all or nothing, with the same message for the failing unit
+  const s4 = setup();
+  await mark(s4, { unitId: "u10", month: "2026-10", receivedDate: "2026-10-02" });
+  await assert.rejects(
+    L.markMany(s4.ctx, ORG, { unitIds: ["u1", "u10"], month: "2026-09", receivedDate: "2026-10-05", method: "cash" }, TODAY, s4.deps),
+    (e) => {
+      assert.deepStrictEqual(e.data.problems, [
+        {
+          unitId: "u10",
+          message: "Unit 10 at 108 Jackson Avenue already has rent dated in October 2026 (marked received for October 2026). Check it before adding another payment.",
+        },
+      ]);
+      return true;
+    },
+  );
+  assert.equal(payments(s4.t).length, 1, "nothing written");
+  // a date edit into a month that already has rent dated in it is refused too (the row itself never counts)
+  const octRow = payments(s4.t)[0];
+  await mark(s4, { unitId: "u10", month: "2026-09", receivedDate: "2026-09-29" });
+  const sepRow = payments(s4.t).find((e) => e.rentForMonth === "2026-09");
+  await refused(
+    L.updateOne(s4.ctx, ORG, { entryId: sepRow._id, receivedDate: "2026-10-06" }, TODAY, s4.deps),
+    "receivedDate",
+    "Unit 10 at 108 Jackson Avenue already has rent dated in October 2026 (marked received for October 2026). Check it before adding another payment.",
+  );
+  await L.updateOne(s4.ctx, ORG, { entryId: octRow._id, receivedDate: "2026-10-09" }, TODAY, s4.deps);
+  assert.equal(octRow.date, "2026-10-09", "moving within the same month is fine");
+});
+
+test("LOW-1: rent months before the owner's first statement month, or more than 24 months ago, can't be marked", async () => {
+  const s = setup();
+  // 108 Jackson starts in September 2026
+  await refused(mark(s, { month: "2026-08", receivedDate: "2026-09-02" }), "month", "Statements for 108 Jackson Avenue start in September 2026.");
+  assert.equal(R.RENT_PAY_MSG.monthBeforeStart(J, "2026-09"), "Statements for 108 Jackson Avenue start in September 2026.");
+  // 2 Jackson (no start month): any month in range
+  await mark(s, { unitId: "u12", month: "2026-08", receivedDate: "2026-08-15" });
+  // 24 months back is the oldest (November 2024 when today is 11/12/2026)
+  assert.equal(R.earliestRentMonth(TODAY), "2024-11");
+  assert.equal(R.markRentMonthProblem("2024-11", TODAY), null);
+  assert.equal(R.markRentMonthProblem("2024-10", TODAY), "You can't mark rent for October 2024 — it's more than 24 months ago.");
+  await refused(mark(s, { unitId: "u12", month: "2024-10", receivedDate: "2024-10-05" }), "month", "You can't mark rent for October 2024 — it's more than 24 months ago.");
+  assert.deepStrictEqual(R.validatePaymentFieldsAll({ month: "2020-01", receivedDate: "", method: "", today: TODAY }), {
+    month: "You can't mark rent for January 2020 — it's more than 24 months ago.",
+    method: "Select how the rent was paid.",
+  });
+  // ...but an old month can still be VIEWED (links from old statements open it), read-only
+  const old = await L.listPayments(s.ctx, ORG, { month: "2024-01" }, TODAY);
+  assert.equal(old.monthClosed, "You can't mark rent for January 2024 — it's more than 24 months ago.");
+  assert.equal(old.rows.some((r) => r.canMark), false);
+  assert.equal((await L.listPayments(s.ctx, ORG, { month: "2026-10" }, TODAY)).monthClosed, null);
+  // the list greys out months before the first statement month (not "unpaid")
+  const aug = await L.listPayments(s.ctx, ORG, { month: "2026-08", propertyId: "p1" }, TODAY);
+  const u1 = aug.rows.find((r) => r.unitId === "u1");
+  assert.deepStrictEqual([u1.status, u1.reason, u1.canMark], ["not_markable", "Statements start in September 2026", false]);
+  assert.equal(aug.summary.unpaid, 0);
+});
+
+test("LOW-4: a date edit after the property changed owners says so (not 'has no owner yet')", async () => {
+  const s = setup();
+  await mark(s);
+  const id = payments(s.t)[0]._id;
+  s.t.ownerProperties.find((l) => l._id === "l1").ownerId = "o3";
+  await refused(
+    L.updateOne(s.ctx, ORG, { entryId: id, receivedDate: "2026-10-05" }, TODAY, s.deps),
+    "receivedDate",
+    "108 Jackson Avenue now belongs to a different owner, so this payment's date can't be changed. Undo it and mark it again.",
+  );
+  // no owner at all keeps the no-owner message
+  s.t.ownerProperties = s.t.ownerProperties.filter((l) => l._id !== "l1");
+  await refused(
+    L.updateOne(s.ctx, ORG, { entryId: id, receivedDate: "2026-10-05" }, TODAY, s.deps),
+    "receivedDate",
+    "108 Jackson Avenue has no owner yet. Link it on the Owners page first.",
+  );
+});
+
+test("LOW-5: lockedThrough reads only the newest final (index order), whatever order the rows were written in", async () => {
+  const osp = [
+    { _id: "f_oct", orgId: "org1", statementId: "s_oct", ownerId: "o1", propertyId: "p1", month: "2026-10", status: "final" },
+    { _id: "f_sep", orgId: "org1", statementId: "s_sep", ownerId: "o1", propertyId: "p1", month: "2026-09", status: "final" },
+  ];
+  const s = setup({ osp });
+  await refused(
+    mark(s, { month: "2026-11", receivedDate: "2026-10-30" }),
+    "receivedDate",
+    "October 2026 is final for 108 Jackson Avenue. Use a received date in November 2026 or later.",
+  );
+  const lib = read("rentPaymentsLib.ts");
+  assert.match(lib, /\.eq\("status", "final"\)\)\s*\.order\("desc"\)\s*\.first\(\)/);
+});
+
+test("LOW-3: a team / owner / property filter reads only those properties' units (the 3,000 cap applies after it)", async () => {
+  const s = setup();
+  const gold = await L.listPayments(s.ctx, ORG, { month: "2026-10", category: "gold" }, TODAY);
+  assert.deepStrictEqual(gold.rows.map((r) => r.unitId).sort(), ["u1", "u10", "u12", "u2", "u3", "u4", "u5", "u6", "u8", "u9"].sort());
+  assert.equal(gold.truncated, false);
+  assert.equal(gold.maxUnits, 3000);
+  // the filter choices list every property / owner, not only the filtered rows
+  const one = await L.listPayments(s.ctx, ORG, { month: "2026-10", propertyId: "p2" }, TODAY);
+  assert.deepStrictEqual(one.rows.map((r) => r.unitId), ["u7"]);
+  assert.deepStrictEqual(one.filters.properties.map((p) => p.propertyId), ["p4", "p1", "p2", "p3"]);
+  assert.deepStrictEqual(one.filters.owners.map((o) => o.ownerId), ["o2", "o1"]);
+  const lib = read("rentPaymentsLib.ts");
+  assert.match(lib, /withIndex\("by_property", \(q\) => q\.eq\("propertyId", p\._id\)\)/);
+});
+
 // =================================================================================================
 // Part 3: the statement (rosBuild): no prefill; rent payments flow like any ledger row
 // =================================================================================================
@@ -830,7 +968,7 @@ test("cash basis: September rent received 10/2 is on the OCTOBER statement, not 
   assert.equal(LL.canLeaveOffLine(line), false);
   assert.equal(LL.canDeleteLine(line), false);
   assert.equal(LL.canEditEntryLine(line), false);
-  assert.equal(LL.paymentsPageHref(line), "/owner-statements/payments?month=2026-09&property=p1");
+  assert.equal(LL.paymentsPageHref(line), "/payments?month=2026-09&property=p1");
   // a hand-entered Rent Income line: Delete and Leave off, but no Edit
   const legacyLine = { kind: "entry", editable: true, entryId: "r1", onRentAccount: true, date: "2026-09-01", storedDate: "2026-09-01", carriedForward: false };
   assert.deepStrictEqual([LL.canEditEntryLine(legacyLine), LL.canDeleteLine(legacyLine), LL.canLeaveOffLine(legacyLine)], [false, true, true]);
@@ -947,4 +1085,73 @@ test("server: the manual ledger refuses Rent Income; payments are changed only t
   const lib = read("rentPaymentsLib.ts");
   assert.match(lib, /amountCents: plan\.amountCents/);
   assert.match(lib, /withIndex\("by_unit_and_rent_month", \(q\) => q\.eq\("unitId", unit\._id\)\.eq\("rentForMonth", month\)\)/);
+});
+
+test("which statement a payment lands on: the month it was RECEIVED (cash basis)", () => {
+  assert.equal(R.statementMonthFor("2026-11-12"), "2026-11");
+  assert.equal(R.landsOnText("2026-11-12"), "Goes on the November 2026 statement (the month it was received).");
+  assert.equal(R.landsOnText(""), null);
+  assert.equal(R.landsOnText("2026-02-30"), null);
+  assert.equal(R.landsOnShort("2026-10-02"), "→ Oct 2026 statement");
+  // the same helper the server's cash basis uses: a payment dated 11/12 is on November's draft, not October's
+  const nov = pay("q_nov", "2026-11-12", "u4", "2026-11", "Ann Lee & Bob Ray", 95087);
+  const oct = B.assembleStatement(rentData({ month: "2026-10", property: { entries: [nov] } }));
+  assert.equal(oct.lines.some((l) => l.key === "entry:q_nov"), false);
+  const novSt = B.assembleStatement(rentData({ month: "2026-11", property: { entries: [nov] } }));
+  assert.equal(novSt.lines.some((l) => l.key === "entry:q_nov"), true);
+});
+
+test("MEDIUM-2: a rent payment left off by default (before the first statement month) raises RENT_PAYMENT_BEFORE_START (info)", async () => {
+  const early = pay("q0", "2026-08-28", "u5", "2026-09", "Cara Diaz", 120000);
+  const early2 = pay("q00", "2026-08-30", "u4", "2026-09", "Ann Lee & Bob Ray", 95087);
+  const sep = B.assembleStatement(rentData({ property: { entries: [early2, early] } }));
+  assert.deepStrictEqual(warn(sep, "RENT_PAYMENT_BEFORE_START"), [
+    {
+      code: "RENT_PAYMENT_BEFORE_START",
+      propertyId: "p1",
+      message:
+        "2 rent payments received before this owner's first statement month (September 2026) are left off this statement: Unit 4B, 8/28/2026; Unit 4A, 8/30/2026 (108 Jackson Avenue). Put them back from “Left off this statement” only if they weren't billed in Buildium.",
+      blocking: false,
+    },
+  ]);
+  // put one back: the warning lists only the one still off
+  const one = B.assembleStatement(rentData({ statement: { includedKeys: ["entry:q00"] }, property: { entries: [early2, early] } }));
+  assert.equal(
+    warn(one, "RENT_PAYMENT_BEFORE_START")[0].message,
+    "A rent payment received before this owner's first statement month (September 2026) is left off this statement: Unit 4B, 8/28/2026 (108 Jackson Avenue). Put it back from “Left off this statement” only if it wasn't billed in Buildium.",
+  );
+  // both put back: no warning
+  const none = B.assembleStatement(rentData({ statement: { includedKeys: ["entry:q00", "entry:q0"] }, property: { entries: [early2, early] } }));
+  assert.deepStrictEqual(warn(none, "RENT_PAYMENT_BEFORE_START"), []);
+  // no start month set: the statement month is the floor
+  const noStart = B.assembleStatement(
+    rentData({ property: { links: [{ _id: "l1", ownerId: "o1", openingBalanceCents: 0 }], entries: [early] } }),
+  );
+  assert.match(warn(noStart, "RENT_PAYMENT_BEFORE_START")[0].message, /first statement month \(September 2026\)/);
+  // a hand-entered row before the start month keeps its own handling (no rent-payment warning)
+  const manual = B.assembleStatement(rentData({ property: { entries: [entry("m0", "2026-08-28", "u5", "a_rent", "Cara Diaz", "Payment", 120000)] } }));
+  assert.deepStrictEqual(warn(manual, "RENT_PAYMENT_BEFORE_START"), []);
+  // it links to the statement's "Left off this statement" card
+  const WL = await import("../../components/finance/warning-links.ts");
+  assert.deepStrictEqual(WL.warningTarget(B.splitWarnings(warn(sep, "RENT_PAYMENT_BEFORE_START")).info[0], "o1"), {
+    kind: "scroll",
+    anchor: "left-off",
+    label: "Show left-off lines →",
+  });
+});
+
+test("LOW-2: the ledger refuses ANY edit of a row whose current account is Rent Income (Delete only)", () => {
+  const msg = "Rent can't be moved to another account. Delete it and record it on the Payments page.";
+  assert.equal(P.entryEditProblem({ systemKey: "rent_income" }), msg);
+  assert.equal(P.ENTRY_MSG.rentRowLocked, msg);
+  for (const ok of [{ systemKey: "repairs" }, { systemKey: null }, {}, null]) assert.equal(P.entryEditProblem(ok), null);
+  const ledger = read("ledger.ts");
+  const update = ledger.slice(ledger.indexOf("export const update = mutation("), ledger.indexOf("export const voidEntry"));
+  // checked on the row's CURRENT account, before any field (even a memo-only change) is applied
+  assert.match(
+    update,
+    /loadForChange\(entry\);\s*\/\/[^\n]*\n\s*const rentProblem = entryEditProblem\(await ctx\.db\.get\(entry\.accountId\)\);\s*if \(rentProblem\) throw fieldError\("accountId", rentProblem\);/,
+  );
+  // Delete (voidEntry) stays allowed
+  assert.doesNotMatch(ledger.slice(ledger.indexOf("export const voidEntry")), /entryEditProblem/);
 });

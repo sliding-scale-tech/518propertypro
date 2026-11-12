@@ -15,6 +15,7 @@ import {
   MSG,
   cmpStr,
   entryChangeDateProblem,
+  entryEditProblem,
   ledgerRowInMonth,
   lockedThroughMonth,
   validateEntryFields,
@@ -275,9 +276,12 @@ export const list = query({
     month: v.optional(v.union(v.string(), v.null())),
     includeVoided: v.optional(v.boolean()),
     cursor: v.optional(v.union(v.string(), v.null())),
+    /** Rows per page: 25, 50 (default) or 100; anything else means 50. */
+    pageSize: v.optional(v.union(v.number(), v.null())),
   },
   handler: async (ctx, args) => {
     const org = await requireFinance(ctx);
+    const numItems = args.pageSize === 25 || args.pageSize === 100 ? args.pageSize : 50;
     const hasOwner = typeof args.ownerId === "string" && args.ownerId.trim() !== "";
     const hasProperty = typeof args.propertyId === "string" && args.propertyId.trim() !== "";
     const hasMonth = typeof args.month === "string" && args.month.trim() !== "";
@@ -317,7 +321,7 @@ export const list = query({
         }
         return q.and(...conds);
       })
-      .paginate({ numItems: 50, cursor: args.cursor ?? null });
+      .paginate({ numItems, cursor: args.cursor ?? null });
 
     // Rows dated before the month but posted in it (carried forward onto this month's statement).
     // They post on the month's first day, so they come last: added to the final page.
@@ -479,6 +483,9 @@ export const update = mutation({
     const entry = await inOrg(ctx, org, "ledgerEntries", args.entryId);
     if (!entry) throw fieldError("entryId", ENTRY_NOT_FOUND);
     loadForChange(entry);
+    // Rent Income rows entered by hand: Delete only (rent is recorded on the Payments page).
+    const rentProblem = entryEditProblem(await ctx.db.get(entry.accountId));
+    if (rentProblem) throw fieldError("accountId", rentProblem);
     if (typeof args.propertyId === "string" && args.propertyId.trim() !== "" && args.propertyId.trim() !== entry.propertyId) {
       throw fieldError("propertyId", ENTRY_MSG.propertyChange);
     }

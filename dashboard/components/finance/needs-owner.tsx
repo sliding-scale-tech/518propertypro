@@ -7,7 +7,7 @@ import Link from "next/link";
 import { useId, useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import { validateOwnerFieldsAll } from "@/convex/rosPolicy";
-import { Btn, Card, CardHead, Field, Input, Modal, Pill, Select } from "@/components/ui";
+import { Btn, Card, CardHead, Field, Input, Modal, PAGE_SIZES, Pagination, Pill, Select, paginate } from "@/components/ui";
 import { toast } from "@/components/ui/toast";
 import { Spinner, useFieldErrors } from "./form-bits";
 
@@ -74,6 +74,13 @@ export function NeedsOwnerCard() {
   }
 
   const count = data ? data.properties.length + data.ownerPairs.length : 0;
+  // Long lists are paged (25 a page by default); short ones show whole.
+  const [propPage, setPropPage] = useState(1);
+  const [propSize, setPropSize] = useState(PAGE_SIZES[0]);
+  const [pairPage, setPairPage] = useState(1);
+  const [pairSize, setPairSize] = useState(PAGE_SIZES[0]);
+  const propPaged = paginate(data?.properties ?? [], propPage, propSize);
+  const pairPaged = paginate(data?.ownerPairs ?? [], pairPage, pairSize);
 
   return (
     <Card className="mb-5">
@@ -105,7 +112,7 @@ export function NeedsOwnerCard() {
             <section aria-label="Properties">
               <h4 className="mb-2 text-[13px] font-semibold">Properties ({data.properties.length})</h4>
               <ul className="flex flex-col divide-y divide-border rounded-xl border border-border">
-                {data.properties.map((row) => (
+                {propPaged.rows.map((row) => (
                   <PropertyItem
                     key={row.propertyId}
                     row={row}
@@ -128,13 +135,26 @@ export function NeedsOwnerCard() {
                   />
                 ))}
               </ul>
+              {propPaged.total > PAGE_SIZES[0] ? (
+                <Pagination
+                  label="Properties needing an owner, pages"
+                  page={propPaged.page}
+                  pageSize={propSize}
+                  total={propPaged.total}
+                  onPage={setPropPage}
+                  onPageSize={(n) => {
+                    setPropSize(n);
+                    setPropPage(1);
+                  }}
+                />
+              ) : null}
             </section>
           ) : null}
           {data.ownerPairs.length > 0 ? (
             <section aria-label="Owners that may be the same">
               <h4 className="mb-2 text-[13px] font-semibold">Owners that may be the same ({data.ownerPairs.length})</h4>
               <ul className="flex flex-col divide-y divide-border rounded-xl border border-border">
-                {data.ownerPairs.map((p) => (
+                {pairPaged.rows.map((p) => (
                   <PairItem
                     key={p.key}
                     pair={p}
@@ -150,6 +170,19 @@ export function NeedsOwnerCard() {
                   />
                 ))}
               </ul>
+              {pairPaged.total > PAGE_SIZES[0] ? (
+                <Pagination
+                  label="Owners that may be the same, pages"
+                  page={pairPaged.page}
+                  pageSize={pairSize}
+                  total={pairPaged.total}
+                  onPage={setPairPage}
+                  onPageSize={(n) => {
+                    setPairSize(n);
+                    setPairPage(1);
+                  }}
+                />
+              ) : null}
             </section>
           ) : null}
         </div>

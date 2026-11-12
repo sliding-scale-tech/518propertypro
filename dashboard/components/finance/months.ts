@@ -1,4 +1,4 @@
-import { businessToday, formatMonth, isMonth, monthOf, prevMonth } from "@/convex/rosFormat";
+import { businessToday, formatMonth, isMonth, monthOf, nextMonth, prevMonth } from "@/convex/rosFormat";
 
 /** The current business month (YYYY-MM, America/New_York). */
 export function currentMonth(nowMs: number): string {
@@ -37,4 +37,18 @@ export function formatStamp(ms: number): string {
     minute: "2-digit",
     timeZone: "America/New_York",
   });
+}
+
+/**
+ * The Payments page's rent months, newest first: next month (rent paid early), this month and the
+ * `back` months before it (the oldest month rent can still be marked for). A `?month=` from a link
+ * that is older (a real month, not after next month) is added at the end, so the link still opens it.
+ */
+export function rentMonthOptions(nowMs: number, urlMonth: string | null, back = 24): { value: string; label: string }[] {
+  const latest = nextMonth(currentMonth(nowMs));
+  const out = [{ value: latest, label: formatMonth(latest) }, ...recentMonths(nowMs, back + 1)];
+  if (urlMonth && isMonth(urlMonth) && urlMonth <= latest && !out.some((o) => o.value === urlMonth)) {
+    out.push({ value: urlMonth, label: formatMonth(urlMonth) });
+  }
+  return out;
 }

@@ -7,12 +7,31 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
-import { MAX_BULK_MARK, TEAM_LABELS, type Team } from "@/convex/rentPaymentsPolicy";
-import { formatCurrency, formatDate, formatMonth, nextMonth } from "@/convex/rosFormat";
-import { Btn, Card, Chips, DataTable, Field, Kpi, KpiRow, PageHeader, Pill, Select, cx, type Column } from "@/components/ui";
-import { FinanceNav, useNow } from "./finance-nav";
+import { MAX_BULK_MARK, TEAM_LABELS, landsOnShort, type Team } from "@/convex/rentPaymentsPolicy";
+import { formatCurrency, formatDate, isMonth } from "@/convex/rosFormat";
+import {
+  Btn,
+  Card,
+  Chips,
+  DataTable,
+  Field,
+  Kpi,
+  KpiRow,
+  PageHeader,
+  Pagination,
+  Pill,
+  SearchBox,
+  Select,
+  cx,
+  paginate,
+  readPage,
+  readPageSize,
+  useUrlSearch,
+  type Column,
+} from "@/components/ui";
+import { useNow } from "./finance-nav";
 import { Checkbox, LinkBtn, Spinner } from "./form-bits";
-import { currentMonth, pickMonth, recentMonths } from "./months";
+import { currentMonth, rentMonthOptions } from "./months";
 import {
   BulkMarkDialog,
   EditPaymentDialog,
@@ -21,10 +40,11 @@ import {
   type PaymentInit,
   type PaymentUnit,
 } from "./payment-dialogs";
+import { applyPaymentsView, normalizeSearch, selectableOnPage, type PaymentStatusFilter } from "./payments-search";
 
 type ListData = FunctionReturnType<typeof api.rentPayments.list>;
 type Row = ListData["rows"][number];
-type StatusFilter = "" | "unpaid" | "paid" | "not_markable";
+type StatusFilter = PaymentStatusFilter;
 
 type Dialog =
   | { kind: "mark"; unit: PaymentUnit }
@@ -34,6 +54,8 @@ type Dialog =
 
 const TEAMS = Object.keys(TEAM_LABELS) as Team[];
 const STATUS_OPTIONS: StatusFilter[] = ["", "unpaid", "paid", "not_markable"];
+/** URL keys that are filters: changing one goes back to page 1. */
+const FILTER_KEYS = new Set(["month", "team", "owner", "property", "status", "q", "size"]);
 
 function unitOf(r: Row): PaymentUnit {
   return { unitId: r.unitId, unit: r.unit, propertyName: r.propertyName, tenants: r.tenants, rentCents: r.rentCents };
@@ -78,54 +100,72 @@ function StatusCell({ r }: { r: Row }) {
   );
 }
 
-/** `/owner-statements/payments`: mark rent received per unit per rent month (spec 6.8). */
+/** `/payments` (Finance → Payments): mark rent received per unit per rent month (spec 6.8). */
 export function PaymentsView() {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
   const now = useNow();
   const thisMonth = currentMonth(now);
-  // Next month too: rent paid early can be marked ahead.
-  const months = useMemo(
-    () => [{ value: nextMonth(thisMonth), label: formatMonth(nextMonth(thisMonth)) }, ...recentMonths(now)],
-    [now, thisMonth],
-  );
-  const month = pickMonth(params.get("month"), months) ?? thisMonth;
+  const rawMonth = params.get("month");
+  // Next month (rent paid early), this month and 24 before it; an older month from a link is added.
+  const months = useMemo(() => rentMonthOptions(now, rawMonth), [now, rawMonth]);
+  const month = rawMonth && isMonth(rawMonth) && months.some((m) => m.value === rawMonth) ? rawMonth : thisMonth;
   const rawTeam = params.get("team") ?? "";
   const team = (TEAMS as string[]).includes(rawTeam) ? rawTeam : "";
   const ownerId = params.get("owner") ?? "";
   const propertyId = params.get("property") ?? "";
   const rawStatus = params.get("status") ?? "";
   const status: StatusFilter = (STATUS_OPTIONS as string[]).includes(rawStatus) ? (rawStatus as StatusFilter) : "";
+  const urlQ = params.get("q") ?? "";
+  const q = normalizeSearch(urlQ);
+  const pageSize = readPageSize(params.get("size"));
+  const requestedPage = readPage(params.get("page"));
 
+  // The status filter and the search run here, over every unit of the month the list returns, so
+  // the tiles and chip counts follow the search too.
   const data = useQuery(api.rentPayments.list, {
     month,
     category: team || null,
     ownerId: ownerId || null,
     propertyId: propertyId || null,
-    status: status || null,
+    status: null,
   });
 
-  // Selection is per view: it starts empty whenever the month or a filter changes.
-  const viewKey = `${month}|${team}|${ownerId}|${propertyId}|${status}`;
+  /** Set several URL params at once ("" removes one); a filter change goes back to page 1. */
+  const setParams = (updates: Record<string, string>) => {
+    const next = new URLSearchParams(params.toString());
+    for (const [key, value] of Object.entries(updates)) {
+      if (value) next.set(key, value);
+      else next.delete(key);
+      if (FILTER_KEYS.has(key)) next.delete("page");
+      // A property filter from another team would hide everything.
+      if (key === "team") next.delete("property");
+    }
+    const qs = next.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname);
+  };
+  const setParam = (key: string, value: string) => setParams({ [key]: value });
+
+  // Search box: live as you type (debounced), kept in the URL as ?q= (a new search goes back to page 1).
+  const search = useUrlSearch();
+  const clearSearch = search.clear;
+
+  const view = applyPaymentsView(data?.rows ?? [], { q, status });
+  const paged = paginate(view.visible, requestedPage, pageSize);
+  const pageRows = paged.rows;
+
+  // Selection is per page: it starts empty whenever the month, a filter, the search or the page changes.
+  const viewKey = `${month}|${team}|${ownerId}|${propertyId}|${status}|${q}|${paged.page}|${pageSize}`;
   const [selection, setSelection] = useState<{ key: string; ids: Set<string> }>({ key: viewKey, ids: new Set() });
   const selected = selection.key === viewKey ? selection.ids : new Set<string>();
   const setSelected = (ids: Set<string>) => setSelection({ key: viewKey, ids });
   const [dialog, setDialog] = useState<Dialog | null>(null);
 
-  const setParam = (key: string, value: string) => {
-    const next = new URLSearchParams(params.toString());
-    if (value) next.set(key, value);
-    else next.delete(key);
-    // A property filter from another team would hide everything.
-    if (key === "team") next.delete("property");
-    router.replace(`${pathname}?${next.toString()}`);
-  };
-
-  const rows = data?.rows ?? [];
-  const markable = rows.filter((r) => r.canMark);
-  const selectedRows = markable.filter((r) => selected.has(r.unitId));
-  const allOn = markable.length > 0 && markable.slice(0, MAX_BULK_MARK).every((r) => selected.has(r.unitId));
+  // "Select all" = the markable rows of THIS page only (a page holds at most 100, the bulk cap).
+  const selectable = selectableOnPage(pageRows, MAX_BULK_MARK);
+  const selectedRows = pageRows.filter((r) => r.canMark && selected.has(r.unitId));
+  const allOn = selectable.length > 0 && selectable.every((id) => selected.has(id));
 
   const toggle = (unitId: string, on: boolean) => {
     const next = new Set(selected);
@@ -139,11 +179,11 @@ export function PaymentsView() {
       key: "select",
       header: (
         <label className="inline-flex items-center">
-          <span className="sr-only">Select every unpaid unit shown</span>
+          <span className="sr-only">Select every unpaid unit on this page</span>
           <Checkbox
             checked={allOn}
-            disabled={markable.length === 0}
-            onChange={(on) => setSelected(on ? new Set(markable.slice(0, MAX_BULK_MARK).map((r) => r.unitId)) : new Set())}
+            disabled={selectable.length === 0}
+            onChange={(on) => setSelected(on ? new Set(selectable) : new Set())}
           />
         </label>
       ),
@@ -212,6 +252,8 @@ export function PaymentsView() {
         r.payment ? (
           <div className="min-w-[7rem]">
             <div className="tabular-nums">{formatDate(r.payment.receivedDate)}</div>
+            {/* Cash basis: the statement of the month it was received, whatever month the rent is for. */}
+            <div className="whitespace-nowrap text-[11.5px] text-muted-foreground">{landsOnShort(r.payment.receivedDate)}</div>
             {r.payment.methodLabel || r.payment.note ? (
               <div className="max-w-[180px] whitespace-normal text-[11.5px] text-muted-foreground">
                 {[r.payment.methodLabel, r.payment.note].filter(Boolean).join(" · ")}
@@ -230,15 +272,35 @@ export function PaymentsView() {
     },
   ];
 
+  const summary = view.summary;
+  const anyFilter = Boolean(team || ownerId || propertyId || status);
+  const truncatedNote = data?.truncated
+    ? propertyId
+      ? `Only the first ${data.maxUnits.toLocaleString("en-US")} units of this property are shown, and the totals count only those.`
+      : team || ownerId
+        ? `Only the first ${data.maxUnits.toLocaleString("en-US")} units are shown, and the totals count only those. Pick a property above to see every unit of it.`
+        : `Only the first ${data.maxUnits.toLocaleString("en-US")} units are shown, and the totals count only those. Pick a team, owner or property above to see every unit of it.`
+    : null;
+
   return (
     <div className="pb-10">
       <PageHeader
         title="Payments"
         subtitle="Mark rent received for each unit and month. A payment goes on the owner statement for the month it was received (cash basis), always for the full roster rent."
       />
-      <FinanceNav active="payments" />
 
       <Card>
+        <div className="mb-3">
+          <SearchBox
+            id="pay-search"
+            label="Search payments"
+            value={search.input}
+            onChange={search.setInput}
+            onClear={clearSearch}
+            placeholder="Search property, address, unit, tenant or owner"
+          />
+        </div>
+
         <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <Field label="Rent month" htmlFor="pay-month">
             <Select id="pay-month" value={month} onChange={(e) => setParam("month", e.target.value || "")}>
@@ -287,16 +349,21 @@ export function PaymentsView() {
           <Spinner label="Loading rent payments…" />
         ) : (
           <>
+            {data.monthClosed ? (
+              <p className="mb-3 rounded-xl border border-border bg-muted/40 px-3 py-2 text-[12.5px] text-muted-foreground">
+                {data.monthClosed} This month is shown for reference only.
+              </p>
+            ) : null}
             <KpiRow>
-              <Kpi label="Paid" value={data.summary.paid} sub={`${formatCurrency(data.summary.receivedCents)} received`} />
+              <Kpi label="Paid" value={summary.paid} sub={`${formatCurrency(summary.receivedCents)} received`} />
               <Kpi
                 label="Unpaid"
-                value={data.summary.unpaid}
-                sub={`${formatCurrency(data.summary.unpaidCents)} expected`}
-                subTone={data.summary.unpaid > 0 ? "down" : "muted"}
+                value={summary.unpaid}
+                sub={`${formatCurrency(summary.unpaidCents)} expected`}
+                subTone={summary.unpaid > 0 ? "down" : "muted"}
               />
-              <Kpi label="Not markable" value={data.summary.notMarkable} sub="Owner collects, vacant or no rent" />
-              <Kpi label={`Received for ${data.monthLabel}`} value={formatCurrency(data.summary.receivedCents)} />
+              <Kpi label="Not markable" value={summary.notMarkable} sub="Owner collects, vacant or no rent" />
+              <Kpi label={`Received for ${data.monthLabel}`} value={formatCurrency(summary.receivedCents)} />
             </KpiRow>
 
             <div className="mt-4 flex flex-wrap items-center gap-3">
@@ -305,10 +372,10 @@ export function PaymentsView() {
                 value={status}
                 onChange={(v) => setParam("status", v)}
                 options={[
-                  { value: "", label: `All (${data.summary.total})` },
-                  { value: "unpaid", label: `Unpaid (${data.summary.unpaid})` },
-                  { value: "paid", label: `Paid (${data.summary.paid})` },
-                  { value: "not_markable", label: `Not markable (${data.summary.notMarkable})` },
+                  { value: "", label: `All (${summary.total})` },
+                  { value: "unpaid", label: `Unpaid (${summary.unpaid})` },
+                  { value: "paid", label: `Paid (${summary.paid})` },
+                  { value: "not_markable", label: `Not markable (${summary.notMarkable})` },
                 ]}
               />
               <div className="ml-auto flex items-center gap-2">
@@ -334,9 +401,9 @@ export function PaymentsView() {
                 At most {MAX_BULK_MARK} units can be marked at a time. Mark these, then select the rest.
               </p>
             ) : null}
-            {data.truncated ? (
+            {truncatedNote ? (
               <p className="mt-2 rounded-xl border border-warning-ink/30 bg-warning-soft px-3 py-2 text-[12.5px] text-warning-ink">
-                This team has more units than the page can show at once. Filter by team or property to see them all.
+                {truncatedNote}
               </p>
             ) : null}
 
@@ -344,13 +411,38 @@ export function PaymentsView() {
               <DataTable
                 caption={`Rent payments for ${data.monthLabel}`}
                 columns={columns}
-                rows={rows}
+                rows={pageRows}
                 rowKey={(r) => r.unitId}
+                // Clicking a markable row (outside its buttons and links) ticks its box; Space on the focused row too.
+                rowClickable={(r) => r.canMark}
+                onRowClick={(r) => {
+                  const on = selected.has(r.unitId);
+                  if (!on && selected.size >= MAX_BULK_MARK) return;
+                  toggle(r.unitId, !on);
+                }}
+                rowClassName={(r) => r.canMark && selected.has(r.unitId) && "bg-accent/60"}
                 empty={
-                  team || ownerId || propertyId || status
-                    ? "No units match these filters."
-                    : "No units yet. Units come from the property rosters."
+                  q ? (
+                    <span>
+                      No units match &ldquo;{urlQ.trim()}&rdquo;.{" "}
+                      <button type="button" onClick={clearSearch} className="font-medium text-primary hover:underline">
+                        Clear search
+                      </button>
+                    </span>
+                  ) : anyFilter ? (
+                    "No units match these filters."
+                  ) : (
+                    "No units yet. Units come from the property rosters."
+                  )
                 }
+              />
+              <Pagination
+                label="Rent payments pages"
+                page={paged.page}
+                pageSize={pageSize}
+                total={paged.total}
+                onPage={(p) => setParams({ page: p > 1 ? String(p) : "" })}
+                onPageSize={(n) => setParams({ size: String(n) })}
               />
             </div>
           </>
@@ -394,6 +486,8 @@ export function PaymentsView() {
 
 function RowActions({ r, onDialog }: { r: Row; onDialog: (d: Dialog) => void }) {
   if (r.status === "unpaid") {
+    // Not markable for the whole month (more than 24 months ago): the notice above the table says so.
+    if (!r.canMark && !r.ownerProblem) return null;
     if (!r.canMark) {
       return (
         <div className="flex max-w-[240px] flex-col items-end gap-1 text-right">

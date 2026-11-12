@@ -3,14 +3,32 @@
 import { useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { UserPlus } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { api } from "@/convex/_generated/api";
-import { Card, DataTable, PageHeader, Pill, Toggle, type Column } from "@/components/ui";
+import {
+  Card,
+  DataTable,
+  PageHeader,
+  Pagination,
+  Pill,
+  SearchBox,
+  SortHeader,
+  Toggle,
+  ariaSortOf,
+  paginate,
+  readSort,
+  toggleSort,
+  useUrlPaging,
+  useUrlSearch,
+  type Column,
+} from "@/components/ui";
 import { DefaultFeeButton, useDefaultFeeLine } from "./default-fee-dialog";
 import { FinanceNav } from "./finance-nav";
 import { LinkBtn, Spinner } from "./form-bits";
+import { OWNER_SORT_DEFAULT, OWNER_SORT_KEYS, ownersView, type OwnerSortKey } from "./list-finders";
 import { NeedsOwnerCard } from "./needs-owner";
+import { normalizeSearch } from "./payments-search";
 
 type OwnerRow = FunctionReturnType<typeof api.owners.list>[number];
 
@@ -27,11 +45,39 @@ export function OwnersList() {
   const [showInactive, setShowInactive] = useState(false);
   const owners = useQuery(api.owners.list, { includeInactive: showInactive });
   const feeLine = useDefaultFeeLine();
+  const pathname = usePathname();
+  const params = useSearchParams();
+  const [problemsOnly, setProblemsOnly] = useState(false);
+  const search = useUrlSearch();
+  const q = normalizeSearch(search.q);
+  const sort = readSort(params.get("sort"), params.get("dir"), OWNER_SORT_KEYS, OWNER_SORT_DEFAULT);
+  const onSort = (key: OwnerSortKey) => {
+    const next = toggleSort(sort, key);
+    const isDefault = next.key === OWNER_SORT_DEFAULT.key && next.dir === OWNER_SORT_DEFAULT.dir;
+    const u = new URLSearchParams(params.toString());
+    if (isDefault) {
+      u.delete("sort");
+      u.delete("dir");
+    } else {
+      u.set("sort", next.key);
+      u.set("dir", next.dir);
+    }
+    u.delete("page");
+    const qs = u.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname);
+  };
+  const sortable = (key: OwnerSortKey, label: string, align: "left" | "right" = "left") => ({
+    header: <SortHeader label={label} sortKey={key} sort={sort} onSort={onSort} align={align} />,
+    sort: ariaSortOf(sort, key),
+  });
+  const visible = ownersView(owners ?? [], { q, problemsOnly, sort });
+  const paging = useUrlPaging();
+  const paged = paginate(visible, paging.page, paging.pageSize);
 
   const columns: Column<OwnerRow>[] = [
     {
       key: "name",
-      header: "Legal name",
+      ...sortable("name", "Legal name"),
       render: (o) => (
         <span className="font-medium">
           {o.legalName}
@@ -39,7 +85,7 @@ export function OwnersList() {
         </span>
       ),
     },
-    { key: "contact", header: "Contact", render: (o) => o.contactName || <span className="text-faint">Not set</span> },
+    { key: "contact", ...sortable("contact", "Contact"), render: (o) => o.contactName || <span className="text-faint">Not set</span> },
     {
       key: "emails",
       header: "Emails",
@@ -58,10 +104,10 @@ export function OwnersList() {
       // The range of the owner's property fees (each property: its own fee, else the default).
       render: (o) => o.feeRange ?? <span className="text-faint">No properties</span>,
     },
-    { key: "props", header: "Properties", align: "right", className: "tabular-nums", render: (o) => o.propertyCount },
+    { key: "props", ...sortable("properties", "Properties", "right"), align: "right", className: "tabular-nums", render: (o) => o.propertyCount },
     {
       key: "problems",
-      header: "Problems",
+      ...sortable("problems", "Problems"),
       render: (o) =>
         o.problems.length === 0 && o.coOwnedPropertyNames.length === 0 ? (
           <span className="text-faint">None</span>
@@ -99,21 +145,74 @@ export function OwnersList() {
       <FinanceNav active="owners" />
       <NeedsOwnerCard />
       <Card>
-        <div className="mb-4 flex items-center gap-2">
-          <Toggle checked={showInactive} label="Show inactive owners" onChange={setShowInactive} />
-          <span className="text-[13px]">Show inactive owners</span>
+        <div className="mb-3">
+          <SearchBox
+            id="owners-search"
+            label="Search owners"
+            value={search.input}
+            onChange={search.setInput}
+            onClear={search.clear}
+            placeholder="Search owner, contact, email or property"
+          />
+        </div>
+        <div className="mb-4 flex flex-wrap items-center gap-x-5 gap-y-2">
+          <div className="flex items-center gap-2">
+            <Toggle
+              checked={showInactive}
+              label="Show inactive owners"
+              onChange={(v) => {
+                setShowInactive(v);
+                paging.resetPage();
+              }}
+            />
+            <span className="text-[13px]">Show inactive owners</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Toggle
+              checked={problemsOnly}
+              label="Only owners with problems"
+              onChange={(v) => {
+                setProblemsOnly(v);
+                paging.resetPage();
+              }}
+            />
+            <span className="text-[13px]">Only owners with problems</span>
+          </div>
         </div>
         {owners === undefined ? (
           <Spinner label="Loading owners…" />
         ) : (
-          <DataTable
-            caption="Owners"
-            columns={columns}
-            rows={owners}
-            rowKey={(o) => o._id}
-            onRowClick={(o) => router.push(`/owner-statements/owners/${o._id}`)}
-            empty="No owners yet. Add one with “Add owner”, or import the owner list."
-          />
+          <>
+            <DataTable
+              caption="Owners"
+              columns={columns}
+              rows={paged.rows}
+              rowKey={(o) => o._id}
+              onRowClick={(o) => router.push(`/owner-statements/owners/${o._id}`)}
+              empty={
+                q ? (
+                  <span>
+                    No owners match &ldquo;{search.q.trim()}&rdquo;.{" "}
+                    <button type="button" onClick={search.clear} className="font-medium text-primary hover:underline">
+                      Clear search
+                    </button>
+                  </span>
+                ) : problemsOnly ? (
+                  "No owners with problems."
+                ) : (
+                  "No owners yet. Add one with “Add owner”, or import the owner list."
+                )
+              }
+            />
+            <Pagination
+              label="Owners pages"
+              page={paged.page}
+              pageSize={paged.pageSize}
+              total={paged.total}
+              onPage={paging.setPage}
+              onPageSize={paging.setPageSize}
+            />
+          </>
         )}
       </Card>
     </div>

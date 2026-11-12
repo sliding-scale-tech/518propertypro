@@ -9,7 +9,12 @@ export const ANCHOR = {
   opening: (propertyId: string): string => `property-${propertyId}-opening`,
   startMonth: (propertyId: string): string => `property-${propertyId}-start`,
   deposits: (propertyId: string): string => `property-${propertyId}-deposits`,
+  /** The statement page's "Left off this statement" card. */
+  leftOff: "left-off",
 } as const;
+
+/** Fired on a section revealSection scrolls to, so a collapsed card can open itself. */
+export const REVEAL_EVENT = "ros:reveal";
 
 export type WarningLinkInput = { code: string; message: string; propertyId?: string; workOrderId?: string; rentMonth?: string };
 
@@ -51,10 +56,13 @@ export function warningTarget(w: WarningLinkInput, ownerId: string): WarningTarg
       return w.rentMonth
         ? {
             kind: "href",
-            href: `/owner-statements/payments?month=${encodeURIComponent(w.rentMonth)}&owner=${encodeURIComponent(ownerId)}&status=unpaid`,
+            href: `/payments?month=${encodeURIComponent(w.rentMonth)}&owner=${encodeURIComponent(ownerId)}&status=unpaid`,
             label: "Open Payments page →",
           }
         : null;
+    case "RENT_PAYMENT_BEFORE_START":
+      // The payments left off by default are listed in this statement's "Left off this statement" card.
+      return { kind: "scroll", anchor: ANCHOR.leftOff, label: "Show left-off lines →" };
     default:
       return null;
   }
@@ -70,6 +78,7 @@ export function revealSection(anchor: string): boolean {
   if (typeof document === "undefined") return false;
   const el = document.getElementById(anchor);
   if (!el) return false;
+  el.dispatchEvent(new CustomEvent(REVEAL_EVENT));
   el.scrollIntoView({ behavior: "smooth", block: "center" });
   el.classList.add(...HIGHLIGHT);
   window.setTimeout(() => el.classList.remove(...HIGHLIGHT), 2200);

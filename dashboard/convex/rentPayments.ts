@@ -10,7 +10,7 @@ import { listPayments, markMany, markOne, undoOne, updateOne, type PaymentDeps }
 import { businessToday } from "./rosFormat";
 
 /**
- * Rent payments: the Payments page (/owner-statements/payments), spec 5.9. Admin view + accountant
+ * Rent payments: the Payments page (/payments), spec 5.9. Admin view + accountant
  * only: every function calls requireFinance(ctx) first, then the logic in rentPaymentsLib.ts (which
  * the node tests run against a fake database). Org-scoped; nothing here sends any message.
  */

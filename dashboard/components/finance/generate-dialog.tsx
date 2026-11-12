@@ -3,17 +3,23 @@
 import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useId, useMemo, useState } from "react";
+import { useId, useMemo, useState, type KeyboardEvent } from "react";
 import { api } from "@/convex/_generated/api";
-import { MSG } from "@/convex/rosPolicy";
-import { Btn, Field, Modal, Select, cx } from "@/components/ui";
+import { formatMonth } from "@/convex/rosFormat";
+import { MAX_MEMO, MSG } from "@/convex/rosPolicy";
+import { Btn, Field, Modal, Select, Textarea, cx } from "@/components/ui";
+import { toast } from "@/components/ui/toast";
 import { Checkbox, Spinner, useFieldErrors } from "./form-bits";
 
-/** Exact server messages (ownerStatements.createDraft, spec 5.4). */
+/** Exact server messages (ownerStatements.createDraft / discard, spec 5.4). */
 const OWNER_MISSING = "Select the owner this statement is for.";
 const PROPERTIES_MISSING = "Tick at least one property for this statement.";
+const REASON_LONG = "Keep the reason under 300 characters.";
 
 const ORDER = ["ownerId", "month", "propertyIds"] as const;
+
+/** The open draft blocking a property (ownerStatements.generateOptions `openDraft`). */
+type OpenDraft = { statementId: string; month: string; ownerName: string; propertyNames: string[] };
 
 /**
  * "Generate statement" (spec 6.2): owner (by name), month, and the owner's properties. Every
@@ -40,6 +46,8 @@ export function GenerateDialog({
   // Ticks the user changed, per owner+month; anything else follows the server's defaultTicked.
   const [ticks, setTicks] = useState<{ key: string; ids: string[] } | null>(null);
   const [busy, setBusy] = useState(false);
+  // The open draft the user asked to discard (confirmation shown instead of this dialog).
+  const [discarding, setDiscarding] = useState<OpenDraft | null>(null);
 
   const base = useId();
   const ids = useMemo(
@@ -83,8 +91,38 @@ export function GenerateDialog({
 
   const selectable = props.filter((p) => p.selectable);
 
+  const toggle = (propertyId: string, on: boolean) => {
+    const next = new Set(ticked);
+    if (on) next.add(propertyId);
+    else next.delete(propertyId);
+    setTicked(next);
+  };
+
+  /** Enter on a focused row checkbox toggles it too (Space already does). */
+  const onRowKey = (e: KeyboardEvent<HTMLLabelElement>, propertyId: string) => {
+    if (e.key !== "Enter" || !(e.target instanceof HTMLInputElement)) return;
+    e.preventDefault();
+    toggle(propertyId, !ticked.has(propertyId));
+  };
+
+  /**
+   * After a discard the freed properties are ticked like the others: the server's defaultTicked does
+   * it unless the user already changed ticks for this owner+month, so add them to those ticks.
+   */
+  const onDiscarded = (statementId: string) => {
+    setDiscarding(null);
+    if (!ticks || ticks.key !== key) return;
+    const freed = props.filter((p) => p.openDraft?.statementId === statementId).map((p) => p.propertyId as string);
+    setTicks({ key, ids: [...new Set([...ticks.ids, ...freed])] });
+  };
+
   return (
+    <>
+    {discarding ? (
+      <DiscardDraftDialog draft={discarding} onClose={() => setDiscarding(null)} onDone={onDiscarded} />
+    ) : null}
     <Modal
+      open={discarding === null}
       title="Generate statement"
       onClose={onClose}
       size="lg"
@@ -186,23 +224,53 @@ export function GenerateDialog({
             >
               {props.map((p) => {
                 const cid = `${base}-p-${p.propertyId}`;
+                if (p.selectable) {
+                  // The whole row is the label, so a click anywhere on it ticks / unticks.
+                  return (
+                    <li key={p.propertyId} className="first:rounded-t-2xl last:rounded-b-2xl">
+                      <label
+                        htmlFor={cid}
+                        onKeyDown={(e) => onRowKey(e, p.propertyId)}
+                        className="flex cursor-pointer items-start gap-3 rounded-[inherit] px-3.5 py-2.5 text-[13.5px] hover:bg-muted has-[:focus-visible]:outline-2 has-[:focus-visible]:-outline-offset-2 has-[:focus-visible]:outline-ring"
+                      >
+                        <Checkbox id={cid} checked={ticked.has(p.propertyId)} onChange={(on) => toggle(p.propertyId, on)} />
+                        <span className="min-w-0">{p.name}</span>
+                      </label>
+                    </li>
+                  );
+                }
+                const draft = p.openDraft;
                 return (
                   <li key={p.propertyId} className="flex items-start gap-3 px-3.5 py-2.5">
-                    <Checkbox
-                      id={cid}
-                      checked={p.selectable && ticked.has(p.propertyId)}
-                      disabled={!p.selectable}
-                      onChange={(on) => {
-                        const next = new Set(ticked);
-                        if (on) next.add(p.propertyId);
-                        else next.delete(p.propertyId);
-                        setTicked(next);
-                      }}
-                    />
-                    <label htmlFor={cid} className={cx("min-w-0 text-[13.5px]", !p.selectable && "text-muted-foreground")}>
-                      {p.name}
+                    <Checkbox id={cid} checked={false} disabled onChange={() => {}} />
+                    <div className="min-w-0 text-[13.5px] text-muted-foreground">
+                      <label htmlFor={cid}>{p.name}</label>
                       {p.reason ? <span className="mt-0.5 block text-xs text-danger-ink/80">{p.reason}</span> : null}
-                    </label>
+                      {draft ? (
+                        <div className="mt-1.5 flex flex-wrap gap-2">
+                          <Btn
+                            sm
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              router.push(`/owner-statements/${draft.statementId}`);
+                              onClose();
+                            }}
+                          >
+                            Open draft
+                          </Btn>
+                          <Btn
+                            sm
+                            variant="dng"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setDiscarding(draft);
+                            }}
+                          >
+                            Discard draft
+                          </Btn>
+                        </div>
+                      ) : null}
+                    </div>
                   </li>
                 );
               })}
@@ -210,6 +278,82 @@ export function GenerateDialog({
           )}
           {f.message("propertyIds")}
         </div>
+      </div>
+    </Modal>
+    </>
+  );
+}
+
+/**
+ * Confirmation for "Discard draft" on a blocked property (same rules as the statement page's
+ * discard: optional reason up to 300 characters). Calls ownerStatements.discard; generateOptions is
+ * reactive, so the property list refreshes by itself.
+ */
+function DiscardDraftDialog({
+  draft,
+  onClose,
+  onDone,
+}: {
+  draft: OpenDraft;
+  onClose: () => void;
+  onDone: (statementId: string) => void;
+}) {
+  const discard = useMutation(api.ownerStatements.discard);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const base = useId();
+  const ids = useMemo(() => ({ reason: `${base}-reason` }), [base]);
+  const f = useFieldErrors(ids);
+
+  async function submit() {
+    if (busy) return;
+    const r = reason.trim();
+    if (!f.check(r.length > MAX_MEMO ? { reason: REASON_LONG } : {}, ["reason"])) return;
+    setBusy(true);
+    try {
+      await discard({ statementId: draft.statementId, reason: r || undefined });
+      toast.success("Draft discarded.");
+      onDone(draft.statementId);
+    } catch (e) {
+      f.fromServer(e);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      title={`Discard the ${formatMonth(draft.month)} draft for ${draft.ownerName}?`}
+      size="sm"
+      onClose={onClose}
+      footer={
+        <>
+          <Btn onClick={onClose} disabled={busy}>
+            Cancel
+          </Btn>
+          <Btn variant="dng" onClick={() => void submit()} disabled={busy}>
+            {busy ? "Discarding…" : "Discard draft"}
+          </Btn>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-3">
+        <p className="text-[13.5px] text-muted-foreground">
+          It covers: {draft.propertyNames.join(", ")}. Nothing in the ledger, payments or work orders changes.
+        </p>
+        <Field label="Reason (optional)" htmlFor={ids.reason}>
+          <Textarea
+            id={ids.reason}
+            rows={2}
+            value={reason}
+            maxLength={MAX_MEMO + 20}
+            onChange={(e) => {
+              setReason(e.target.value);
+              f.clear("reason");
+            }}
+            {...f.control("reason", "min-h-[60px]")}
+          />
+          {f.message("reason")}
+        </Field>
       </div>
     </Modal>
   );

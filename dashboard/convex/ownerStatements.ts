@@ -238,6 +238,12 @@ export const list = query({
 
     const linkCount = new Map<string, number>();
     for (const l of links) linkCount.set(l.propertyId, (linkCount.get(l.propertyId) ?? 0) + 1);
+    // For the list's search and team filter: each owner's linked properties (name, address, team).
+    const props = await ctx.db
+      .query("properties")
+      .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
+      .collect();
+    const propById = new Map(props.map((p) => [p._id as string, p]));
     const propNames = new Map<string, string>();
     const propName = async (id: Id<"properties">): Promise<string> => {
       const hit = propNames.get(id);
@@ -273,12 +279,58 @@ export const list = query({
         // Linked properties that are not co-owned (a co-owned one can't go on a statement).
         eligiblePropertyCount: mine.filter((l) => (linkCount.get(l.propertyId) ?? 0) === 1).length,
         statements: rows,
+        /** The owner's emails (finance users only see this list): the search matches them. */
+        emails: o.emails,
+        /** Linked properties, for the search (name, address) and the team filter. */
+        properties: mine.flatMap((l) => {
+          const p = propById.get(l.propertyId);
+          return p ? [{ name: p.name, address: p.address?.formatted ?? null, category: p.category ?? null }] : [];
+        }),
       });
     }
     out.sort((a, b) => naturalCompare(a.legalName, b.legalName) || cmpStr(a.ownerId, b.ownerId));
     return { month, owners: out };
   },
 });
+
+type BlockingDraft = { statementId: Id<"ownerStatements">; month: string; ownerName: string; propertyNames: string[] };
+
+/**
+ * generateOptions: the open draft behind a property's reason, so the dialog can offer "Open draft" /
+ * "Discard draft". Only when the reason shown is a draft one (MSG.CREATE_EXISTS for a draft, or
+ * MSG.CREATE_OPEN_DRAFT); a final or any other reason gets null. The draft may be another owner's
+ * (the property changed hands). Org-scoped like everything here.
+ */
+async function blockingDraft(
+  ctx: Ctx,
+  org: OrgContext,
+  property: Doc<"properties">,
+  reason: string | null,
+  ownerName: (id: Id<"owners">) => Promise<string>,
+): Promise<BlockingDraft | null> {
+  if (reason === null) return null;
+  const rows = (
+    await ctx.db
+      .query("ownerStatementProperties")
+      .withIndex("by_property_and_status", (q) => q.eq("propertyId", property._id).eq("status", "draft"))
+      .collect()
+  ).filter((r) => r.orgId === org.orgId);
+  for (const r of rows) {
+    const shown =
+      reason === MSG.CREATE_OPEN_DRAFT(property.name, r.month) ||
+      reason === MSG.CREATE_EXISTS(property.name, "draft", r.month, await ownerName(r.ownerId));
+    if (!shown) continue;
+    const st = await ctx.db.get(r.statementId);
+    if (!st || st.orgId !== org.orgId || st.status !== "draft") continue;
+    const propertyNames: string[] = [];
+    for (const pid of st.propertyIds) {
+      const p = await ctx.db.get(pid);
+      propertyNames.push(p && p.orgId === org.orgId ? p.name : "Deleted property");
+    }
+    return { statementId: st._id, month: st.month, ownerName: await ownerName(st.ownerId), propertyNames };
+  }
+  return null;
+}
 
 export const generateOptions = query({
   args: { ownerId: v.optional(v.union(v.string(), v.null())), month: v.optional(v.union(v.string(), v.null())) },
@@ -299,12 +351,13 @@ export const generateOptions = query({
         .withIndex("by_owner", (q) => q.eq("ownerId", owner._id))
         .collect()
     ).filter((l) => l.orgId === org.orgId);
-    const props: { id: string; name: string; reason: string | null }[] = [];
+    const props: { id: string; name: string; reason: string | null; openDraft: BlockingDraft | null }[] = [];
     for (const l of myLinks) {
       const p = await ctx.db.get(l.propertyId);
       if (!p || p.orgId !== org.orgId) continue;
       const state = await propertyState(ctx, org, owner._id, p, ownerName);
-      props.push({ id: p._id, name: p.name, reason: createDraftProblem(month, today, state, owner.legalName) });
+      const reason = createDraftProblem(month, today, state, owner.legalName);
+      props.push({ id: p._id, name: p.name, reason, openDraft: await blockingDraft(ctx, org, p, reason, ownerName) });
     }
     return {
       owner: { legalName: owner.legalName },
@@ -314,6 +367,7 @@ export const generateOptions = query({
         selectable: p.reason === null,
         reason: p.reason,
         defaultTicked: p.reason === null,
+        openDraft: p.openDraft,
       })),
     };
   },

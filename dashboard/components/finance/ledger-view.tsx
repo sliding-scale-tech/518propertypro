@@ -8,7 +8,19 @@ import { useState } from "react";
 import { api } from "@/convex/_generated/api";
 import { formatAmount, formatDate, formatMonth } from "@/convex/rosFormat";
 import { SUBTRACTION_TYPES } from "@/convex/rosPolicy";
-import { Btn, Card, DataTable, Field, PageHeader, Pill, Select, Toggle, type Column } from "@/components/ui";
+import {
+  Btn,
+  Card,
+  DEFAULT_PAGE_SIZE,
+  DataTable,
+  Field,
+  PageHeader,
+  Pagination,
+  Pill,
+  Select,
+  Toggle,
+  type Column,
+} from "@/components/ui";
 import { FinanceNav, useNow } from "./finance-nav";
 import { Spinner } from "./form-bits";
 import { DELETE_ENTRY, PAYMENTS_LINK, paymentsPageHref } from "./line-labels";
@@ -44,8 +56,10 @@ export function LedgerView() {
   const [propertyId, setPropertyId] = useState("");
   const [month, setMonth] = useState("");
   const [includeVoided, setIncludeVoided] = useState(false);
-  // Cursor of each page visited; the last one is the page shown.
+  // Cursor of each page visited (the last one is the page shown) and the row count of each page left behind.
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
+  const [counts, setCounts] = useState<number[]>([]);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [dialog, setDialog] = useState<Dialog | null>(null);
 
   const owners = useQuery(api.owners.list, { includeInactive: true });
@@ -57,9 +71,13 @@ export function LedgerView() {
     month: month || null,
     includeVoided,
     cursor,
+    pageSize,
   });
 
-  const resetPaging = () => setCursors([null]);
+  const resetPaging = () => {
+    setCursors([null]);
+    setCounts([]);
+  };
 
   const columns: Column<LedgerRow>[] = [
     {
@@ -244,25 +262,37 @@ export function LedgerView() {
                 columns={columns}
                 rows={page.page}
                 rowKey={(r) => r._id}
+                // A row that can be edited opens Edit when clicked (its buttons keep their own action).
+                rowClickable={(r) => r.editable && !r.onRentAccount}
+                onRowClick={(r) => setDialog({ kind: "edit", entry: entryOf(r) })}
                 empty={
                   ownerId || propertyId || month
                     ? "No transactions match these filters."
                     : "No transactions yet. Record rent on the Payments page; add landscaping and other rows with “Add transaction”."
                 }
               />
-            <div className="mt-3 flex items-center justify-end gap-2 text-[12.5px] text-muted-foreground">
-              <span>Page {cursors.length}</span>
-              <Btn sm disabled={cursors.length <= 1} onClick={() => setCursors((c) => c.slice(0, -1))}>
-                Previous
-              </Btn>
-              <Btn
-                sm
-                disabled={page.isDone}
-                onClick={() => setCursors((c) => [...c, page.continueCursor])}
-              >
-                Next
-              </Btn>
-            </div>
+            {/* Cursor paging (no total): Previous / Next only, same bar as every other list. */}
+            <Pagination
+              label="Ledger pages"
+              page={cursors.length}
+              pageSize={pageSize}
+              rowsOnPage={page.page.length}
+              rowsBefore={counts.reduce((a, b) => a + b, 0)}
+              hasNext={!page.isDone}
+              onPage={(p) => {
+                if (p < cursors.length) {
+                  setCursors((c) => c.slice(0, p));
+                  setCounts((c) => c.slice(0, p - 1));
+                } else if (p === cursors.length + 1 && !page.isDone) {
+                  setCursors((c) => [...c, page.continueCursor]);
+                  setCounts((c) => [...c, page.page.length]);
+                }
+              }}
+              onPageSize={(n) => {
+                setPageSize(n);
+                resetPaging();
+              }}
+            />
           </>
         )}
       </Card>

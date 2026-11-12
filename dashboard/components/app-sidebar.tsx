@@ -21,6 +21,7 @@ import {
   CalendarRange,
   Sparkles,
   CircleDollarSign,
+  Banknote,
   Box,
   Target,
   CircleUser,
@@ -124,8 +125,15 @@ const NAV: NavEntry[] = [
     group: "Finance",
     icon: CircleDollarSign,
     items: [
-      // Rent payments (finance-only, like Owner Reports). The old /finance page redirects here.
-      { href: "/owner-statements/payments", label: "Payments", icon: FileText, views: ["admin", "accountant"] },
+      // Rent payments (finance-only, like Owner Reports), its own page. The old /finance and
+      // /owner-statements/payments URLs redirect here.
+      {
+        href: "/payments",
+        label: "Payments",
+        icon: Banknote,
+        views: ["admin", "accountant"],
+        alsoActive: ["/owner-statements/payments"],
+      },
       { href: "/owner-statements", label: "Owner Reports", icon: FileText, views: ["admin", "accountant"] },
     ],
   },
@@ -144,7 +152,9 @@ const NAV: NavEntry[] = [
   { href: "/team", label: "Team", icon: Users, views: ["admin", "accountant", "technician"] },
 ];
 
-const NAV_HREFS = NAV.flatMap((e) => (isGroup(e) ? e.items.map((i) => i.href) : [e.href]));
+// Every path a link claims (its href and its alsoActive prefixes): a nested route lights only the
+// most specific one, so /owner-statements/payments (the old Payments URL) never lights Owner Reports.
+const NAV_HREFS = NAV.flatMap((e) => (isGroup(e) ? e.items : [e]).flatMap((i) => [i.href, ...(i.alsoActive ?? [])]));
 
 // The bottom nav only has room for a handful of items; whichever of these the view can see,
 // in this order, take the slots. The rest live in the "More" sheet.

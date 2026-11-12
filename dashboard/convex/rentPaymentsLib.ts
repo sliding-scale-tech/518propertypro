@@ -3,8 +3,8 @@ import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { writeAudit } from "./audit";
 import type { OrgContext } from "./authz";
-import { formatMonth, monthEnd, monthStart, naturalCompare } from "./rosFormat";
-import { MSG, cmpStr, lockedThroughMonth } from "./rosPolicy";
+import { formatMonth, monthEnd, monthOf, monthStart, naturalCompare } from "./rosFormat";
+import { MSG, cmpStr } from "./rosPolicy";
 import {
   MAX_BULK_MARK,
   MAX_UNDO_REASON,
@@ -17,7 +17,9 @@ import {
   paymentStatus,
   receivedDateLockProblem,
   rentMarkability,
+  markRentMonthProblem,
   rentMonthProblem,
+  rentMonthStartProblem,
   rentRecordsFor,
   teamLabel,
   teamRank,
@@ -29,7 +31,7 @@ import {
 } from "./rentPaymentsPolicy";
 
 /**
- * Rent payments (the Payments page, /owner-statements/payments), spec 5.9: the logic behind
+ * Rent payments (the Payments page, /payments), spec 5.9: the logic behind
  * convex/rentPayments.ts, which registers the functions and calls these after requireFinance.
  * Kept free of runtime Convex server imports (audit and the Rent Income account come in as `deps`),
  * so scripts/probes/ros_rent.test.mjs runs every rule against a fake database.
@@ -66,7 +68,7 @@ function fieldError(field: string, message: string): ConvexError<{ message: stri
 
 type Raw = string | null | undefined;
 
-/** The org's units are read in one go; ~600 today. Above this the list says it is incomplete. */
+/** The units read in one go (after the team / owner / property filter); ~600 today. Above this the list says it is incomplete. */
 const MAX_LIST_UNITS = 3000;
 
 const TEAMS = new Set(["gold", "silver", "make_up"]);
@@ -118,13 +120,13 @@ function propertyCache(ctx: Ctx, org: PayOrg) {
   return {
     async lockedThrough(propertyId: Id<"properties">): Promise<string | null> {
       if (locked.has(propertyId)) return locked.get(propertyId) ?? null;
-      const finals = (
-        await ctx.db
-          .query("ownerStatementProperties")
-          .withIndex("by_property_and_status", (q) => q.eq("propertyId", propertyId).eq("status", "final"))
-          .collect()
-      ).filter((r) => r.orgId === org.orgId);
-      const m = lockedThroughMonth(finals.map((f) => f.month));
+      // The index is ["propertyId", "status", "month"]: newest final month first, one row read.
+      const latest = await ctx.db
+        .query("ownerStatementProperties")
+        .withIndex("by_property_and_status", (q) => q.eq("propertyId", propertyId).eq("status", "final"))
+        .order("desc")
+        .first();
+      const m = latest && latest.orgId === org.orgId ? latest.month : null;
       locked.set(propertyId, m);
       return m;
     },
@@ -214,12 +216,44 @@ export async function listPayments(ctx: Ctx, org: PayOrg, args: ListArgs, today:
     .collect();
   const ownerById = new Map(owners.map((o) => [o._id as string, o]));
 
-  const unitsRaw = await ctx.db
-    .query("units")
-    .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
-    .take(MAX_LIST_UNITS + 1);
+  /** The single owner of a property (null = no owner / co-owned). */
+  const soleOwnerOf = (propertyId: string): string | null => {
+    const links = linksByProp.get(propertyId) ?? [];
+    return links.length === 1 ? links[0].ownerId : null;
+  };
+  // Units are read in one go, at most MAX_LIST_UNITS. With a team, owner or property filter only
+  // the matching properties' units are read (by_property), so the cap applies AFTER the filter and
+  // filtering really does show every unit of the team / owner / property.
+  const scoped = category !== "" || ownerFilter !== null || propertyFilter !== null;
+  let unitsRaw: Doc<"units">[];
+  if (!scoped) {
+    unitsRaw = await ctx.db
+      .query("units")
+      .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
+      .take(MAX_LIST_UNITS + 1);
+  } else {
+    unitsRaw = [];
+    const inScope = properties
+      .filter(
+        (p) =>
+          (category === "" || p.category === category) &&
+          (!ownerFilter || soleOwnerOf(p._id) === ownerFilter._id) &&
+          (!propertyFilter || p._id === propertyFilter._id),
+      )
+      .sort((a, b) => teamRank(a.category) - teamRank(b.category) || naturalCompare(a.name, b.name) || cmpStr(a._id, b._id));
+    for (const p of inScope) {
+      const us = await ctx.db
+        .query("units")
+        .withIndex("by_property", (q) => q.eq("propertyId", p._id))
+        .take(MAX_LIST_UNITS + 1 - unitsRaw.length);
+      unitsRaw.push(...us.filter((u) => u.orgId === org.orgId));
+      if (unitsRaw.length > MAX_LIST_UNITS) break;
+    }
+  }
   const truncated = unitsRaw.length > MAX_LIST_UNITS;
   const units = unitsRaw.slice(0, MAX_LIST_UNITS);
+  // Marking is closed for months more than 24 months ago (they can still be viewed).
+  const monthClosed = markRentMonthProblem(month, today);
 
   const tenantsOf = new Map<string, string[]>();
   const residents = await ctx.db
@@ -283,6 +317,8 @@ export async function listPayments(ctx: Ctx, org: PayOrg, args: ListArgs, today:
     payment: PaymentView | null;
     /** "Mark received" is offered. */
     canMark: boolean;
+    /** The property's formatted address (search matches it), or null. */
+    propertyAddress: string | null;
   };
 
   const rows: Row[] = [];
@@ -302,7 +338,10 @@ export async function listPayments(ctx: Ctx, org: PayOrg, args: ListArgs, today:
     const tenants = [...new Set((tenantsOf.get(u._id) ?? []).map((n) => n.trim()).filter((n) => n !== ""))].sort(naturalCompare);
     const mark = rentMarkability(u, tenants);
     const rec = rentRecordsFor(u._id, month, recordsByUnit.get(u._id) ?? [], rentIds);
-    const st = paymentStatus(mark.markable, rec);
+    // A month before the owner's first statement month: rent isn't expected (it was in Buildium).
+    const startMonth = links.length === 1 ? (links[0].startMonth ?? null) : null;
+    const beforeStart = startMonth !== null && month < startMonth;
+    const st = paymentStatus(mark.markable && !beforeStart, rec);
 
     let payment: PaymentView | null = null;
     if (rec.payment !== null) {
@@ -359,18 +398,29 @@ export async function listPayments(ctx: Ctx, org: PayOrg, args: ListArgs, today:
       tenants,
       rentCents: mark.markable ? mark.amountCents : null,
       status: st,
-      reason: st === "not_markable" && !mark.markable ? mark.reason : null,
+      reason:
+        st !== "not_markable"
+          ? null
+          : !mark.markable
+            ? mark.reason
+            : beforeStart && startMonth !== null
+              ? RENT_PAY_MSG.beforeStartReason(startMonth)
+              : null,
       payment,
-      canMark: st === "unpaid" && problem === null,
+      canMark: st === "unpaid" && problem === null && monthClosed === null,
+      propertyAddress: p.address?.formatted ?? null,
     });
   }
 
-  // Filter choices (from every row, before filtering).
+  // Filter choices: every property of the org, and every owner with a property of their own (a
+  // co-owned property belongs to no single owner). Not from the rows, which a filter narrows.
   const ownerChoices = new Map<string, string>();
   const propertyChoices = new Map<string, { propertyId: string; name: string; category: string | null; teamLabel: string }>();
-  for (const r of rows) {
-    if (r.ownerId && r.ownerName) ownerChoices.set(r.ownerId, r.ownerName);
-    propertyChoices.set(r.propertyId, { propertyId: r.propertyId, name: r.propertyName, category: r.category, teamLabel: r.teamLabel });
+  for (const p of properties) {
+    const ownerId = soleOwnerOf(p._id);
+    const owner = ownerId ? ownerById.get(ownerId) : undefined;
+    if (owner) ownerChoices.set(owner._id, owner.legalName);
+    propertyChoices.set(p._id, { propertyId: p._id, name: p.name, category: p.category ?? null, teamLabel: teamLabel(p.category) });
   }
 
   const filtered = rows.filter(
@@ -418,6 +468,10 @@ export async function listPayments(ctx: Ctx, org: PayOrg, args: ListArgs, today:
       ),
     },
     truncated,
+    /** The cap on units read (the truncation note names it). */
+    maxUnits: MAX_LIST_UNITS,
+    /** Set = rent can't be marked for this month (more than 24 months ago); the rows are view-only. */
+    monthClosed,
   };
 }
 
@@ -461,6 +515,10 @@ async function planMark(
   const mark = rentMarkability(unit, await activeTenants(ctx, org, unit._id));
   if (!mark.markable) return { ok: false, field: "unitId", message: RENT_PAY_MSG.notMarkable(label, mark.sentence) };
 
+  // No rent for a month before the owner's first statement month (those months were in Buildium).
+  const beforeStart = rentMonthStartProblem(month, { name: property.name, startMonth: link.startMonth });
+  if (beforeStart) return { ok: false, field: "month", message: beforeStart };
+
   // One payment per unit per rent month; and never on top of rent entered by hand for that month.
   const existing = (
     await ctx.db
@@ -476,6 +534,10 @@ async function planMark(
       .collect()
   ).find((e) => e.orgId === org.orgId && e.source !== "rent_payment" && e.voided !== true && rentIds.has(e.accountId));
   if (byHand) return { ok: false, field: "unitId", message: RENT_PAY_MSG.alreadyInLedger(label, month) };
+  // ...and never a second Rent Income row DATED in the received month: a row entered by hand is
+  // matched to the month it is dated in, so both would count for that month's statement.
+  const sameMonth = await rentDatedInMonth(ctx, org, rentIds, unit._id, monthOf(receivedDate), null);
+  if (sameMonth) return { ok: false, field: "unitId", message: RENT_PAY_MSG.alreadyDatedInMonth(label, monthOf(receivedDate), sameMonth) };
 
   const lock = receivedDateLockProblem(receivedDate, {
     name: property.name,
@@ -485,6 +547,36 @@ async function planMark(
   if (lock) return { ok: false, field: "receivedDate", message: lock };
 
   return { ok: true, plan: { unit, property, ownerId: link.ownerId, amountCents: mark.amountCents, counterparty: mark.counterparty, label } };
+}
+
+/**
+ * A non-voided Rent Income row of the unit (entered in the ledger, or a rent payment for any rent
+ * month) dated in `month`, other than `exceptId`; null = none. `rentForMonth` null = entered in
+ * the ledger.
+ */
+async function rentDatedInMonth(
+  ctx: Ctx,
+  org: PayOrg,
+  rentIds: Set<string>,
+  unitId: Id<"units">,
+  month: string,
+  exceptId: string | null,
+): Promise<{ rentForMonth: string | null } | null> {
+  const rows = (
+    await ctx.db
+      .query("ledgerEntries")
+      .withIndex("by_unit_and_date", (q) => q.eq("unitId", unitId).gte("date", monthStart(month)).lte("date", monthEnd(month)))
+      .collect()
+  ).filter(
+    (e) =>
+      e.orgId === org.orgId &&
+      e.voided !== true &&
+      e._id !== exceptId &&
+      (e.source === "rent_payment" || rentIds.has(e.accountId)),
+  );
+  if (rows.length === 0) return null;
+  const first = [...rows].sort((a, b) => cmpStr(a.date, b.date) || cmpStr(a._id, b._id))[0];
+  return { rentForMonth: first.source === "rent_payment" ? (first.rentForMonth ?? null) : null };
 }
 
 async function insertPayment(
@@ -630,13 +722,22 @@ export async function updateOne(ctx: WriteCtx, org: PayOrg, args: UpdateArgs, to
     const links = await cache.links(property._id);
     const problem = await ownerProblem(ctx, org, property, links);
     if (problem) throw fieldError("receivedDate", problem);
-    if (links[0].ownerId !== entry.ownerId) throw fieldError("receivedDate", RENT_PAY_MSG.noOwner(property.name));
+    if (links[0].ownerId !== entry.ownerId) throw fieldError("receivedDate", RENT_PAY_MSG.ownerChanged(property.name));
     const lock = receivedDateLockProblem(next.receivedDate, {
       name: property.name,
       lockedThrough: await cache.lockedThrough(property._id),
       startMonth: links[0].startMonth ?? null,
     });
     if (lock) throw fieldError("receivedDate", lock);
+    // Moving it into a month that already has other rent dated in it: the same double-count guard as marking.
+    const newMonth = monthOf(next.receivedDate);
+    if (newMonth !== monthOf(entry.date) && entry.unitId !== undefined) {
+      const other = await rentDatedInMonth(ctx, org, await rentAccountIds(ctx, org), entry.unitId, newMonth, entry._id);
+      if (other) {
+        const unit = await ctx.db.get(entry.unitId);
+        throw fieldError("receivedDate", RENT_PAY_MSG.alreadyDatedInMonth(unitLabelOf(unit, property), newMonth, other));
+      }
+    }
   }
 
   const from: Record<string, unknown> = {};

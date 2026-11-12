@@ -3,7 +3,7 @@
 import { useMutation, useQuery } from "convex/react";
 import { ChevronDown, Plus } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { LineView } from "@/convex/rosBuild";
 import { formatAmount, formatDate } from "@/convex/rosFormat";
@@ -22,6 +22,7 @@ import { SidePanel, type StatementData } from "./side-panel";
 import { StatementPreview } from "./statement-preview";
 import { StatusPill } from "./statements-list";
 import { TransactionForm, VoidDialog, type EntryInit } from "./transaction-form";
+import { ANCHOR, REVEAL_EVENT } from "./warning-links";
 import { WarningsCard } from "./warnings-card";
 
 type Tab = "transactions" | "preview";
@@ -184,7 +185,7 @@ function TransactionsTab({ data }: { data: StatementData }) {
             isDraft ? (
               <div className="flex flex-wrap items-center gap-2">
                 <LinkBtn
-                  href={`/owner-statements/payments?month=${statement.month}&owner=${encodeURIComponent(data.owner._id)}`}
+                  href={`/payments?month=${statement.month}&owner=${encodeURIComponent(data.owner._id)}`}
                 >
                   Record rent on Payments page
                 </LinkBtn>
@@ -306,6 +307,15 @@ function ExcludedCard({
   onIncludeGenerated: (propertyId: string, kind: "fee" | "draw") => void;
 }) {
   const [open, setOpen] = useState(false);
+  // A warning's "Show left-off lines →" (revealSection) opens the card.
+  const cardRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = cardRef.current;
+    if (!el) return;
+    const onReveal = () => setOpen(true);
+    el.addEventListener(REVEAL_EVENT, onReveal);
+    return () => el.removeEventListener(REVEAL_EVENT, onReveal);
+  }, []);
   const rows: ExcludedRow[] = [
     ...data.excludedLines.map((l): ExcludedRow => ({ kind: "line", key: l.key, line: l })),
     ...data.properties.flatMap((p): ExcludedRow[] => [
@@ -384,26 +394,28 @@ function ExcludedCard({
   ];
 
   return (
-    <Card>
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 text-left text-[15px] font-semibold"
-      >
-        {LEAVE_OFF.cardTitle} ({rows.length})
-        <ChevronDown aria-hidden className={cx("ml-auto h-4 w-4 text-muted-foreground transition-transform", open && "rotate-180")} />
-      </button>
-      <p className="mt-1 text-[12.5px] text-muted-foreground">
-        Lines left off stay unbilled and come back on next month&apos;s draft. Lines dated before the owner&apos;s
-        first statement month start here; put one back only if it wasn&apos;t billed in Buildium. Rent payments are
-        never left off: undo one on the Payments page instead.
-      </p>
-      {open ? (
-        <div className="mt-3">
-          <DataTable columns={columns} rows={rows} rowKey={(r) => r.key} empty={LEAVE_OFF.empty} />
-        </div>
-      ) : null}
-    </Card>
+    <div id={ANCHOR.leftOff} ref={cardRef} tabIndex={-1} className="outline-none">
+      <Card>
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen((o) => !o)}
+          className="flex w-full items-center gap-2 text-left text-[15px] font-semibold"
+        >
+          {LEAVE_OFF.cardTitle} ({rows.length})
+          <ChevronDown aria-hidden className={cx("ml-auto h-4 w-4 text-muted-foreground transition-transform", open && "rotate-180")} />
+        </button>
+        <p className="mt-1 text-[12.5px] text-muted-foreground">
+          Lines left off stay unbilled and come back on next month&apos;s draft. Lines dated before the owner&apos;s
+          first statement month start here (rent payments received before it too); put one back only if it wasn&apos;t
+          billed in Buildium. Other rent payments can&apos;t be left off: undo one on the Payments page instead.
+        </p>
+        {open ? (
+          <div className="mt-3">
+            <DataTable columns={columns} rows={rows} rowKey={(r) => r.key} empty={LEAVE_OFF.empty} />
+          </div>
+        ) : null}
+      </Card>
+    </div>
   );
 }

@@ -1,17 +1,24 @@
 "use client";
 
-import { Suspense } from "react";
-import { FinanceGate } from "@/components/finance/finance-nav";
-import { Spinner } from "@/components/finance/form-bits";
-import { PaymentsView } from "@/components/finance/payments-view";
+import { Loader2 } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useEffect } from "react";
+import { PAYMENTS_PATH } from "@/convex/rentPaymentsPolicy";
 
-/** Rent payments (admin view + accountant only; every query and mutation re-checks on the server). */
-export default function RentPaymentsPage() {
+/**
+ * Old link: the Payments page moved from /owner-statements/payments to /payments (Finance →
+ * Payments). The filters in the query string (?month=&team=&owner=&property=&status=&q=&page=) are
+ * kept. The target is finance-only (FinanceGate) and re-checked on the server.
+ */
+export default function OldPaymentsPage() {
+  const router = useRouter();
+  useEffect(() => {
+    router.replace(`${PAYMENTS_PATH}${window.location.search}${window.location.hash}`);
+  }, [router]);
+
   return (
-    <FinanceGate>
-      <Suspense fallback={<Spinner />}>
-        <PaymentsView />
-      </Suspense>
-    </FinanceGate>
+    <div className="flex min-h-[50dvh] items-center justify-center">
+      <Loader2 aria-hidden className="h-6 w-6 animate-spin text-primary" />
+    </div>
   );
 }

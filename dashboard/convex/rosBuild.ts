@@ -620,10 +620,15 @@ export function assembleStatement(data: BuildData, isDraft = true): BuiltStateme
 
     // ledger rows: entered by hand, and rent payments from the Payments page (source rent_payment,
     // dated the day received: cash basis). Rent is no longer prefilled from the roster (2026-11-12).
+    /** Rent payments received before the first statement month and still left off (RENT_PAYMENT_BEFORE_START). */
+    const rentOff: { unit: string | null; date: string; id: string }[] = [];
     for (const e of pd.entries) {
       if (e.propertyId !== pid || e.statementId !== undefined || e.voided === true) continue;
       if (e.ownerId !== st.ownerId || e.date > st.periodEnd) continue;
       const unitLabel = e.unitId !== undefined ? (unitLabelOf.get(e.unitId) ?? null) : null;
+      if (e.source === "rent_payment" && e.date < floorDate && !putBack.has(`entry:${e._id}`)) {
+        rentOff.push({ unit: unitLabel, date: e.date, id: e._id });
+      }
       take(
         entryToCalcRow(e, unitLabel),
         {
@@ -636,6 +641,16 @@ export function assembleStatement(data: BuildData, isDraft = true): BuiltStateme
         },
         e.date < floorDate ? MSG.ENTRY_BEFORE_START_NOTE : undefined,
       );
+    }
+
+    if (rentOff.length > 0) {
+      rentOff.sort((a, b) => cmpStr(a.date, b.date) || cmpStr(a.unit ?? "", b.unit ?? "") || cmpStr(a.id, b.id));
+      dbWarnings.push({
+        code: "RENT_PAYMENT_BEFORE_START",
+        propertyId: pid,
+        message: MSG.RENT_PAYMENT_BEFORE_START(rentOff, name, firstMonth),
+        blocking: false,
+      });
     }
 
     // "No rent marked received" (info only): units whose rent can be marked (rentPaymentsPolicy

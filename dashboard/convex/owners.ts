@@ -224,6 +224,8 @@ export const list = query({
         propertyCount: mine.length,
         coOwnedPropertyNames,
         problems,
+        /** Every linked property's name (the Owners list search matches them). */
+        propertyNames: await Promise.all(mine.map((l) => nameOf(l.propertyId))),
       });
     }
     rows.sort((a, b) => naturalCompare(a.legalName, b.legalName) || cmpStr(a._id, b._id));

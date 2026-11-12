@@ -39,7 +39,7 @@ export function paymentsPageHref(l: { rentForMonth?: string; propertyId?: string
   if (l.rentForMonth) q.set("month", l.rentForMonth);
   if (l.propertyId) q.set("property", l.propertyId);
   const s = q.toString();
-  return s ? `/owner-statements/payments?${s}` : "/owner-statements/payments";
+  return s ? `/payments?${s}` : "/payments";
 }
 
 /** Edit is offered on a hand-entered draft row, but not on Rent Income (rent goes on the Payments page). */

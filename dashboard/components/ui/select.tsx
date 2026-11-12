@@ -46,6 +46,8 @@ type CoreProps = {
   "aria-label"?: string;
   "aria-labelledby"?: string;
   "aria-describedby"?: string;
+  /** Set when the field is in error (forms mark it with a red border and a message too). */
+  "aria-invalid"?: boolean;
 };
 
 /**
@@ -216,6 +218,7 @@ export function Listbox({
         aria-label={aria["aria-label"]}
         aria-labelledby={aria["aria-labelledby"]}
         aria-describedby={aria["aria-describedby"]}
+        aria-invalid={aria["aria-invalid"] || undefined}
         disabled={disabled}
         onClick={() => (open ? close() : openMenu())}
         onKeyDown={onKeyDown}
@@ -350,6 +353,7 @@ export function Select({
   "aria-label": ariaLabel,
   "aria-labelledby": ariaLabelledby,
   "aria-describedby": ariaDescribedby,
+  "aria-invalid": ariaInvalid,
 }: {
   value?: string | number;
   defaultValue?: string | number;
@@ -365,6 +369,7 @@ export function Select({
   "aria-label"?: string;
   "aria-labelledby"?: string;
   "aria-describedby"?: string;
+  "aria-invalid"?: boolean;
 }) {
   const options = parseOptions(children);
   const [inner, setInner] = useState(String(defaultValue ?? options.find((o) => !o.group)?.value ?? ""));
@@ -382,6 +387,7 @@ export function Select({
       aria-label={ariaLabel}
       aria-labelledby={ariaLabelledby}
       aria-describedby={ariaDescribedby}
+      aria-invalid={ariaInvalid}
       onValueChange={(v) => {
         if (value === undefined) setInner(v);
         const target = { value: v, name: name ?? "", id: id ?? "" };

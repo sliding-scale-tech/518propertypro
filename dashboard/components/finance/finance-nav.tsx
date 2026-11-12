@@ -7,15 +7,15 @@ import { Seg } from "@/components/ui";
 
 /**
  * Owner-statement (finance) section chrome: the admin/accountant gate and the Seg sub-nav
- * (Statements · Payments · Ledger · Owners · Accounts), spec 6.1. The gate only hides the pages; every
- * finance query and mutation re-checks access on the server (requireFinance).
+ * (Statements · Ledger · Owners · Accounts), spec 6.1. Payments is its own page (Finance → Payments,
+ * /payments) without this sub-nav. The gate only hides the pages; every finance query and mutation
+ * re-checks access on the server (requireFinance).
  */
 
-export type FinanceSection = "statements" | "payments" | "ledger" | "owners" | "accounts";
+export type FinanceSection = "statements" | "ledger" | "owners" | "accounts";
 
 const HREF: Record<FinanceSection, string> = {
   statements: "/owner-statements",
-  payments: "/owner-statements/payments",
   ledger: "/owner-statements/ledger",
   owners: "/owner-statements/owners",
   accounts: "/owner-statements/accounts",
@@ -33,7 +33,6 @@ export function FinanceNav({ active }: { active: FinanceSection }) {
         }}
         options={[
           { value: "statements", label: "Statements" },
-          { value: "payments", label: "Payments" },
           { value: "ledger", label: "Ledger" },
           { value: "owners", label: "Owners" },
           { value: "accounts", label: "Accounts" },

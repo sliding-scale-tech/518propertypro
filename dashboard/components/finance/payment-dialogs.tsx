@@ -9,6 +9,7 @@ import {
   PAYMENT_METHODS,
   PAYMENT_METHOD_LABELS,
   RENT_PAY_MSG,
+  landsOnText,
   validatePaymentFields,
   validatePaymentFieldsAll,
 } from "@/convex/rentPaymentsPolicy";
@@ -70,7 +71,7 @@ function MethodSelect({
   id: string;
   value: string;
   onChange: (v: string) => void;
-  control: { "aria-describedby"?: string; className?: string };
+  control: { "aria-invalid"?: boolean; "aria-describedby"?: string; className?: string };
 }) {
   return (
     <Select
@@ -78,6 +79,7 @@ function MethodSelect({
       value={value}
       placeholder="Select how it was paid"
       onChange={(e) => onChange(e.target.value || "")}
+      aria-invalid={control["aria-invalid"]}
       aria-describedby={control["aria-describedby"]}
       className={control.className}
     >
@@ -93,6 +95,16 @@ function MethodSelect({
 
 function dateHint(earliest: string): string {
   return `From ${formatDate(earliest)} to today. It goes on the statement for the month it was received, whatever month the rent is for.`;
+}
+
+/** Under the date: which statement the payment lands on (cash basis: the month it was received). */
+function LandsOn({ receivedDate }: { receivedDate: string }) {
+  const text = landsOnText(receivedDate);
+  return text ? (
+    <p className="mt-1 text-[12.5px] font-medium text-foreground" aria-live="polite">
+      {text}
+    </p>
+  ) : null;
 }
 
 /** Mark one unit's rent received (rentPayments.markReceived). */
@@ -170,6 +182,7 @@ export function MarkDialog({
             aria-label="Date the rent was received"
           />
           {f.message("receivedDate")}
+          <LandsOn receivedDate={receivedDate} />
         </Field>
         <Field label="Paid by *" htmlFor={ids.method}>
           <MethodSelect
@@ -332,6 +345,7 @@ export function BulkMarkDialog({
             aria-label="Date the rent was received"
           />
           {f.message("receivedDate")}
+          <LandsOn receivedDate={receivedDate} />
         </Field>
         <Field label="Paid by *" htmlFor={ids.method}>
           <MethodSelect
@@ -439,6 +453,7 @@ export function EditPaymentDialog({
             aria-label="Date the rent was received"
           />
           {f.message("receivedDate")}
+          <LandsOn receivedDate={receivedDate} />
         </Field>
         <Field label="Paid by *" htmlFor={ids.method}>
           <MethodSelect
