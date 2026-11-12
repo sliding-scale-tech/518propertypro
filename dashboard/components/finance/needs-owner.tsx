@@ -483,7 +483,7 @@ function CreateOwnerDialog({ row, onClose }: { row: PropertyRow; onClose: () => 
     setBusy(true);
     try {
       await create({ propertyId: row.propertyId, legalName, emails });
-      toast.success(`Owner created and linked to ${row.propertyName}. Set the management fee on the owner before a statement.`);
+      toast.success(`Owner created and linked to ${row.propertyName}. It uses the default management fee unless a property has its own.`);
       onClose();
     } catch (e) {
       f.fromServer(e);

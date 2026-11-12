@@ -9,6 +9,7 @@ import { MAX_AMOUNT_CENTS, formatBps, formatCurrency, parseDollarsToCents, parse
 import { Btn, Card, CardHead, Field } from "@/components/ui";
 import { toast } from "@/components/ui/toast";
 import { MoneyInput, centsToInput, useFieldErrors } from "./form-bits";
+import { ANCHOR } from "./warning-links";
 
 /** Exact server messages (ownerStatements.setAdjustments, spec 5.4). */
 const MSG = {
@@ -162,7 +163,10 @@ function PropertyAdjustments({
           <div className="flex flex-wrap items-baseline gap-2 py-2 text-[13.5px]">
             <span className="tabular-nums">{formatCurrency(p.securityDepositsCents)}</span>
             {!readOnly ? (
-              <Link href={`/owner-statements/owners/${ownerId}`} className="text-[12.5px] font-medium text-primary hover:underline">
+              <Link
+                href={`/owner-statements/owners/${encodeURIComponent(ownerId)}#${ANCHOR.deposits(p.propertyId)}`}
+                className="text-[12.5px] font-medium text-primary hover:underline"
+              >
                 Edit deposits
               </Link>
             ) : null}
@@ -171,11 +175,15 @@ function PropertyAdjustments({
         <Field label="Management fee">
           <div className="flex flex-wrap items-baseline gap-2 py-2 text-[13.5px]">
             <span className="tabular-nums">
-              {p.fee.bps === null ? "Not set" : `${formatBps(p.fee.bps)}%`}
+              {/* Every property has a fee (own ?? org default); null only in rosCalc's guard path. */}
+              {p.fee.bps !== null ? `${formatBps(p.fee.bps)}%` : null}
               {p.feeSource === "own" ? " (own fee)" : p.feeSource === "default" ? " (default)" : ""}
             </span>
             {!readOnly ? (
-              <Link href={`/owner-statements/owners/${ownerId}`} className="text-[12.5px] font-medium text-primary hover:underline">
+              <Link
+                href={`/owner-statements/owners/${encodeURIComponent(ownerId)}#${ANCHOR.property(p.propertyId)}`}
+                className="text-[12.5px] font-medium text-primary hover:underline"
+              >
                 Change fee
               </Link>
             ) : null}

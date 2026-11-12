@@ -1062,7 +1062,8 @@ export const mergePreview = query({
 /**
  * Merge owner `mergeOwnerId` into `keepOwnerId`: its property links move to the kept owner (a
  * property linked to both keeps the kept owner's link), the emails are unioned, the kept owner's
- * fee and payee stay, and the merged owner is turned off and marked merged. Refused while either
+ * payee stays (per-property fee settings stay on each link), and the merged owner is turned off
+ * and marked merged. Refused while either
  * owner has a final statement or an open draft, while the merged owner has ledger rows, or when
  * the fee / payee / shared link settings differ (mergeProblem).
  */

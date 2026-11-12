@@ -17,6 +17,11 @@ const ACTION_LABEL: Record<string, string> = {
   finalized: "Finalized",
   discarded: "Draft discarded",
   pdf_downloaded: "PDF downloaded",
+  rent_checked: "Confirmed the rent lines",
+  rent_unchecked: "Unticked the rent confirmation",
+  rent_check_cleared: "Rent confirmation cleared by a change",
+  rent_line_changed: "Edited a rent line",
+  rent_line_reset: "Reset a rent line to the roster",
 };
 
 function describe(r: { action: string; note: string | null }): string {

@@ -137,7 +137,7 @@ export function LedgerView() {
     <div className="pb-10">
       <PageHeader
         title="Ledger"
-        subtitle="Every owner transaction: rent and other rows entered by hand, plus work orders, fees and draws once a statement is final."
+        subtitle="Every owner transaction: rent and other rows entered by hand, plus roster rent, work orders, fees and draws once a statement is final."
         actions={
           <Btn variant="pri" onClick={() => setDialog({ kind: "add" })}>
             <Plus aria-hidden className="h-4 w-4" /> Add transaction

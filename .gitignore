@@ -21,3 +21,7 @@ next-env.d.ts
 # captures raw server output - hostnames, paths, container internals - and any secret that
 # leaks into a command result would be committed along with it.
 server_upload_check.txt
+
+# Sensitive business documents (tax ID, registration papers)
+EIN.pdf
+**/EIN.pdf

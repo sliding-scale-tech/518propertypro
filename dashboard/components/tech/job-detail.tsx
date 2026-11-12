@@ -293,7 +293,18 @@ function JobBody({ id }: { id: Id<"workOrders"> }) {
       setJustSubmitted(true);
       go("submitted");
     } catch (e) {
-      setSubmitError(errorMessage(e));
+      const msg = errorMessage(e);
+      setSubmitError(msg);
+      // The server's own description checks (e.g. a cached older client): mark the field too.
+      const descErr = /a description of the work completed/.test(msg)
+        ? "Describe the work you completed."
+        : msg === "Keep the description under 2,000 characters."
+          ? msg
+          : null;
+      if (descErr) {
+        setErr("workDesc", descErr);
+        document.getElementById("work-desc")?.focus();
+      }
     } finally {
       setBusy(null);
     }
