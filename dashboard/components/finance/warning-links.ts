@@ -9,10 +9,9 @@ export const ANCHOR = {
   opening: (propertyId: string): string => `property-${propertyId}-opening`,
   startMonth: (propertyId: string): string => `property-${propertyId}-start`,
   deposits: (propertyId: string): string => `property-${propertyId}-deposits`,
-  confirmRent: "confirm-rent",
 } as const;
 
-export type WarningLinkInput = { code: string; message: string; propertyId?: string; workOrderId?: string };
+export type WarningLinkInput = { code: string; message: string; propertyId?: string; workOrderId?: string; rentMonth?: string };
 
 export type WarningTarget =
   /** Another page; `href` may end in `#<anchor>`. */
@@ -47,8 +46,15 @@ export function warningTarget(w: WarningLinkInput, ownerId: string): WarningTarg
       const wo = /\bWO-\d+\b/.exec(w.message)?.[0] ?? "work order";
       return { kind: "href", href: `/work-orders/${encodeURIComponent(w.workOrderId)}`, label: `Open ${wo} →` };
     }
-    case "RENT_NOT_CHECKED":
-      return { kind: "scroll", anchor: ANCHOR.confirmRent, label: "Confirm rent →" };
+    case "RENT_UNPAID":
+      // The Payments page for that rent month and this owner, showing the units still unpaid.
+      return w.rentMonth
+        ? {
+            kind: "href",
+            href: `/owner-statements/payments?month=${encodeURIComponent(w.rentMonth)}&owner=${encodeURIComponent(ownerId)}&status=unpaid`,
+            label: "Open Payments page →",
+          }
+        : null;
     default:
       return null;
   }

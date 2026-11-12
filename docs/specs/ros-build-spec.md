@@ -44,7 +44,7 @@ Work orders (office close: Bill $, account, description, property-level flag)
 - The ledger (`ledgerEntries`) is the record of money. A statement is computed from ledger rows plus the draft's not-yet-written rows (work orders, fee, draw). Nothing on the summary or income-statement pages is typed in, except four per-property adjustment inputs (early payments, unpaid bills, property reserve, and the security deposits held per unit).
 - Before finalize, work-order, fee and draw rows exist only as computed lines. At finalize they are written to the ledger, and each ledger row gets the statement's id. A row that has a `statementId` is "billed" and can never change.
 - "Remove" a line = exclude it from this statement. The source work order or ledger row is untouched and comes back on the next draft (carry-forward).
-- Rent is prefilled on every draft from the roster rent of each occupied unit (`units.rent`, until Stripe). The accountant edits, removes ("didn't pay") or adds rows, then confirms the rent lines once before finalizing (section 5.4.1).
+- Rent comes ONLY from the **Payments page** (5.9, 6.8, as built 2026-11-12): the accountant marks each unit's rent received per rent month (always the full roster rent, no partial payments); each payment is a Rent Income ledger row dated the day it was received (cash basis, like Buildium), so it lands on that month's statement. The roster-rent prefill (5.4.1) was removed.
 - The management fee % is not per owner: it is one org default (5.00% until changed) with an optional own % per property (3.3, 5.2).
 - Owners are identified by name AND email together; the property page's owner name and email link or create the owner automatically only when that is certain (5.2).
 - A final statement is immutable. It is stored as a snapshot, and its period is locked for its properties. Corrections go in as rows in a later month.
@@ -103,7 +103,7 @@ export const rowTypeValidator = v.union(
 );
 export const ledgerSourceValidator = v.union(
   v.literal("manual"), v.literal("work_order"), v.literal("management_fee"),
-  v.literal("owner_draw"), v.literal("opening_balance"), v.literal("stripe"), v.literal("roster_rent"),
+  v.literal("owner_draw"), v.literal("opening_balance"), v.literal("stripe"), v.literal("roster_rent"), v.literal("rent_payment"),
 );
 export const accountSystemKeyValidator = v.union(
   v.literal("rent_income"), v.literal("management_fees"), v.literal("owner_draw"),
@@ -112,7 +112,7 @@ export const accountSystemKeyValidator = v.union(
 export const statementStatusValidator = v.union(v.literal("draft"), v.literal("final"), v.literal("discarded"));
 ```
 
-`opening_balance` and `stripe` are reserved: v1 never writes them (the opening balance is a setting, see 3.3). `roster_rent` (as built) is a Rent Income row prefilled from the roster rent and written only at finalize, with `sourceId` = `<statementId>:<unitId>` (5.4.1). `stripe` is for the B25 rent feed: such a row has `source: "stripe"`, `sourceId` = the Stripe payment id, type `income`, account Rent Income and memo `by {tenant}`, and it needs no other change.
+`opening_balance` and `stripe` are reserved: v1 never writes them (the opening balance is a setting, see 3.3). `roster_rent` is DEPRECATED (2026-11-12): it was a Rent Income row prefilled from the roster rent and written only at finalize (`sourceId` = `<statementId>:<unitId>`, 5.4.1); it is no longer written, and the literal stays so historical rows remain valid. `rent_payment` (as built 2026-11-12) is rent marked received on the Payments page (5.9). `stripe` is for the B25 rent feed: such a row has `source: "stripe"`, `sourceId` = the Stripe payment id, type `income`, account Rent Income and memo `by {tenant}`, and it needs no other change. `paymentMethodValidator` = `"cash" | "check" | "money_order" | "other"`.
 
 ### 3.2 `owners` (new)
 
@@ -243,13 +243,16 @@ ledgerEntries: defineTable({
   memo: v.string(),
   amountCents: v.number(),               // integer > 0; direction comes from type
   source: ledgerSourceValidator,
-  sourceId: v.optional(v.string()),      // WO id; "<statementId>:<propertyId>" for fee/draw; "<statementId>:<unitId>" for roster_rent; Stripe id later
+  sourceId: v.optional(v.string()),      // WO id; "<statementId>:<propertyId>" for fee/draw; "<statementId>:<unitId>" for (historical) roster_rent; none for rent_payment; Stripe id later
   statementId: v.optional(v.id("ownerStatements")), // set = billed on that FINAL statement -> immutable
   voided: v.optional(v.boolean()),
   voidedAt: v.optional(v.number()),
   voidedBy: v.optional(v.id("users")),
   voidReason: v.optional(v.string()),
   postedDate: v.optional(v.string()),    // set at finalize on EVERY billed row: the date it shows on the statement (a carried-forward row posts on the period's first day). `date` keeps the original date. Unbilled rows have none.
+  rentForMonth: v.optional(v.string()),  // rent_payment only: the month the rent is for ("YYYY-MM"); `date` = the day it was received
+  paymentMethod: v.optional(paymentMethodValidator), // rent_payment only
+  paymentNote: v.optional(v.string()),   // rent_payment only, <= 200 chars (e.g. a check number)
   createdBy: v.optional(v.id("users")),  // absent = system (finalize)
   createdAt: v.number(),
   updatedAt: v.number(),
@@ -261,12 +264,16 @@ ledgerEntries: defineTable({
   .index("by_org_and_date", ["orgId", "date"])
   .index("by_account", ["accountId"])
   .index("by_owner_and_posted", ["ownerId", "postedDate"])
-  .index("by_org_and_posted", ["orgId", "postedDate"]),
+  .index("by_org_and_posted", ["orgId", "postedDate"])
+  .index("by_unit_and_rent_month", ["unitId", "rentForMonth"]) // one payment per unit per rent month (5.9)
+  .index("by_org_and_rent_month", ["orgId", "rentForMonth"])   // the Payments page for a month
+  .index("by_unit_and_date", ["unitId", "date"]),              // rent entered by hand, by date (5.9) and RENT_UNPAID
 ```
 
 - `date` = the original business date; `postedDate` = the effective date on the statement. At finalize, every row written or stamped (work-order rows, fee, draw, and manual rows) gets `postedDate` = the line's effective date (`max(date, periodStart)`, ASSUMPTION A20). The ledger list (`ledger.list`, month filter) shows and filters by `postedDate ?? date` (`rosPolicy.ledgerRowInMonth`) and shows the original date when it differs. The `by_owner_and_posted` / `by_org_and_posted` indexes serve that month filter.
 
-- `source: "roster_rent"` rows (as built) are written **only at finalize**, one per included roster-rent line: type `income`, account Rent Income, a unit, `date` = the line's date (inside the period), `postedDate` = the same, `statementId` set. They are never editable in the ledger (the ledger's Edit / Void is for `manual` rows only). The `by_source ("roster_rent", sourceId)` check makes a second write impossible (5.4.1).
+- `source: "roster_rent"` rows (historical, no longer written since 2026-11-12) were written **only at finalize**, one per included roster-rent line: type `income`, account Rent Income, a unit, `date` = the line's date (inside the period), `postedDate` = the same, `statementId` set. They are never editable in the ledger (the ledger's Edit / Void is for `manual` rows only).
+- `source: "rent_payment"` rows (5.9) are written by the Payments page: unbilled until the statement covering their received date is finalized, when they are stamped like manual rows (`statementId`, `postedDate`). They are never editable in the ledger (Edit / Delete there are for `manual` rows only); they are changed or undone on the Payments page.
 - Unbilled rows for a property up to the period end: `withIndex("by_property_statement_date", q => q.eq("propertyId", p).eq("statementId", undefined).lte("date", periodEnd))`, then keep only rows that are not voided and whose `ownerId` matches.
 - Rows are never hard-deleted. Voiding is allowed only for unbilled `manual` rows, whatever their date: a row dated in a month that is already final was never on that statement (it carries forward), so voiding it changes no final statement.
 
@@ -281,7 +288,7 @@ ownerStatements: defineTable({
   periodEnd: v.string(),                     // last day of month
   propertyIds: v.array(v.id("properties")),  // column order (sorted at create, 4.4)
   status: statementStatusValidator,
-  excludedKeys: v.array(v.string()),         // "entry:<ledgerEntryId>" | "wo:<workOrderId>" | "rent:<unitId>"
+  excludedKeys: v.array(v.string()),         // "entry:<ledgerEntryId>" | "wo:<workOrderId>" ("rent:<unitId>" only on old drafts; ignored since 2026-11-12)
   includedKeys: v.optional(v.array(v.string())), // same key format: lines that are excluded BY DEFAULT (dated before the owner's first statement month, see 5.4) and that the accountant put back on
   adjustments: v.array(v.object({
     propertyId: v.id("properties"),
@@ -297,14 +304,14 @@ ownerStatements: defineTable({
     drawAmountCents: v.optional(v.number()), // undefined = suggested
     drawExcluded: v.optional(v.boolean()),
   })),
-  rentOverrides: v.optional(v.array(v.object({  // roster-rent prefill (5.4.1): the accountant's edits to a unit's prefilled rent line, key "rent:<unitId>". A field left out = the roster value. Removing a line uses excludedKeys.
+  rentOverrides: v.optional(v.array(v.object({  // DEPRECATED 2026-11-12, no longer read or written. Was: roster-rent prefill (5.4.1): the accountant's edits to a unit's prefilled rent line, key "rent:<unitId>". A field left out = the roster value. Removing a line uses excludedKeys.
     unitId: v.id("units"),
     amountCents: v.optional(v.number()),     // integer > 0
     date: v.optional(v.string()),            // YYYY-MM-DD inside the period
     counterparty: v.optional(v.string()),
     memo: v.optional(v.string()),
   }))),
-  rentCheckedAt: v.optional(v.number()),     // "I've checked the rent lines" (5.4.1); valid only while rentCheckedHash equals the current fingerprint of the rent lines
+  rentCheckedAt: v.optional(v.number()),     // DEPRECATED 2026-11-12, no longer read or written. Was: "I've checked the rent lines" (5.4.1); valid only while rentCheckedHash equals the current fingerprint of the rent lines
   rentCheckedBy: v.optional(v.id("users")),
   rentCheckedHash: v.optional(v.string()),
   statementDate: v.optional(v.string()),     // set at finalize (business date)
@@ -469,7 +476,7 @@ export type CalcRow = {
   counterparty: string;
   memo: string;
   amountCents: number;        // integer > 0
-  source: "manual" | "work_order" | "management_fee" | "owner_draw" | "opening_balance" | "stripe" | "roster_rent";
+  source: "manual" | "work_order" | "management_fee" | "owner_draw" | "opening_balance" | "stripe" | "roster_rent" | "rent_payment";
   seq: number;                // final tie-break: entry createdAt, or WO completedAt (ms)
 };
 
@@ -713,7 +720,7 @@ export function validateBillingFields(input: BillingFieldsRaw): { ok: true; valu
 export function validateOwnerFields(input: OwnerFieldsRaw): { ok: true; value: OwnerFields } | { ok: false; field: string; message: string };
 //   as built: no management fee field (the fee is per property, see below). mode "create" | "update"; `nameTaken` is passed by the server.
 
-// --- roster rent prefill (as built, 5.4.1) ---
+// --- roster rent prefill (as built, 5.4.1; the prefill was REMOVED 2026-11-12, rosterRentToCents / rosterSaysVacant / rentCounterparty are still used by rentPaymentsPolicy.ts, 5.9) ---
 export const ROSTER_RENT_MEMO = "Payment";  export const ROSTER_RENT_LABEL = "Roster rent";
 /** Roster rent (DOLLARS, a JS number) to integer cents with no float drift, or null when it isn't a clean dollar amount:
  *  not finite, <= 0, more than 2 decimals, text form not plain digits (1e-3, 1e21, 950.875 refused), or over MAX_AMOUNT_CENTS. */
@@ -886,7 +893,7 @@ Audit (entity `ledger_entry`, entityId = entry id):
 
 `type` is always set from the account's `kind`.
 
-**Rent confirmation hook (as built).** When a Rent Income row (account `systemKey "rent_income"`) is added, edited (to or from Rent Income) or voided, every open draft that holds the property has its rent confirmation cleared (`ownerStatements.clearRentCheckForProperty`, audit `rent_check_cleared`), because the rent lines changed (5.4.1). The ledger list labels a `roster_rent` row's source "Roster rent".
+**Rent Income is not entered here (2026-11-12).** `validateEntryFields` refuses an account with `systemKey "rent_income"` on add and on edit (field `accountId`): "Record rent on the Payments page." Other income accounts are allowed. Rent Income rows entered by hand before this stay valid, go on statements as before, show on the Payments page as Paid ("Entered in the ledger", 5.9) and can still be deleted (voided) here; the Ledger and statement pages offer no Edit on them. The old rent-confirmation hook (`clearRentCheckForProperty`) was removed. The ledger list labels a `roster_rent` row's source "Roster rent" and a `rent_payment` row's "Payments page" (with a link to the Payments page for its rent month); `ledger.list` rows carry `onRentAccount` and `rentForMonth`.
 
 ### 5.4 `convex/ownerStatements.ts` (WP2)
 
@@ -897,8 +904,8 @@ Audit (entity `ledger_entry`, entityId = entry id):
 | `createDraft` mutation | `{ ownerId?, month?, propertyIds?: string[] }` | `{ statementId }` |
 | `get` query | `{ statementId }` | see below |
 | `excludeLine` / `includeLine` mutation | `{ statementId?, key? }` | `null` (a repeated call that finds the line already in the requested state is a no-op). The key is `entry:`, `wo:` or `rent:` + id. |
-| `setRentLine` mutation | `{ statementId?, unitId?, amountCents?, date?, counterparty?, memo?, reset?: boolean }` | `null` (5.4.1) |
-| `confirmRent` mutation | `{ statementId?, checked?: boolean, expectedRentHash?: string }` | `null` (5.4.1) |
+| `setRentLine` mutation | `{ statementId?, unitId?, amountCents?, date?, counterparty?, memo?, reset?: boolean }` | DEPRECATED 2026-11-12: always refuses with "Rent is recorded on the Payments page." (kept for older clients) |
+| `confirmRent` mutation | `{ statementId?, checked?: boolean, expectedRentHash?: string }` | DEPRECATED 2026-11-12: always refuses with "Rent is recorded on the Payments page." |
 | `setAdjustments` mutation | `{ statementId?, propertyId?, earlyPaymentsCents?, unpaidBillsCents?, propertyReserveCents? }` | `null` |
 | `setGenerated` mutation | `{ statementId?, propertyId?, kind?: "fee"|"draw", amountCents?: number|null, memo?: string|null, excluded?: boolean }` | `null` (amountCents null = back to computed; memo null = standard memo) |
 | `finalize` mutation | `{ statementId?, expectedEndingCents?: number, expectedAvailableCents?: number, expectedHash?: string }` | `{ statementId }` (`expectedHash` = the `previewHash` the user reviewed, optional; see step 4) |
@@ -922,20 +929,22 @@ Audit (entity `ledger_entry`, entityId = entry id):
                  feeSource: "own" | "default" | null,   // where fee.bps comes from; null on a final (the % is the one frozen in its snapshot)
                  fee: ..., draw: ... /* from result.generated; fee.bps = this property's % */ }],
   rent: { lineCount, hash: string|null, checked: boolean, checkedAt: number|null, checkedByName: string|null,
-          skipped: { propertyId, propertyName, unitId, unit, code, reason }[] },   // roster-rent prefill state (5.4.1); draft: live, final: from the stored confirmation (skipped = [])
-  warnings: { blocking: { code, message, workOrderId? }[], info: { code, message, workOrderId? }[] },  // workOrderId on single-WO warnings (WO_MISSING_BILL, WO_AWAITING_REVIEW, WO_BEFORE_START*), so the UI links to the work order
+          skipped: { propertyId, propertyName, unitId, unit, code, reason }[] },   // DEPRECATED 2026-11-12, kept for older clients: a draft always returns lineCount 0, hash null, checked false, skipped []; a final keeps lineCount of its historical roster-rent lines and its stored confirmation
+  warnings: { blocking: { code, message, workOrderId?, rentMonth? }[], info: { code, message, workOrderId?, rentMonth? }[] },  // rentMonth on RENT_UNPAID (link to the Payments page)  // workOrderId on single-WO warnings (WO_MISSING_BILL, WO_AWAITING_REVIEW, WO_BEFORE_START*), so the UI links to the work order
   canFinalize: boolean,                    // draft && blocking.length === 0 && the period has ended (finalizeProblem === null)
   previewHash: string,                     // resultHash(result): fingerprint of everything the statement shows (columns, summary, income statement, detail, generated fee/draw), not the warnings. The Finalize dialog freezes it (see 6.3).
 }
 type LineView = {
-  key: string; kind: "entry" | "wo" | "fee" | "draw" | "rent";   // "rent" = a roster-rent line, key "rent:<unitId>"
+  key: string; kind: "entry" | "wo" | "fee" | "draw" | "rent";   // "rent" = a historical roster-rent line (finals before 2026-11-12 only), key "rent:<unitId>"
   side: "addition" | "subtraction";
   date: string; storedDate: string; carriedForward: boolean;
   propertyId: string; propertyName: string; unit: string; accountId: string; accountName: string;
   name: string; counterparty: string; memo: string; amountCents: number;
-  sourceLabel: string;   // "Manual" | "WO-2051" | "Roster rent" | "Management fee (auto)" | "Owner draw (suggested)" | "Owner draw (edited)" | "Management fee (edited)"
+  sourceLabel: string;   // "Manual" | "Payments page" (rent_payment) | "WO-2051" | "Roster rent" (historical) | "Management fee (auto)" | "Owner draw (suggested)" | "Owner draw (edited)" | "Management fee (edited)"
   entryId?: string; workOrderId?: string; unitId?: string | null; billPropertyLevel?: boolean;
-  rentDefault?: { amountCents, date, counterparty, memo }; rentEdited?: boolean;   // roster-rent lines only: the roster values ("Reset to roster") and whether the accountant changed any
+  rentForMonth?: string;   // rent payments (source rent_payment): the month the rent is for (the "Edit on Payments page" link)
+  onRentAccount?: boolean; // an entry line on the Rent Income account: no Edit on the statement (rent is changed on the Payments page)
+  // (rentDefault / rentEdited were removed with the roster-rent prefill, 2026-11-12)
   editable: boolean;     // draft && (entry unbilled manual | wo | rent | fee | draw)
   defaultExcluded?: boolean; // true = dated before the owner's first statement month: left off by default (in excludedLines) until the accountant includes it
   note?: string;             // why it is excluded by default (MSG.BEFORE_START_NOTE / ENTRY_BEFORE_START_NOTE, see 5.8)
@@ -958,7 +967,7 @@ type LineView = {
    - **first statement month floor:** `floorDate = monthStart(link.startMonth ?? statement month)`. If `link.startMonth` is set and is **after** the statement's month: blocking `START_MONTH_AFTER` ("Discard this draft, then check the first statement month."). Rows dated before the floor are not dropped, they are **excluded by default** (see "Manual rows" and "Work orders" below).
    - **reserve:** `adjustment.propertyReserveCents ?? link.propertyReserveCents ?? 0`. Early payments and unpaid bills come from `adjustments` (default 0). Pending ePay is 0.
    - **Fee:** `effectiveFee(link.managementFeeBps, org default)`: the link's own % if it has one, else `financeSettings.rosDefaultFeeBps` (500 when absent). It goes into the engine as `feeBps` for that property (4.2); `feeSource` = "own" / "default".
-   - **Roster rent:** one Rent Income line per occupied unit (5.4.1).
+   - **Rent:** no longer prefilled (5.4.1 removed). Rent payments from the Payments page are ledger rows (source `rent_payment`) and come in with the manual rows below; their LineView carries `rentForMonth`, `editable: false` and `onRentAccount: true`. **RENT_UNPAID (info):** for the rent months `unpaidCheckMonths(month, link.startMonth)` (the statement month and up to two before it, never before the first statement month), every unit whose rent can be marked (`rentMarkability`) with neither a rent payment for that month nor a Rent Income row dated in it is counted; one info warning per rent month (oldest first), with `rentMonth` so the UI links to the Payments page (5.9). The loader reads those rows per unit (`by_unit_and_rent_month`, `by_unit_and_date`) into `rentRecords`.
    - **Manual rows:** unbilled, not voided, `ownerId` = this owner, `date <= periodEnd`. Key `entry:<id>`. `unitLabel` = the unit's `unitNumber` or null. `seq` = createdAt. A row with `date < floorDate` is **excluded by default** with the note `ENTRY_BEFORE_START_NOTE` (5.8); it appears under "Left off this statement" and goes on the statement only when the accountant includes it.
    - **Work orders:** loaded by `by_property_and_rosPending` (`rosPending = true`; plus the not-yet-backfilled fallback, 3.9) and `by_property_and_status` for `completed`, mapped to `WoForBilling` with `completedDate = businessDate(completedAt ?? closedAt ?? createdAt)`, then `selectWorkOrders(wos, periodEnd, floorDate)` with the `floorDate` above (ASSUMPTION A9). Each billable WO becomes a row. `beforeFloor` WOs (completed before the first statement month, they may already have been billed in Buildium) also become rows, **excluded by default** with the note `BEFORE_START_NOTE`; `WO_BEFORE_START` (info) is raised for those still left off, and `WO_BEFORE_START_MISSING_BILL` (info) for ones before the floor that have no bill amount, account or description (they are not on the statement and do not block it). Warnings for a single work order carry its `workOrderId`. Row fields:
      - key `wo:<id>`, date `completedDate`
@@ -1018,7 +1027,7 @@ Convex mutations are serializable, so two concurrent creates for the same proper
 **finalize (single transaction).** In order:
 1. `requireFinance`. Load the statement; it must be a draft ("This statement is already final." / "This statement was discarded.").
 2. `finalizeProblem(month, businessToday(now))` → for example `You can finalize September 2026 from 10/1/2026.`
-3. `buildStatement(ctx, st, { statementDate: businessToday(now) })`. If there are blocking warnings: `Can't finalize yet: ${first.message}` (+ ` (and ${n-1} more)` when n > 1). `RENT_NOT_CHECKED` is one of them while the rent lines are unconfirmed (5.4.1).
+3. `buildStatement(ctx, st, { statementDate: businessToday(now) })`. If there are blocking warnings: `Can't finalize yet: ${first.message}` (+ ` (and ${n-1} more)` when n > 1). (`RENT_NOT_CHECKED` no longer exists; RENT_UNPAID is info only and never blocks.)
 4. Staleness guard: if `expectedEndingCents !== result.summary.ending.total || expectedAvailableCents !== result.summary.available.total`, or `expectedHash` is given and differs from `resultHash(result)` → "The statement changed while you were reviewing it. Check the new totals and finalize again." (The UI sends the figures and hash it **froze when the Finalize dialog opened**, never the live ones; see 6.3 and `components/finance/finalize-guard.ts`.)
 5. For each WO line:
    - Re-read the WO. If `billedStatementId` is set, or a `ledgerEntries` row exists `by_source ("work_order", woId)` → `WO-${n} was already billed on another statement. Refresh and check this statement.`
@@ -1032,7 +1041,7 @@ Convex mutations are serializable, so two concurrent creates for the same proper
 6. For each fee and draw line, insert a ledger row:
    - `source "management_fee" | "owner_draw"`, `sourceId = ${statementId}:${propertyId}` (check `by_source` first; if one exists, throw "This statement was already finalized.")
    - type `expense` / `owner_draw`, date `periodEnd`, `postedDate = periodEnd`, no unit
-6b. For each included roster-rent line (`finalizePlan` `rentRows`), insert one Rent Income ledger row: `source "roster_rent"`, `sourceId = ${statementId}:${unitId}` (check `by_source` first; if one exists, throw "This statement was already finalized."), the unit (it must still be a unit of that property, else "A transaction on this statement changed while you were reviewing it. Refresh and try again."), `date` and `postedDate` = the line's date, `statementId`. A removed line writes nothing.
+6b. (Removed 2026-11-12.) Roster-rent rows are no longer written. Rent payments are stamped in step 7 like manual rows (`statementId`, `postedDate`), so each is billed exactly once.
 7. For each manual line: re-read it. It must still be unbilled and not voided, else "A transaction on this statement changed while you were reviewing it. Refresh and try again." Patch `statementId` and `postedDate` = the line's effective date (`date` stays the original; the snapshot also holds the effective date).
 8. Build `StatementSnapshot` from the same result (`header.statementDate = today`, `footerName(owner)`, `payeeName`) and insert `ownerStatementSnapshots` (the snapshot is built and its size checked **before anything is written**; if the JSON is ≥ 900,000 **UTF-8 bytes** (`new TextEncoder().encode(json).length`, not string length): "This statement is too large to save. Split it into fewer properties.").
 9. Patch the statement:
@@ -1047,7 +1056,9 @@ Convex mutations are serializable, so two concurrent creates for the same proper
 - Audit `discarded`, note = reason.
 - Final statements cannot be discarded: "A final statement can't be discarded. Put corrections on next month's statement."
 
-#### 5.4.1 Roster rent prefill (as built, until Stripe)
+#### 5.4.1 Roster rent prefill (REMOVED 2026-11-12, replaced by the Payments page, 5.9)
+
+> **Removed.** Drafts no longer get roster-rent lines; `RENT_NOT_CHECKED`, `RENT_INVALID` and `RENT_ACCOUNT_MISSING` are no longer raised; `setRentLine` / `confirmRent` refuse with "Rent is recorded on the Payments page."; finalize writes no `roster_rent` row; the Rent dialog, the "Not prefilled from the roster" card and the Confirm rent checkbox are gone. `rosterRentToCents` and `rosterSaysVacant` are still used (by `rentPaymentsPolicy.rentMarkability`). Historical `roster_rent` rows and the deprecated statement fields stay valid. The text below is kept as the record of what was built.
 
 Until card payments are live, every draft is prefilled with the rent the roster says each occupied unit pays. The accountant checks it against what was actually received, fixes it, and confirms it once. Code: `rosPolicy.ts` (the pure rules), `rosBuild.ts` (the lines and the fingerprint), `ownerStatements.ts` (`setRentLine`, `confirmRent`).
 
@@ -1110,8 +1121,8 @@ Field messages (`RENT_MSG`; fields in this order):
 | At most one open draft per property | CREATE_OPEN_DRAFT, so an unbilled row or WO can only be in one draft |
 | A WO is billed at most once | `billedStatementId` + the `by_source` check at finalize + `selectWorkOrders` skips billed WOs |
 | Fee/draw written once per statement-property | `sourceId = statementId:propertyId` + the `by_source` check |
-| Roster rent written once per statement-unit | `sourceId = statementId:unitId` + the `by_source ("roster_rent", ...)` check; a unit with a Rent Income row dated in the period is not prefilled (`already_recorded`) |
-| Rent lines are confirmed before finalize, and only as reviewed | `RENT_NOT_CHECKED` + `rentCheckedHash` vs the live fingerprint + `confirmRent`'s `expectedRentHash` (5.4.1) |
+| A rent payment is recorded once per unit per rent month | `rentPaymentsLib.planMark`: a non-voided `rent_payment` for (unit, rentForMonth) via `by_unit_and_rent_month`, or a Rent Income row entered by hand dated in that month, refuses (inside the mutation, so concurrent marks can't both pass) |
+| A rent payment is billed once and frozen when final | it is an unbilled ledger row stamped at finalize (step 7); `paymentLock` refuses update / undo once billed or once its received month is final for the property |
 | Fee changes can't slip past a review | `previewHash` covers each property's fee % (4.2); a default-fee change is guarded by `expectedCounts` (5.2) |
 | Final is immutable | every draft mutation checks `status === "draft"`; `get` serves the snapshot |
 | Locked period | `entryDateProblem` (months <= `lockedThroughMonth` refuse add/edit), billed rows refuse edit/void, `workOrderBilling.updateBilling` refuses billed WOs |
@@ -1201,9 +1212,8 @@ Do not build any of this now. Leave a `// DELIVERY HOOK (Q8)` comment in `ownerS
 | DEPOSITS_NOT_SET | no | `No security deposits are recorded for any unit at {property}.` (only when the property has units) |
 | NEGATIVE_ENDING | no | `The ending cash balance for {property} is negative ({amount}).` |
 | NO_DRAW | no | `No owner draw is suggested for {property}: cash after expenses is {amount}.` |
-| RENT_NOT_CHECKED | yes | `Check the rent lines for {Month YYYY} and confirm them before finalizing.` (only while the statement has a roster-rent line and the confirmation is missing or out of date, 5.4.1) |
-| RENT_INVALID | no | `Unit {X} ({property}) has a roster rent that isn't a valid dollar amount, so no rent line was added. Fix the rent on the unit, or add the payment with “Add transaction”.` (one per unit) |
-| RENT_ACCOUNT_MISSING | no | `The Rent Income account is missing, so rent wasn't prefilled from the roster. Open Accounts once to create it.` (only when some statement property has units) |
+| RENT_UNPAID | no | `{n} units have no rent marked received for {Month YYYY}.` / `1 unit has no rent marked received for {Month YYYY}.` (one per rent month, `rentMonth` set; links to the Payments page for that month and owner, status Unpaid; 5.4, 5.9) |
+| ~~RENT_NOT_CHECKED~~, ~~RENT_INVALID~~, ~~RENT_ACCOUNT_MISSING~~ | | Removed 2026-11-12 with the roster-rent prefill (5.4.1). |
 | ENTRY_LOCKED | - | `{Month YYYY} is final for {property}. Date this transaction in {Month YYYY of nextMonth(lockedThrough)} or later.` |
 | ENTRY_BEFORE_START | - | `Statements for {property} start in {Month YYYY}. Use a date on or after {M/D/YYYY}.` |
 | ENTRY_FUTURE | - | `The date can't be in the future.` |
@@ -1219,6 +1229,83 @@ Do not build any of this now. Leave a `// DELIVERY HOOK (Q8)` comment in `ownerS
 Warnings about a single work order (`WO_MISSING_BILL`, `WO_AWAITING_REVIEW`, and `WO_BEFORE_START` / `WO_BEFORE_START_MISSING_BILL` when they name one work order) carry `workOrderId`, so the warnings card can link to it. `WO_AWAITING_REVIEW` applies only to work orders completed on or after the first-statement-month floor; one before it is covered by the `WO_BEFORE_START*` rows.
 
 ---
+
+### 5.9 Rent payments: the Payments page (`convex/rentPayments.ts`, as built 2026-11-12)
+
+Rent reaches a statement ONLY as a payment marked on the Payments page (user decisions 2026-11-12, `ros-decisions.md` "Rent via a Payments page"). Files: `rentPaymentsPolicy.ts` (pure rules and every message, shared with the client), `rentPaymentsLib.ts` (the logic, no runtime Convex server imports, tested on a fake database), `rentPayments.ts` (the registered functions: `requireFinance` first, then the lib; the audit trail and the seeded Rent Income account come in as `deps`).
+
+**Decisions.**
+1. **Cash basis like Buildium:** a payment is dated the day it was RECEIVED and lands on that month's statement, whatever month the rent is for. September rent received 10/2 is on the October statement.
+2. **No partial payments:** one payment per unit per rent month, always the full roster rent (`rosterRentToCents(units.rent)`, never an amount from the client). Statuses are Paid / Unpaid (plus Not markable).
+3. **Greyed-out units** (not markable), with the reason: owner collects rent directly (`rentPaidTo "owner_direct"`), rent included in another unit, vacant on the roster, no active tenant, no rent on the roster, roster rent not a valid dollar amount (`rentMarkability`, rules in that order).
+4. **Editable until final:** a payment can be edited or undone until it is billed on a final statement or its received date is in a month that is final for the property (`paymentLock`, the locked-month rule).
+5. **Rent is edited only here.** The statement shows payment lines read-only with "Edit on Payments page".
+
+**The row** (`ledgerEntries`): `source "rent_payment"`, the Rent Income system account (`systemKey "rent_income"`, seeded on first use), `type` = the account kind (`income`), the unit, the property's single owner, `counterparty` = the unit's active tenant(s) when marked (`rentCounterparty`, "Ann Lee & Bob Ray"), `memo "Payment"`, `amountCents` = roster rent, `date` = received date, `rentForMonth`, `paymentMethod`, `paymentNote` (optional). No `sourceId`. Audit entity `ledger_entry`: `rent_marked_received` (to = JSON of month, received date, property, unit, name, method, note, amount), `rent_payment_updated` (from / to of the changed fields), `rent_payment_undone` (note = unit · month · reason).
+
+**Functions** (all `requireFinance` first, org-scoped; every user error is a `ConvexError` `{ message, field }`):
+
+| Function | Args | Returns |
+|---|---|---|
+| `list` query | `{ month, category?, ownerId?, propertyId?, status? }` (all nullable strings) | `{ month, monthLabel, today, earliestReceivedDate, latestRentMonth, rows: Row[], summary: { paid, unpaid, notMarkable, total, receivedCents, unpaidCents }, filters: { owners: [{ ownerId, name }], properties: [{ propertyId, name, category, teamLabel }] }, truncated }` |
+| `markReceived` mutation | `{ unitId, month, receivedDate, method, note? }` | `{ entryId, amountCents }` |
+| `markManyReceived` mutation | `{ month, unitIds: string[], receivedDate, method }` | `{ count, totalCents }` |
+| `updatePayment` mutation | `{ entryId, receivedDate?, method?, note? }` (undefined keeps; note null / "" clears) | `null` |
+| `undoPayment` mutation | `{ entryId, reason }` | `null` (= void with the reason) |
+
+`Row` = `{ unitId, propertyId, propertyName, unit, category, teamLabel, ownerId, ownerName, ownerProblem /* no owner / co-owned message, or null */, tenants, rentCents /* null when not markable */, status: "paid" | "unpaid" | "not_markable", reason /* greyed-out reason */, payment: null | { entryId, kind: "payment" | "ledger", amountCents, receivedDate, method, methodLabel, note, counterparty, locked, lockedReason, statementId }, canMark }`. One row per unit of the org (read in one go, bounded at 3,000 units; `truncated` above that), sorted by team (Gold, Silver, Make Up, none), property (natural), unit (natural). The summary counts the team / owner / property filters but not the status filter. A co-owned property belongs to no single owner (it is not in an owner filter).
+
+**Status of a unit for a rent month** (`rentRecordsFor`, `paymentStatus`): Paid when a non-voided `rent_payment` has `rentForMonth` = the month (`payment.kind "payment"`), or when a non-voided Rent Income row entered any other way (by hand in the ledger before this page, a historical roster_rent row, Stripe later) is DATED in the month (`payment.kind "ledger"`: shown as Paid "Entered in the ledger", locked with "Entered in the ledger. Change it on the Ledger page.", amounts summed). Paid wins over Not markable. Otherwise Unpaid when markable, else Not markable.
+
+**Marking rules** (`markReceived`, and per unit in `markManyReceived`), in order:
+1. Fields (`validatePaymentFields`, same on the client): month, received date, method, note.
+2. The unit (org-scoped), its property's owner (exactly one link), markable.
+3. Not already recorded: no non-voided `rent_payment` for (unit, month) (`by_unit_and_rent_month`), and no Rent Income row entered by hand dated in the month (`by_unit_and_date`). Checked inside the mutation (serializable, so two concurrent marks can't both pass).
+4. The property's date locks (`receivedDateLockProblem`): not in a month final for the property, not before the owner's first statement month.
+`markManyReceived` is ALL OR NOTHING: at most 100 distinct units (duplicates are dropped); if any unit fails, nothing is written and the error carries `field "unitIds"` and `problems: [{ unitId, message }]` (the message lists the first three).
+
+`updatePayment` / `undoPayment` refuse a row that isn't a rent payment, is voided, or is locked; a date change re-runs the owner check and the date locks. The amount and the rent month never change (undo and mark again).
+
+**Messages** (exact; `RENT_PAY_MSG`; field in brackets):
+
+| When | Message |
+|---|---|
+| month missing [month] | "Select the rent month." |
+| month not a real month [month] | "Select a real month (like October 2026)." |
+| month after next month [month] | `You can't mark rent for {Month YYYY} yet.` |
+| unit missing [unitId] | "Select the unit to mark rent for." |
+| unit not found / other org [unitId] | "Unit not found." |
+| date missing [receivedDate] | "Enter the date the rent was received." |
+| date not real [receivedDate] | "Enter a real date." |
+| date in the future [receivedDate] | "The received date can't be in the future." |
+| date before the window [receivedDate] | `For {Month YYYY} rent, the received date must be on or after {M/D/YYYY}.` (the 1st of the month two months before the rent month) |
+| date in a final month [receivedDate] | `{Month YYYY} is final for {property}. Use a received date in {next Month YYYY} or later.` |
+| date before the first statement month [receivedDate] | `Statements for {property} start in {Month YYYY}. Use a received date on or after {M/D/YYYY}.` |
+| method missing / unknown (null, "", anything else) [method] | "Select how the rent was paid." |
+| note too long [note] | "Keep the note under 200 characters." |
+| no owner link [unitId] | `{property} has no owner yet. Link it on the Owners page first.` |
+| co-owned [unitId] | the `CO_OWNED` message (5.8) |
+| not markable [unitId] | `Rent can't be marked for Unit {X} at {property}: {owner collects rent directly / rent is included in another unit / unit is marked vacant on the roster / no active tenant / no rent on the roster / the roster rent isn't a valid dollar amount}.` |
+| already marked [unitId] | `Unit {X} at {property} already has rent marked received for {Month YYYY}.` |
+| entered by hand already [unitId] | `Unit {X} at {property} already has rent recorded in the ledger for {Month YYYY}. Check it on the Ledger page.` |
+| bulk: none [unitIds] | "Select at least one unit to mark received." |
+| bulk: over 100 [unitIds] | "Select at most 100 units at a time." |
+| bulk: any unit fails [unitIds] | `Nothing was saved: {n} of the selected unit(s) can't be marked received. {first three messages}` + ` (and {n-3} more)` |
+| payment not found [entryId] | "Payment not found." |
+| not a rent payment [entryId] | "That transaction isn't a rent payment from the Payments page." |
+| already undone [entryId] | "This payment was already undone." |
+| billed on a final [entryId] | "This payment is on a final statement and can't be changed. Put a correction on a later statement." |
+| dated in a final month [entryId] | `{Month YYYY} is final for {property}, so this payment can't be changed.` |
+| undo reason missing / long [reason] | "Enter why you're undoing this payment." / "Keep the reason under 300 characters." |
+| list filters [category / status / ownerId / propertyId] | "Select a team." / "Select a status." / "Owner not found." / "Property not found." |
+| Rent Income account missing (should never happen: it is seeded) | "The Rent Income account is missing. Open Accounts once to create it." |
+| old clients: `setRentLine` / `confirmRent` | "Rent is recorded on the Payments page." |
+| statement: leave off a payment [key] | "Rent is recorded on the Payments page. To take this payment off the statement, undo it there." |
+| ledger: add / edit on Rent Income [accountId] | "Record rent on the Payments page." |
+
+Lock reasons shown on the page: "On the {Month YYYY} final statement." / `{Month YYYY} is final for {property}.` / "Entered in the ledger. Change it on the Ledger page."
+
+**On statements.** A payment is an unbilled ledger row: the draft for its received month (or a later one, carried forward) picks it up like a manual row, it counts toward the fee base (Rent Income), finalize stamps it (`statementId`, `postedDate`), and it is then immutable. It can't be left off a statement (only a payment left off by default, dated before the first statement month, can be put back). The info warning RENT_UNPAID (5.4) lists units still unpaid.
 
 ## 6. UI (WP5 statements and finance; WP3 work orders)
 
@@ -1237,16 +1324,17 @@ Visual language: keep the designer's mock (`ros19.png`, Figma file `wISc3YonhsLV
 |---|---|
 | `/owner-statements` | Statements by month (default) |
 | `/owner-statements/[id]` | Draft editor / final view |
+| `/owner-statements/payments` | Payments (rent marked received, 6.8) |
 | `/owner-statements/ledger` | Ledger (manual transactions) |
 | `/owner-statements/owners` | Owners list |
 | `/owner-statements/owners/[id]` | Owner edit (`new` for create) |
 | `/owner-statements/accounts` | Accounts |
 
-- Every page is wrapped in `<RequireView views={["admin", "accountant"]}>` and has a `Seg` sub-nav: Statements · Ledger · Owners · Accounts.
+- Every page is wrapped in `<RequireView views={["admin", "accountant"]}>` and has a `Seg` sub-nav: Statements · Payments · Ledger · Owners · Accounts.
 - `components/app-sidebar.tsx`:
   - Finance group → "Owner Reports" becomes `{ href: "/owner-statements", label: "Owner Reports", icon: FileText, views: ["admin", "accountant"] }`. Remove its `query` key.
-  - Keep "Payment" (`/finance`, admin) as is.
-- `app/finance/page.tsx`: when `?view=statements` is present, `router.replace("/owner-statements")`. Otherwise keep the page, and drop the "Owner statements (ROS)" coming-soon item.
+  - "Payments" → `{ href: "/owner-statements/payments", label: "Payments", views: ["admin", "accountant"] }` (2026-11-12; replaced the admin-only "Payment" placeholder).
+- `app/finance/page.tsx`: redirects: `?view=statements` → `/owner-statements`, otherwise → `/owner-statements/payments`.
 
 ### 6.2 Statements list `/owner-statements`
 
@@ -1301,14 +1389,14 @@ Layout: breadcrumb "Owner reports / {legalName} / {Month YYYY}", title "{legalNa
    - Actions by kind:
      - `entry`: **Edit** (TransactionForm modal → `ledger.update`), **Leave off this month** (`excludeLine`), and, for an editable manual row, **Delete** (also inside the edit modal): dialog "Delete this transaction?" / "It is removed from this and every future statement. It stays in the history with your reason." with a required reason → `ledger.voidEntry`; toast "Transaction deleted."
      - `wo`: **Edit billing** (BillingForm modal: description, bill amount, account, property-level toggle, no-charge toggle → `workOrderBilling.updateBilling`; cost is not shown here), **Leave off this month**, **Open work order** link
-     - `rent` (roster rent, 5.4.1): **Edit** (Rent dialog, `rent-dialog.tsx`: "Rent: Unit {X}, {property}", fields "Amount received *", "Payment date *" (inside the period), "Name on statement *", "Memo *", buttons "Reset to roster" / "Cancel" / "Save" → `setRentLine`), **Remove (didn't pay)** (→ `excludeLine`). The source badge reads "Roster rent", or "Roster rent (edited)" with the tooltip "Changed from the roster".
+     - Rent payment (an `entry` line with `rentForMonth`, source "Payments page"): read-only. The Source cell links "Edit on Payments page" (draft) / "View on Payments page" (final) to `/owner-statements/payments?month={rentForMonth}&property={propertyId}`. No Edit, no Delete, no "Leave off this month" (the server refuses it: "Rent is recorded on the Payments page. To take this payment off the statement, undo it there."); only a payment left off by default (dated before the first statement month) can be put back, and that put-back reverted. A hand-entered Rent Income line keeps Leave off and Delete but has no Edit. The Additions card head has a "Record rent on Payments page" link (that month, this owner). (The roster-rent `rent` line actions and `rent-dialog.tsx` were removed 2026-11-12.)
      - `fee`: **Edit** (amount + memo, "Reset to calculated" → `setGenerated(amountCents: null, memo: null)`), **Skip this month** (`excluded: true`)
      - `draw`: **Edit amount** (shows "Suggested: $X"), "Reset to suggested", **Skip this month**
    - "Add transaction" button (TransactionForm → `ledger.add`):
      - property limited to the statement's properties
      - the date picker defaults to `min(today, periodEnd)` and must be inside the period: client check "Pick a date in {Month YYYY}." (the server applies the normal lock rules)
 3. **Left off this statement** (collapsed card, count in the title): the lines, each with a **Put back** button (`includeLine`). The note under the title reads "Lines left off stay unbilled and come back on next month's draft." Lines dated before the owner's first statement month are listed here by default (`defaultExcluded`), each with its `note` (5.8); "Put back" puts them on the statement (`includedKeys`). A removed roster-rent line is listed here too (note "Removed: the tenant didn't pay this month. Put it back if the payment came in.") with the same **Put back** button; it is not carried to next month.
-   - **Not prefilled from the roster (n)** (collapsed card, draft only, shown when `rent.skipped` is not empty): "Unit {X} — {reason}" per unit with no rent line, and the note "These units have no rent line on this draft. If one of them paid, add the payment with “Add transaction”." (5.4.1)
+   - (The "Not prefilled from the roster" card was removed 2026-11-12.)
 4. **Adjustments** card, one block per property:
    - "Tenant security deposits" read-only = the sum of the units, with a link "Edit deposits" to the owner page
    - "Management fee" read-only: `{x.xx}%` with "(own fee)" or "(default)" (`feeSource`; "Not set" only if `fee.bps` is null), and a "Change fee" link to the owner page (draft only)
@@ -1322,7 +1410,7 @@ Layout: breadcrumb "Owner reports / {legalName} / {Month YYYY}", title "{legalNa
 **Side card "Review & delivery":**
 - Report status "Draft" / "Final", Owner, Period (`formatPeriod`), Statement date (draft: "Set when finalized"), Ending cash (All properties), Available for payment.
 - "Before finalizing": the blocking count, or a ✓ "Ready to finalize" line.
-- **Confirm rent** (draft, only when the statement has a roster-rent line, `rent.lineCount > 0`): the checkbox "I've checked the rent lines against what was actually received" (`confirmRent`, sends `expectedRentHash` = `rent.hash`). Unticked it shows `{n} roster rent line(s) to check. Edit, remove (didn't pay) or add rows first, then tick this.` in red; ticked it shows "Confirmed by {name} on {date}." Toasts: "Rent lines confirmed." / "Rent confirmation removed." Until it is ticked, `RENT_NOT_CHECKED` blocks Finalize (5.4.1).
+- (The **Confirm rent** checkbox was removed 2026-11-12.)
 - Buttons (draft):
   - **Finalize** (primary; disabled with a tooltip while `!canFinalize`)
   - **Preview PDF** (secondary, a draft PDF with a DRAFT watermark, ASSUMPTION A29)
@@ -1423,6 +1511,21 @@ After close, the drawer and the detail page show a read-only **Billing** block: 
 Not in this build (B18 leftovers): the invoice # format `3-110`, keys/code, the paid stamp, and auto-calculating Bill from hours and materials (Q1-Q3).
 
 ---
+
+### 6.8 Payments `/owner-statements/payments` (as built 2026-11-12)
+
+`components/finance/payments-view.tsx` + `payment-dialogs.tsx`, route `app/owner-statements/payments/page.tsx` (FinanceGate + Suspense). The filters live in the URL (`?month=&team=&owner=&property=&status=`), so the statement's RENT_UNPAID link and "Edit on Payments page" open it filtered.
+
+- **Header** "Payments": "Mark rent received for each unit and month. A payment goes on the owner statement for the month it was received (cash basis), always for the full roster rent."
+- **Filters:** Rent month (next month, then the current month and 23 before it; default the current month), Team (All teams / Gold / Silver / Make Up), Owner, Property (narrowed by team). Selects show names, never ids.
+- **Summary** (KPI tiles): Paid (n, "$x received"), Unpaid (n, "$x expected"), Not markable (n), "Received for {Month}" ($ total). Status chips: All / Unpaid / Paid / Not markable, with counts.
+- **Table** (one row per unit): select box (unpaid, markable units only; at most 100), Property (+ team), Unit, Tenant, Owner ("No owner"), Rent, Status (Paid / Unpaid / Not markable + the reason; Paid rows entered by hand say "Entered in the ledger"), Received (date, method · note), actions. Not-markable rows are greyed out and have no action.
+- **Actions:** Unpaid → **Mark received** (or, when the property has no owner / is co-owned, the message and an "Owners page" link). Paid → **Edit** / **Undo**, or a **Locked** badge with the reason (and "Open statement" when billed). Entered in the ledger → the reason and a "Ledger" link.
+- **Mark received dialog:** the unit, tenant and amount (read-only: "Always the full roster rent (no partial payments). To change it, fix the rent on the unit first."), **Received on \*** (default today; hint "From {earliest} to today. It goes on the statement for the month it was received, whatever month the rent is for."), **Paid by \*** (select with the labels Cash / Check / Money order / Other, placeholder "Select how it was paid"), **Note** (optional, "for example the check number"). Toast: `{Month} rent marked received for Unit {X}.`
+- **Mark selected received:** a confirmation dialog listing the count, the total and every unit with its amount, plus Received on \* and Paid by \*; "Mark {n} received". On failure nothing is saved and the dialog lists every failing unit ("Nothing was saved. Fix or unselect these units:"). Toast: `{Month} rent marked received for {n} units ($total).`
+- **Edit payment:** received date, paid by, note (amount read-only). **Undo this payment?:** reason \* ("It comes off the draft statement and the unit shows as unpaid. It stays in the ledger history with your reason.").
+- Form rules as everywhere (6): client validation with the shared messages, red border + message under the field + toast; server errors with a field mark that field; others are toasted.
+- Loading: spinner. Empty: "No units match these filters." / "No units yet. Units come from the property rosters." Errors: the owner-statements error boundary.
 
 ## 7. PDF (WP6)
 
@@ -1777,7 +1880,7 @@ All pure or source-scan tests with `node --test`, no packages; the pattern in se
 
 - `ros_owner_identity.test.mjs`: the identity rule table (5 cases, normalization, empty name, joint owners on one company domain, order-independent pair keys); `decidePropertyLink` (link, create, every "needs" reason, a merged owner never matched, an existing link never moved, "Not the same owner" decisions); `mergeProblem` refusals; `planLinkAll` / `linkAllCounts` (Ready to link, New owner, every doubtful case, one new owner per name + shared email, cap per call); source scans (every writer of a property's owner name or emails calls `linkOwnerForProperty`; the linker never contacts anyone or moves a link; update / setActive / linkProperty refuse a merged owner; `linkAllExact` is finance-only, decides on the server and re-checks each property).
 - `ros_fee.test.mjs`: `readFeeInput`, `effectiveFee`, `feeRangeLabel`, the alert wording, `setDefaultFeeProblem`; per-property fee in the engine (each property at its own %, memos, totals) and `FEE_NOT_SET` no longer blocking; `rosBuild` (own fee ?? default, `feeSource`), `previewHash` changing when a fee changes, the snapshot storing the % used; `setDefaultFee` on a fake database (counts, with and without reset, the counts guard writing nothing).
-- `ros_rent.test.mjs`: `rosterRentToCents`, the skip rules and their order (including vacant-on-roster even with an active resident), prefill (tenants joined with " & ", memo "Payment", dated `periodStart`), fee base, already recorded, overrides, `validateRentLineFields`, remove / put back, `finalizePlan` rent rows, the `RENT_NOT_CHECKED` cycle, a missing Rent Income account, and the golden check (108 Jackson, rent entered by hand, gets no prefill and is byte-for-byte the same statement).
+- `ros_rent.test.mjs` (rewritten 2026-11-12 for the Payments page): `rosterRentToCents`; `rentMarkability` (amount = roster rent cents, greyed-out reasons and order); `validatePaymentFields` (every message, date window, future, method null/empty/unknown, note length); `receivedDateLockProblem`; `rentRecordsFor` / `paymentStatus` (rent month vs received date, voided, legacy rows); `paymentLock`; `unpaidCheckMonths`; manual Rent Income refused; on a fake database: `markOne` (the written row, client amount ignored), uniqueness per unit / month (and again after undo), every not-markable / no-owner / co-owned / unknown-unit message, date window + future + locked month + before the first statement month, legacy hand-entered rent shown as Paid and never doubled, `markMany` all or nothing with every failure listed (dedupe, bounds), `updateOne` / `undoOne` (locks, messages, audit), `listPayments` (statuses, reasons, summary, sort, filters, lock reason); on the builder: no prefill, RENT_UNPAID, the golden 108 Jackson statement byte-for-byte the same, cash basis (September rent received 10/2 is on October's statement), fee base, billed once at finalize, final-statement lines; and source scans of the server wiring.
 
 ---
 
@@ -1848,7 +1951,7 @@ All paths are relative to the repo root. **One owner per file.** A package may *
 - **Stripe (B25):**
   - The webhook inserts `ledgerEntries { source: "stripe", sourceId: <payment id>, type: "income", account: Rent Income, counterparty: tenant, memo: "by {tenant}" }`. `by_source` makes this idempotent.
   - "Pending ePay payments" becomes the sum of paid-but-unsettled Stripe payments per property. That is a new `pendingEpayCents` source in `rosBuild`; the calculation module is unchanged.
-  - The roster-rent prefill (5.4.1) is the stand-in until this feed is live. A Stripe Rent Income row for a unit dated inside the period makes the unit `already_recorded`, so rent is never prefilled twice; once the feed is trusted, the prefill and the "Confirm rent" step can be switched off.
+  - The Payments page (5.9) is the stand-in until this feed is live: Stripe will write the same kind of row (Rent Income, unit, dated when paid, `rentForMonth`) and the page will show it as "Paid online".
   - Open decision: what to do when a Stripe row's date falls in a locked month. The default proposal: date it the 1st of the first open month and keep the original date in the memo.
 - **Email delivery:** 5.7.
 - **Ownership split for co-owned properties:** a `sharePct` on `ownerProperties` and a split step in `rosBuild` (Q10).
@@ -1898,7 +2001,7 @@ All paths are relative to the repo root. **One owner per file.** A package may *
 | A36 | The opening balance can be negative. | `parseSignedDollarsToCents` | Q9 |
 | A37 | Unit-level rent rows need the tenant name; it is prefilled from active residents and editable. | TransactionForm | - |
 | A38 | The work-completed description is copied verbatim into the memo. No "Unit N -" prefix is added; the sample's prefix was typed by the office. | `rosBuild` | - |
-| A39 | Until Stripe, every draft is prefilled with one Rent Income line per occupied unit from the roster rent (`units.rent`, dollars): dated the 1st, Name = the active tenants joined with " & ", memo "Payment". A unit is skipped (and listed) when the owner collects rent directly, the rent is included in another unit, rent is already recorded for the month, the roster says vacant (even with a resident on file), it has no active tenant, no rent, or an invalid rent. A removed line ("didn't pay") is not carried to the next month. The accountant must confirm the rent lines against what was actually received before finalizing. | `rosPolicy.rentPrefillDecision`, `rosBuild`, `ownerStatements.confirmRent` | - |
+| A39 | (SUPERSEDED 2026-11-12 by the Payments page, 5.9.) Until Stripe, every draft is prefilled with one Rent Income line per occupied unit from the roster rent (`units.rent`, dollars): dated the 1st, Name = the active tenants joined with " & ", memo "Payment". A unit is skipped (and listed) when the owner collects rent directly, the rent is included in another unit, rent is already recorded for the month, the roster says vacant (even with a resident on file), it has no active tenant, no rent, or an invalid rent. A removed line ("didn't pay") is not carried to the next month. The accountant must confirm the rent lines against what was actually received before finalizing. | `rosPolicy.rentPrefillDecision`, `rosBuild`, `ownerStatements.confirmRent` | - |
 
 ---
 
@@ -1946,3 +2049,9 @@ All paths are relative to the repo root. **One owner per file.** A package may *
   - **Roster rent prefill (3.1, 3.5, 3.6, 4.4, 5.4, new 5.4.1, 5.5, 5.8, 6.3, A31, A39).** Every draft gets one Rent Income line per occupied unit from `units.rent` (key `rent:<unitId>`, ledger source `roster_rent`, written at finalize with `sourceId = statementId:unitId`). Skip rules include vacant-on-roster even with a resident on file; each skip is listed. `rosterRentToCents`, `validateRentLineFields`, `rosBuild.applyRentOverride`, `finalizePlan` `rentRows`; `ownerStatements.setRentLine` / `confirmRent`, `rentOverrides`, `rentCheckedAt` / `By` / `Hash`; new warnings `RENT_NOT_CHECKED` (blocking), `RENT_INVALID` and `RENT_ACCOUNT_MISSING` (info). UI: the Rent dialog, "Remove (didn't pay)" / "Put back", the "Not prefilled from the roster" card, and the "Confirm rent" checkbox in the side panel.
   - **Management fee per property with an org default (3.2, 3.3, 4.2, 5.2, 5.4, 6.3, 6.5, A4, A5).** `financeSettings.rosDefaultFeeBps` (absent = 5.00%), `ownerProperties.managementFeeBps` (own fee), `owners.managementFeeBps` deprecated and unused. `feeSettings.get` / `setDefaultFee` (the "Change fee for all properties" alert, optional reset of own fees, the `expectedCounts` guard), `owners.setPropertyFee`. The engine takes `feeBps` per property (and prints it in the memo); `previewHash` covers it; the snapshot stores it. `FEE_NOT_SET` is now only a guard. `feeMigration:copyOwnerFeesToLinks` (internal, dry run by default) copies an old non-default owner fee onto its links; running it is the user's decision. UI: the "Change fee for all properties" dialog and the per-property fee field on the owner page; the owner form no longer has a fee field.
   - **Accountant role (2, 13).** Re-checked against `convex/jobRoles.ts` and the Team page: unchanged and correct as already documented (membership role `"member"` plus `jobRoles: ["accountant"]`; Admin, Asset manager, Technician and Accountant are offered).
+- **2026-11-12, rent via a Payments page (replaces the roster-rent prefill).** User decisions in `ros-decisions.md` ("Rent via a Payments page"): cash basis, no partial payments, owner-direct / included / vacant units greyed out, editable until final, rent edited only on the Payments page.
+  - New ledger source `rent_payment` and optional `ledgerEntries.rentForMonth` / `paymentMethod` / `paymentNote`, indexes `by_unit_and_rent_month`, `by_org_and_rent_month`, `by_unit_and_date` (3.1, 3.5).
+  - New `convex/rentPayments.ts` (+ `rentPaymentsLib.ts`, `rentPaymentsPolicy.ts`): `list`, `markReceived`, `markManyReceived` (all or nothing, max 100), `updatePayment`, `undoPayment` (5.9). Payments page `/owner-statements/payments`, "Payments" tab (Statements · Payments · Ledger · Owners · Accounts), sidebar "Payments" for admin + accountant, `/finance` redirects there (6.1, 6.8).
+  - The roster-rent prefill is removed (5.4.1): no `rent:` lines, no `RENT_NOT_CHECKED` / `RENT_INVALID` / `RENT_ACCOUNT_MISSING`, no roster_rent rows at finalize, `setRentLine` / `confirmRent` refuse ("Rent is recorded on the Payments page."), the Rent dialog, the "Not prefilled" card and Confirm rent are gone. `rentOverrides` / `rentChecked*` and the `roster_rent` source stay as deprecated optional values. New info warning `RENT_UNPAID` with a link to the Payments page (5.4, 5.8).
+  - Statement: payment lines read-only ("Payments page", "Edit on Payments page"), never left off (5.4, 6.3). Ledger: Rent Income can't be added or edited by hand ("Record rent on the Payments page."); hand-entered Rent Income rows stay valid, show as Paid ("Entered in the ledger") on the Payments page and can still be deleted (5.3).
+  - Tests: `ros_rent.test.mjs` rewritten for the new behaviour (9.6); `ros_warning_links`, `ros_build` (snapshot round trip) and `ros_authz` (rentPayments.ts gated, the lib org-checked) updated; the golden test is unchanged.

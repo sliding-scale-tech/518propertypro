@@ -12,10 +12,8 @@ import { MAX_MEMO } from "@/convex/rosPolicy";
 import { DownloadStatementPdfButton } from "@/components/finance/pdf/download-button";
 import { Btn, Card, Field, Modal, Textarea } from "@/components/ui";
 import { toast } from "@/components/ui/toast";
-import { serverError } from "@/lib/form-errors";
 import { STATEMENT_CHANGED, captureReviewed, finalizeArgs, reviewChanged, type Reviewed } from "./finalize-guard";
 import { Checkbox, useFieldErrors } from "./form-bits";
-import { ANCHOR } from "./warning-links";
 import { StatusPill } from "./statements-list";
 
 export type StatementData = FunctionReturnType<typeof api.ownerStatements.get>;
@@ -80,7 +78,6 @@ export function SidePanel({ data, onFinalized }: { data: StatementData; onFinali
 
       {isDraft ? (
         <>
-          <RentConfirm data={data} />
           <div className="border-t border-border pt-3">
             <div className="mb-1 text-[13.5px] font-semibold">Before finalizing</div>
             {nBlocking > 0 ? (
@@ -143,53 +140,6 @@ export function SidePanel({ data, onFinalized }: { data: StatementData; onFinali
         />
       ) : null}
     </Card>
-  );
-}
-
-/**
- * "I've checked the rent lines against what was actually received" (roster-rent prefill). Ticking
- * sends the rent fingerprint the accountant is looking at; any later change to a rent line unticks
- * it (server side), and RENT_NOT_CHECKED blocks Finalize until it is ticked again.
- */
-function RentConfirm({ data }: { data: StatementData }) {
-  const confirmRent = useMutation(api.ownerStatements.confirmRent);
-  const [busy, setBusy] = useState(false);
-  const id = useId();
-  const { rent, statement } = data;
-  if (rent.lineCount === 0) return null;
-
-  async function toggle(next: boolean) {
-    if (busy) return;
-    setBusy(true);
-    try {
-      await confirmRent({ statementId: statement._id, checked: next, expectedRentHash: rent.hash });
-      toast.success(next ? "Rent lines confirmed." : "Rent confirmation removed.");
-    } catch (e) {
-      toast.error(serverError(e).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div id={ANCHOR.confirmRent} className="border-t border-border pt-3">
-      <div className="mb-1 text-[13.5px] font-semibold">Confirm rent</div>
-      <div className="flex items-start gap-2.5 text-[13px]">
-        <Checkbox
-          id={id}
-          checked={rent.checked}
-          disabled={busy}
-          invalid={!rent.checked}
-          onChange={(v) => void toggle(v)}
-        />
-        <label htmlFor={id}>I&apos;ve checked the rent lines against what was actually received</label>
-      </div>
-      <p className={`mt-1 text-xs ${rent.checked ? "text-muted-foreground" : "text-danger-ink"}`}>
-        {rent.checked
-          ? `Confirmed${rent.checkedByName ? ` by ${rent.checkedByName}` : ""}${rent.checkedAt ? ` on ${new Date(rent.checkedAt).toLocaleDateString("en-US")}` : ""}.`
-          : `${rent.lineCount} roster rent ${rent.lineCount === 1 ? "line" : "lines"} to check. Edit, remove (didn't pay) or add rows first, then tick this.`}
-      </p>
-    </div>
   );
 }
 

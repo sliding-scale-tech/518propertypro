@@ -124,7 +124,8 @@ const NAV: NavEntry[] = [
     group: "Finance",
     icon: CircleDollarSign,
     items: [
-      { href: "/finance", label: "Payment", icon: FileText, views: ["admin"] },
+      // Rent payments (finance-only, like Owner Reports). The old /finance page redirects here.
+      { href: "/owner-statements/payments", label: "Payments", icon: FileText, views: ["admin", "accountant"] },
       { href: "/owner-statements", label: "Owner Reports", icon: FileText, views: ["admin", "accountant"] },
     ],
   },

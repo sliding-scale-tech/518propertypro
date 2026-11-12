@@ -346,8 +346,11 @@ test("snapshot round trip: a final's lines come from the snapshot + its billed l
     })),
   ];
   const lines = B.linesFromSnapshot(snap, billed, { w1: 2051, w2: 2052, w3: 2053 });
-  // Same line as the live build, except that a final's lines are never editable.
-  assert.deepStrictEqual(lines[0], { ...built.lines[0], editable: false });
+  // Same line as the live build, except that a final's lines are never editable (and carry no
+  // draft-only action hints such as onRentAccount: a Rent Income row is edited on the Payments page).
+  const { onRentAccount, ...liveFirst } = built.lines[0];
+  assert.equal(onRentAccount, true);
+  assert.deepStrictEqual(lines[0], { ...liveFirst, editable: false });
   assert.deepStrictEqual(
     lines.map((l) => [l.key, l.sourceLabel, l.accountId, l.counterparty, l.editable]),
     built.lines.map((l) => [l.key, l.sourceLabel, l.accountId, l.counterparty, false]),

@@ -13,12 +13,11 @@ import { serverError } from "@/lib/form-errors";
 import { AdjustmentsCard } from "./adjustments-card";
 import { BillingDialog } from "./billing-dialog";
 import { FinanceNav } from "./finance-nav";
-import { Spinner } from "./form-bits";
+import { LinkBtn, Spinner } from "./form-bits";
 import { GeneratedDialog } from "./generated-dialog";
 import { HistoryCard } from "./history-card";
 import { LEAVE_OFF } from "./line-labels";
 import { LinesTable, type LineActions } from "./lines-table";
-import { RentDialog } from "./rent-dialog";
 import { SidePanel, type StatementData } from "./side-panel";
 import { StatementPreview } from "./statement-preview";
 import { StatusPill } from "./statements-list";
@@ -32,8 +31,7 @@ type Dialog =
   | { kind: "edit"; entry: EntryInit }
   | { kind: "void"; entryId: string; summary: string }
   | { kind: "billing"; workOrderId: string; label: string }
-  | { kind: "generated"; propertyId: string; which: "fee" | "draw" }
-  | { kind: "rent"; line: LineView };
+  | { kind: "generated"; propertyId: string; which: "fee" | "draw" };
 
 function entryOf(l: LineView): EntryInit {
   return {
@@ -152,7 +150,6 @@ function TransactionsTab({ data }: { data: StatementData }) {
         onEditBilling: (l) => l.workOrderId && setDialog({ kind: "billing", workOrderId: l.workOrderId, label: l.sourceLabel }),
         onEditGenerated: (l) =>
           setDialog({ kind: "generated", propertyId: l.propertyId, which: l.kind === "fee" ? "fee" : "draw" }),
-        onEditRent: (l) => setDialog({ kind: "rent", line: l }),
         onDeleteEntry: (l) =>
           l.entryId &&
           setDialog({
@@ -160,14 +157,7 @@ function TransactionsTab({ data }: { data: StatementData }) {
             entryId: l.entryId,
             summary: `${formatDate(l.storedDate)} · ${l.accountName} · ${formatAmount(l.amountCents)}`,
           }),
-        onExclude: (l) =>
-          void act(
-            l.key,
-            () => excludeLine({ statementId: sid, key: l.key }),
-            l.kind === "rent"
-              ? `Rent for Unit ${l.unit} removed (didn't pay). Put it back from “${LEAVE_OFF.cardTitle}” below if it came in.`
-              : LEAVE_OFF.toast,
-          ),
+        onExclude: (l) => void act(l.key, () => excludeLine({ statementId: sid, key: l.key }), LEAVE_OFF.toast),
         onSkipGenerated: (l) =>
           void act(
             l.key,
@@ -186,16 +176,22 @@ function TransactionsTab({ data }: { data: StatementData }) {
       {isDraft ? (
         <WarningsCard blocking={data.warnings.blocking} info={data.warnings.info} ownerId={data.owner._id} />
       ) : null}
-      {isDraft ? <RentSkippedCard skipped={data.rent.skipped} showProperty={showProperty} /> : null}
 
       <Card>
         <CardHead
           title="Additions to cash"
           right={
             isDraft ? (
-              <Btn sm variant="pri" onClick={() => setDialog({ kind: "add" })}>
-                <Plus aria-hidden className="h-3.5 w-3.5" /> Add transaction
-              </Btn>
+              <div className="flex flex-wrap items-center gap-2">
+                <LinkBtn
+                  href={`/owner-statements/payments?month=${statement.month}&owner=${encodeURIComponent(data.owner._id)}`}
+                >
+                  Record rent on Payments page
+                </LinkBtn>
+                <Btn sm variant="pri" onClick={() => setDialog({ kind: "add" })}>
+                  <Plus aria-hidden className="h-3.5 w-3.5" /> Add transaction
+                </Btn>
+              </div>
             ) : undefined
           }
         />
@@ -206,7 +202,7 @@ function TransactionsTab({ data }: { data: StatementData }) {
           totalLabel={data.view.detail.additionsTotal.label}
           actions={actions}
           draft={isDraft}
-          empty="No additions this month. Add rent and other income with “Add transaction”."
+          empty="No additions this month. Rent shows here once it is marked received on the Payments page."
         />
       </Card>
 
@@ -278,9 +274,6 @@ function TransactionsTab({ data }: { data: StatementData }) {
       ) : null}
       {dialog?.kind === "billing" ? (
         <BillingDialog workOrderId={dialog.workOrderId} woLabel={dialog.label} onClose={() => setDialog(null)} />
-      ) : null}
-      {dialog?.kind === "rent" ? (
-        <RentDialog statementId={sid} line={dialog.line} period={period} onClose={() => setDialog(null)} />
       ) : null}
       {dialog?.kind === "generated" && genProp ? (
         <GeneratedDialog
@@ -403,45 +396,13 @@ function ExcludedCard({
       </button>
       <p className="mt-1 text-[12.5px] text-muted-foreground">
         Lines left off stay unbilled and come back on next month&apos;s draft. Lines dated before the owner&apos;s
-        first statement month start here; put one back only if it wasn&apos;t billed in Buildium. Removed roster rent
-        lines (didn&apos;t pay) are not carried: next month&apos;s draft prefills its own rent.
+        first statement month start here; put one back only if it wasn&apos;t billed in Buildium. Rent payments are
+        never left off: undo one on the Payments page instead.
       </p>
       {open ? (
         <div className="mt-3">
           <DataTable columns={columns} rows={rows} rowKey={(r) => r.key} empty={LEAVE_OFF.empty} />
         </div>
-      ) : null}
-    </Card>
-  );
-}
-
-/** Units that got no roster-rent line, and why (so nothing is left off silently). */
-function RentSkippedCard({ skipped, showProperty }: { skipped: StatementData["rent"]["skipped"]; showProperty: boolean }) {
-  const [open, setOpen] = useState(false);
-  if (skipped.length === 0) return null;
-  return (
-    <Card>
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 text-left text-[15px] font-semibold"
-      >
-        Not prefilled from the roster ({skipped.length})
-        <ChevronDown aria-hidden className={cx("ml-auto h-4 w-4 text-muted-foreground transition-transform", open && "rotate-180")} />
-      </button>
-      <p className="mt-1 text-[12.5px] text-muted-foreground">
-        These units have no rent line on this draft. If one of them paid, add the payment with “Add transaction”.
-      </p>
-      {open ? (
-        <ul className="mt-3 flex flex-col gap-1 text-[13px]">
-          {skipped.map((r) => (
-            <li key={`${r.propertyId}:${r.unitId}`}>
-              {showProperty ? <span className="text-muted-foreground">{r.propertyName}: </span> : null}
-              <span className="font-medium">Unit {r.unit}</span> — {r.reason}
-            </li>
-          ))}
-        </ul>
       ) : null}
     </Card>
   );

@@ -6,12 +6,12 @@ import { Plus } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 import { api } from "@/convex/_generated/api";
-import { formatAmount, formatDate } from "@/convex/rosFormat";
+import { formatAmount, formatDate, formatMonth } from "@/convex/rosFormat";
 import { SUBTRACTION_TYPES } from "@/convex/rosPolicy";
 import { Btn, Card, DataTable, Field, PageHeader, Pill, Select, Toggle, type Column } from "@/components/ui";
 import { FinanceNav, useNow } from "./finance-nav";
 import { Spinner } from "./form-bits";
-import { DELETE_ENTRY } from "./line-labels";
+import { DELETE_ENTRY, PAYMENTS_LINK, paymentsPageHref } from "./line-labels";
 import { recentMonths } from "./months";
 import { TransactionForm, VoidDialog, type EntryInit } from "./transaction-form";
 
@@ -98,7 +98,23 @@ export function LedgerView() {
       // Subtractions get a leading minus in this table only; statements show positive amounts.
       render: (r) => (SUBTRACTION_TYPES.has(r.type) ? `−${formatAmount(r.amountCents)}` : formatAmount(r.amountCents)),
     },
-    { key: "source", header: "Source", render: (r) => <Pill>{r.sourceLabel}</Pill> },
+    {
+      key: "source",
+      header: "Source",
+      render: (r) => (
+        <div className="flex flex-col items-start gap-1">
+          <Pill tone={r.source === "rent_payment" ? "ok" : "neutral"}>{r.sourceLabel}</Pill>
+          {r.source === "rent_payment" && r.rentForMonth ? (
+            <Link
+              href={paymentsPageHref({ rentForMonth: r.rentForMonth, propertyId: r.propertyId })}
+              className="whitespace-nowrap text-[12px] font-medium text-primary hover:underline"
+            >
+              {`${formatMonth(r.rentForMonth)} rent →`}
+            </Link>
+          ) : null}
+        </div>
+      ),
+    },
     {
       key: "statement",
       header: "Statement",
@@ -122,10 +138,18 @@ export function LedgerView() {
       render: (r) =>
         r.editable ? (
           <div className="flex justify-end gap-1.5">
-            <Btn sm onClick={() => setDialog({ kind: "edit", entry: entryOf(r) })}>
-              Edit
-            </Btn>
-            <Btn sm variant="dng" onClick={() => setDialog({ kind: "void", entryId: r._id, summary: summaryOf(r) })}>
+            {/* Rent Income rows entered by hand can still be deleted, but rent is changed on the Payments page. */}
+            {r.onRentAccount ? null : (
+              <Btn sm onClick={() => setDialog({ kind: "edit", entry: entryOf(r) })}>
+                Edit
+              </Btn>
+            )}
+            <Btn
+              sm
+              variant="dng"
+              title={r.onRentAccount ? PAYMENTS_LINK.legacyRentTooltip : undefined}
+              onClick={() => setDialog({ kind: "void", entryId: r._id, summary: summaryOf(r) })}
+            >
               {DELETE_ENTRY.button}
             </Btn>
           </div>
@@ -137,7 +161,7 @@ export function LedgerView() {
     <div className="pb-10">
       <PageHeader
         title="Ledger"
-        subtitle="Every owner transaction: rent and other rows entered by hand, plus roster rent, work orders, fees and draws once a statement is final."
+        subtitle="Every owner transaction: rows entered by hand, rent marked received on the Payments page, plus work orders, fees and draws once a statement is final."
         actions={
           <Btn variant="pri" onClick={() => setDialog({ kind: "add" })}>
             <Plus aria-hidden className="h-4 w-4" /> Add transaction
@@ -223,7 +247,7 @@ export function LedgerView() {
                 empty={
                   ownerId || propertyId || month
                     ? "No transactions match these filters."
-                    : "No transactions yet. Add rent, landscaping and other rows with “Add transaction”."
+                    : "No transactions yet. Record rent on the Payments page; add landscaping and other rows with “Add transaction”."
                 }
               />
             <div className="mt-3 flex items-center justify-end gap-2 text-[12.5px] text-muted-foreground">

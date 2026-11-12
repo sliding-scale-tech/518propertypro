@@ -11,7 +11,6 @@ import {
   finalizePlan,
   linesFromSnapshot,
   makeSnapshot,
-  rentKey,
   resultHash,
   snapshotTooLarge,
   splitWarnings,
@@ -26,7 +25,6 @@ import {
   MAX_AMOUNT_CENTS,
   businessToday,
   formatAmount,
-  formatCurrency,
   formatDate,
   formatMonth,
   isMonth,
@@ -38,14 +36,13 @@ import {
 import {
   MAX_MEMO,
   MSG,
-  RENT_MSG,
   cmpStr,
   createDraftProblem,
   finalizeProblem,
   sortProperties,
-  validateRentLineFields,
   type PropertyStatementState,
 } from "./rosPolicy";
+import { RENT_PAY_MSG } from "./rentPaymentsPolicy";
 import { buildView } from "./rosView";
 
 /**
@@ -213,49 +210,6 @@ function ownerNameCache(ctx: Ctx, org: OrgContext): (id: Id<"owners">) => Promis
     names.set(id, n);
     return n;
   };
-}
-
-type RentOverride = NonNullable<Doc<"ownerStatements">["rentOverrides"]>[number];
-
-/**
- * Any change to a rent line voids the "I've checked the rent lines" confirmation. (The fingerprint
- * check in rosBuild also catches changes made elsewhere, e.g. a roster edit.) No-op when not set.
- */
-async function clearRentCheck(ctx: MutationCtx, org: OrgContext, st: Doc<"ownerStatements">, note: string): Promise<void> {
-  if (st.rentCheckedAt === undefined && st.rentCheckedHash === undefined && st.rentCheckedBy === undefined) return;
-  await ctx.db.patch(st._id, { rentCheckedAt: undefined, rentCheckedBy: undefined, rentCheckedHash: undefined, updatedAt: Date.now() });
-  await writeAudit(ctx, {
-    orgId: org.orgId,
-    entity: "ros",
-    entityId: st._id,
-    action: "rent_check_cleared",
-    actorUserId: org.user._id,
-    from: "checked",
-    to: "unchecked",
-    note,
-  });
-}
-
-/**
- * ledger.ts: a Rent Income row of this property was added, edited or voided, so the open draft
- * holding the property needs its rent lines checked again.
- */
-export async function clearRentCheckForProperty(
-  ctx: MutationCtx,
-  org: OrgContext,
-  propertyId: Id<"properties">,
-  note: string,
-): Promise<void> {
-  const rows = (
-    await ctx.db
-      .query("ownerStatementProperties")
-      .withIndex("by_property_and_status", (q) => q.eq("propertyId", propertyId).eq("status", "draft"))
-      .collect()
-  ).filter((r) => r.orgId === org.orgId);
-  for (const r of rows) {
-    const st = await ctx.db.get(r.statementId);
-    if (st && st.orgId === org.orgId && st.status === "draft") await clearRentCheck(ctx, org, st, note);
-  }
 }
 
 // --- queries -------------------------------------------------------------------------------------
@@ -442,6 +396,7 @@ export const get = query({
         lines: finalLines,
         excludedLines: [] as LineView[],
         properties,
+        // DEPRECATED shape (roster-rent prefill, removed 2026-11-12), kept for older clients.
         rent: {
           lineCount: finalLines.filter((l) => l.kind === "rent").length,
           hash: null as string | null,
@@ -471,13 +426,15 @@ export const get = query({
       lines: built.lines,
       excludedLines: built.excludedLines,
       properties: built.properties,
+      // DEPRECATED shape (roster-rent prefill, removed 2026-11-12): a draft has no roster-rent lines
+      // and nothing to confirm. Kept so an older client still renders.
       rent: {
-        lineCount: built.rent.lineCount,
-        hash: built.rent.hash,
-        checked: built.rent.checked,
-        checkedAt: built.rent.checked ? (st.rentCheckedAt ?? null) : null,
-        checkedByName: built.rent.checked && rentCheckedBy ? (userName(rentCheckedBy) ?? "Unknown") : null,
-        skipped: built.rent.skipped,
+        lineCount: 0,
+        hash: null as string | null,
+        checked: false,
+        checkedAt: null as number | null,
+        checkedByName: null as string | null,
+        skipped: [] as RentSkip[],
       },
       warnings,
       // Also false while the month is still open (finalize would refuse with PERIOD_OPEN).
@@ -622,7 +579,7 @@ async function toggleLine(
 ): Promise<null> {
   const st = await loadDraft(ctx, org, args.statementId);
   const key = typeof args.key === "string" ? args.key.trim() : "";
-  if (!/^(entry|wo|rent):/.test(key)) throw fieldError("key", M.lineNotOnStatement);
+  if (!/^(entry|wo):/.test(key)) throw fieldError("key", M.lineNotOnStatement);
   const built = await buildStatement(ctx, st, { statementDate: businessToday(Date.now()) });
   const line = (exclude ? built.lines : built.excludedLines).find((l) => l.key === key);
   if (!line) {
@@ -630,6 +587,13 @@ async function toggleLine(
     const other = (exclude ? built.excludedLines : built.lines).some((l) => l.key === key);
     if (other) return null;
     throw fieldError("key", M.lineNotOnStatement);
+  }
+  // One source of truth for rent: a payment from the Payments page is never left off a statement
+  // (undo it there). A payment left off BY DEFAULT (dated before the owner's first statement month)
+  // can still be put back, and that can be reverted.
+  const origin = built.origins[key];
+  if (exclude && origin?.kind === "entry" && origin.source === "rent_payment" && line.defaultExcluded !== true) {
+    throw fieldError("key", RENT_PAY_MSG.leaveOffRefused);
   }
   const keys = toggledKeys(st, key, exclude, line.defaultExcluded === true);
   await ctx.db.patch(st._id, { ...keys, updatedAt: Date.now() });
@@ -643,11 +607,6 @@ async function toggleLine(
     to: exclude ? "excluded" : "included",
     note: lineNote(line),
   });
-  // Removing / putting back a rent line (roster or a Rent Income row) needs the rent checked again.
-  const rentAccountId = built.input.accounts.find((a) => a.systemKey === "rent_income")?.id;
-  if (line.kind === "rent" || (rentAccountId !== undefined && line.accountId === rentAccountId)) {
-    await clearRentCheck(ctx, org, st, `${exclude ? "Removed" : "Put back"}: ${lineNote(line)}`);
-  }
   return null;
 }
 
@@ -787,9 +746,9 @@ export const setGenerated = mutation({
 });
 
 /**
- * Edit the prefilled rent line of a unit (roster-rent prefill): amount, date (inside the period),
- * name and memo, stored as an override on the statement. A field left undefined keeps its current
- * value; `reset: true` goes back to the roster values. Clears the rent confirmation.
+ * DEPRECATED (2026-11-12): the roster-rent prefill was replaced by the Payments page
+ * (convex/rentPayments.ts). Kept exported, with the same arguments, so an older client gets a clear
+ * message instead of a missing-function error.
  */
 export const setRentLine = mutation({
   args: {
@@ -801,116 +760,22 @@ export const setRentLine = mutation({
     memo: v.optional(v.union(v.string(), v.null())),
     reset: v.optional(v.union(v.boolean(), v.null())),
   },
-  handler: async (ctx, args) => {
-    const org = await requireFinance(ctx);
-    const st = await loadDraft(ctx, org, args.statementId);
-    const raw = typeof args.unitId === "string" ? args.unitId.trim() : "";
-    const unitId = raw === "" ? null : ctx.db.normalizeId("units", raw);
-    if (unitId === null) throw fieldError("unitId", RENT_MSG.lineNotOnStatement);
-    const today = businessToday(Date.now());
-    const built = await buildStatement(ctx, st, { statementDate: today });
-    const key = rentKey(unitId);
-    const line = [...built.lines, ...built.excludedLines].find((l) => l.key === key);
-    if (!line || line.kind !== "rent" || !line.rentDefault) throw fieldError("unitId", RENT_MSG.lineNotOnStatement);
-    const def = line.rentDefault;
-    const current = { amountCents: line.amountCents, date: line.storedDate, counterparty: line.counterparty, memo: line.memo };
-
-    let after = def;
-    let next: RentOverride | null = null;
-    if (args.reset !== true) {
-      const c = validateRentLineFields({
-        amount: args.amountCents === undefined ? current.amountCents : args.amountCents,
-        date: args.date === undefined ? current.date : args.date,
-        counterparty: args.counterparty === undefined ? current.counterparty : args.counterparty,
-        memo: args.memo === undefined ? current.memo : args.memo,
-        month: st.month,
-        periodStart: st.periodStart,
-        periodEnd: st.periodEnd,
-        today,
-      });
-      if (!c.ok) throw fieldError(c.field, c.message);
-      after = c.value;
-      // Only what differs from the roster is stored.
-      const o: RentOverride = { unitId };
-      if (c.value.amountCents !== def.amountCents) o.amountCents = c.value.amountCents;
-      if (c.value.date !== def.date) o.date = c.value.date;
-      if (c.value.counterparty !== def.counterparty) o.counterparty = c.value.counterparty;
-      if (c.value.memo !== def.memo) o.memo = c.value.memo;
-      next = Object.keys(o).length > 1 ? o : null;
-    }
-
-    const list = st.rentOverrides ?? [];
-    const prev = list.find((o) => o.unitId === unitId) ?? null;
-    if (JSON.stringify(prev) === JSON.stringify(next)) return null;
-    const rentOverrides = [...list.filter((o) => o.unitId !== unitId), ...(next ? [next] : [])];
-    await ctx.db.patch(st._id, { rentOverrides, updatedAt: Date.now() });
-    const where = `Unit ${line.unit} (${line.propertyName})`;
-    await writeAudit(ctx, {
-      orgId: org.orgId,
-      entity: "ros",
-      entityId: st._id,
-      action: args.reset === true ? "rent_line_reset" : "rent_line_changed",
-      actorUserId: org.user._id,
-      from: JSON.stringify(current),
-      to: JSON.stringify(after),
-      note: where,
-    });
-    await clearRentCheck(ctx, org, st, `Rent line changed: ${where}`);
-    return null;
+  handler: async (ctx) => {
+    await requireFinance(ctx);
+    throw new ConvexError(RENT_PAY_MSG.onPaymentsPage);
   },
 });
 
-/**
- * "I've checked the rent lines against what was actually received" (or untick it). Ticking needs
- * the fingerprint the accountant reviewed (`get().rent.hash`), so a change made meanwhile is never
- * confirmed unseen. Audited.
- */
+/** DEPRECATED (2026-11-12): there is no rent confirmation any more; rent is marked on the Payments page. */
 export const confirmRent = mutation({
   args: {
     statementId: v.optional(v.union(v.string(), v.null())),
     checked: v.optional(v.union(v.boolean(), v.null())),
     expectedRentHash: v.optional(v.union(v.string(), v.null())),
   },
-  handler: async (ctx, args) => {
-    const org = await requireFinance(ctx);
-    const st = await loadDraft(ctx, org, args.statementId);
-    if (args.checked !== true && args.checked !== false) throw fieldError("checked", RENT_MSG.confirmMissing);
-    if (args.checked === false) {
-      if (st.rentCheckedAt === undefined && st.rentCheckedHash === undefined) return null;
-      await ctx.db.patch(st._id, { rentCheckedAt: undefined, rentCheckedBy: undefined, rentCheckedHash: undefined, updatedAt: Date.now() });
-      await writeAudit(ctx, {
-        orgId: org.orgId,
-        entity: "ros",
-        entityId: st._id,
-        action: "rent_unchecked",
-        actorUserId: org.user._id,
-        from: "checked",
-        to: "unchecked",
-      });
-      return null;
-    }
-    const built = await buildStatement(ctx, st, { statementDate: businessToday(Date.now()) });
-    if (built.rent.hash === null) throw new ConvexError(RENT_MSG.noRentLines);
-    if (typeof args.expectedRentHash !== "string" || args.expectedRentHash !== built.rent.hash) {
-      throw new ConvexError(RENT_MSG.changed);
-    }
-    if (built.rent.checked) return null;
-    const on = built.lines.filter((l) => l.kind === "rent");
-    const off = built.excludedLines.filter((l) => l.kind === "rent").length;
-    const totalCents = on.reduce((sum, l) => sum + l.amountCents, 0);
-    const now = Date.now();
-    await ctx.db.patch(st._id, { rentCheckedAt: now, rentCheckedBy: org.user._id, rentCheckedHash: built.rent.hash, updatedAt: now });
-    await writeAudit(ctx, {
-      orgId: org.orgId,
-      entity: "ros",
-      entityId: st._id,
-      action: "rent_checked",
-      actorUserId: org.user._id,
-      from: "unchecked",
-      to: "checked",
-      note: `${on.length} roster rent ${on.length === 1 ? "line" : "lines"} (${formatCurrency(totalCents)}), ${off} removed`,
-    });
-    return null;
+  handler: async (ctx) => {
+    await requireFinance(ctx);
+    throw new ConvexError(RENT_PAY_MSG.onPaymentsPage);
   },
 });
 
@@ -1049,37 +914,6 @@ export const finalize = mutation({
       });
     }
 
-    // 6b. roster-rent rows: one Rent Income row per included rent line (deterministic sourceId
-    //     `${statementId}:${unitId}`; never twice)
-    for (const r of plan.rentRows) {
-      const prior = await ctx.db
-        .query("ledgerEntries")
-        .withIndex("by_source", (q) => q.eq("source", "roster_rent").eq("sourceId", r.sourceId))
-        .first();
-      if (prior) throw new ConvexError(M.finalizedAlready);
-      const uid = r.unitId !== undefined ? ctx.db.normalizeId("units", r.unitId) : null;
-      const unit = uid ? await ctx.db.get(uid) : null;
-      if (!unit || unit.orgId !== org.orgId || unit.propertyId !== r.propertyId) throw new ConvexError(M.entryChanged);
-      await ctx.db.insert("ledgerEntries", {
-        orgId: org.orgId,
-        ownerId: st.ownerId,
-        propertyId: unit.propertyId,
-        unitId: unit._id,
-        date: r.date,
-        postedDate: r.postedDate,
-        type: r.type,
-        accountId: r.accountId as Id<"ledgerAccounts">,
-        counterparty: r.counterparty,
-        memo: r.memo,
-        amountCents: r.amountCents,
-        source: "roster_rent",
-        sourceId: r.sourceId,
-        statementId: st._id,
-        createdAt: now,
-        updatedAt: now,
-      });
-    }
-
     // 7. manual rows: still unbilled and not voided, then stamp (date kept; postedDate = statement date)
     for (const { entryId: raw, postedDate } of plan.entryPosts) {
       const id = ctx.db.normalizeId("ledgerEntries", raw);
@@ -1134,7 +968,6 @@ export const finalize = mutation({
         endingCents: result.summary.ending.total,
         availableCents: result.summary.available.total,
         lines: result.detail.additions.length + result.detail.subtractions.length,
-        rentLines: plan.rentRows.length,
       }),
     });
     return { statementId: st._id };

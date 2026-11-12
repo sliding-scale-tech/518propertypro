@@ -5,7 +5,6 @@ import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { OrgContext } from "./authz";
 import { writeAudit } from "./audit";
 import { fieldError, requireFinance } from "./financeAccess";
-import { clearRentCheckForProperty } from "./ownerStatements";
 import { entrySourceLabel, statementLabel } from "./rosBuild";
 import { displayName, effectivePayee } from "./rosCalc";
 import { PROPERTY_LEVEL, businessToday, isMonth, monthEnd, monthStart, naturalCompare } from "./rosFormat";
@@ -30,6 +29,11 @@ import {
  * draft) can still have its other fields corrected, and it can always be voided.
  * At finalize every billed row gets `postedDate` (the date on the statement); `date` stays the
  * original. The list shows and filters by the posted date when there is one.
+ *
+ * Rent (2026-11-12): rows on the Rent Income system account can't be added or edited here ("Record
+ * rent on the Payments page.", rosPolicy.validateEntryFields); rent is marked received on the
+ * Payments page (rentPayments.ts, source "rent_payment"). Rent Income rows entered by hand before
+ * that stay valid, go on statements as before and can still be deleted (voided) here.
  */
 
 export const ENTRY_NOT_FOUND = "Transaction not found.";
@@ -170,9 +174,7 @@ async function checkEntry(
   };
 }
 
-/** A Rent Income row changed: the open draft holding the property must have its rent checked again. */
-const RENT_ROW_CHANGED = "A Rent Income transaction changed in the ledger.";
-
+/** The Rent Income system account: rent is recorded on the Payments page (convex/rentPayments.ts), not here. */
 function isRentAccount(a: Doc<"ledgerAccounts"> | null): boolean {
   return a !== null && a.systemKey === "rent_income";
 }
@@ -381,7 +383,12 @@ export const list = query({
         statementLabel: st ? statementLabel(st.month) : null,
         voided: e.voided === true,
         voidReason: e.voidReason ?? null,
+        /** Unbilled manual row: Delete (void) allowed; Edit too unless it is on Rent Income. */
         editable: e.statementId === undefined && e.source === "manual" && e.voided !== true,
+        /** On the Rent Income account: rent is recorded and changed on the Payments page. */
+        onRentAccount: isRentAccount(acc),
+        /** A rent payment from the Payments page: the month the rent is for. */
+        rentForMonth: e.source === "rent_payment" ? (e.rentForMonth ?? null) : null,
       });
     }
     return { page: rows, isDone: page.isDone, continueCursor: page.continueCursor };
@@ -461,7 +468,6 @@ export const add = mutation({
         amountCents: c.value.amountCents,
       }),
     });
-    if (isRentAccount(c.account)) await clearRentCheckForProperty(ctx, org, c.property._id, RENT_ROW_CHANGED);
     return { entryId };
   },
 });
@@ -535,7 +541,6 @@ export const update = mutation({
       to.amountCents = next.amountCents;
     }
     if (Object.keys(to).length === 0) return null;
-    const wasRent = isRentAccount(await ctx.db.get(entry.accountId));
 
     await ctx.db.patch(entry._id, { ...next, updatedAt: Date.now() });
     await writeAudit(ctx, {
@@ -547,7 +552,6 @@ export const update = mutation({
       from: JSON.stringify(from),
       to: JSON.stringify(to),
     });
-    if (wasRent || isRentAccount(c.account)) await clearRentCheckForProperty(ctx, org, entry.propertyId, RENT_ROW_CHANGED);
     return null;
   },
 });
@@ -585,9 +589,6 @@ export const voidEntry = mutation({
       to: "voided",
       note: reason,
     });
-    if (isRentAccount(await ctx.db.get(entry.accountId))) {
-      await clearRentCheckForProperty(ctx, org, entry.propertyId, RENT_ROW_CHANGED);
-    }
     return null;
   },
 });

@@ -149,8 +149,9 @@ export function TransactionForm({
     amount,
     today,
     property: property ? { name: property.name } : null,
+    // systemKey "rent_income" is refused (validateEntryFields): rent goes on the Payments page.
     account: account
-      ? { name: account.name, active: true }
+      ? { name: account.name, active: true, systemKey: account.systemKey ?? null }
       : accountOff && entry
         ? { name: entry.accountName, active: false }
         : null,
@@ -326,7 +327,12 @@ export function TransactionForm({
             <option value="">{opts === undefined ? "Loading accounts…" : "Select an account"}</option>
             {accountOff && entry ? <option value={entry.accountId}>{`${entry.accountName} (turned off)`}</option> : null}
             {accounts.map((a) => (
-              <option key={a._id} value={a._id}>
+              <option
+                key={a._id}
+                value={a._id}
+                disabled={a.systemKey === "rent_income"}
+                data-sublabel={a.systemKey === "rent_income" ? ENTRY_MSG.rentOnPaymentsPage : undefined}
+              >
                 {`${a.name} · ${a.kindLabel}`}
               </option>
             ))}

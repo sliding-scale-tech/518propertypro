@@ -32,24 +32,28 @@ import {
   effectivePayee,
   footerName,
 } from "./rosCalc";
-import { COMPANY_NAME, MAX_AMOUNT_CENTS, PROPERTY_LEVEL, businessDate, formatMonth, isIsoDate, monthStart, naturalCompare, prevMonth } from "./rosFormat";
+import { COMPANY_NAME, PROPERTY_LEVEL, businessDate, formatMonth, monthEnd, monthStart, prevMonth } from "./rosFormat";
 import {
   ADDITION_TYPES,
   MAX_STATEMENT_LINES,
   MSG,
-  RENT_MSG,
-  RENT_SKIP_TEXT,
   ROSTER_RENT_LABEL,
-  ROSTER_RENT_MEMO,
   cmpStr,
   effectiveFee,
   finalizeProblem,
-  rentPrefillDecision,
   selectWorkOrders,
   type RentSkipCode,
   type RowType,
   type WoForBilling,
 } from "./rosPolicy";
+import {
+  RECEIVED_WINDOW_MONTHS,
+  RENT_PAY_MSG,
+  rentMarkability,
+  rentRecordsFor,
+  unpaidCheckMonths,
+  type RentRecord,
+} from "./rentPaymentsPolicy";
 
 // --- DB-shaped inputs (Convex Docs are assignable to these) -------------------------------------
 
@@ -79,22 +83,13 @@ export type BuildUnit = {
   /** Roster rent in DOLLARS (units.rent); absent = not stated. */
   rent?: number;
   rentPaidTo?: "company" | "owner_direct" | "included_in_other_unit";
-  /** Roster occupancy / lease type: "vacant" ones get no rent line (rosPolicy.rosterSaysVacant). */
+  /** Roster occupancy / lease type: "vacant" ones can't have rent marked (rosPolicy.rosterSaysVacant). */
   occupancy?: string;
   leaseType?: string;
 };
 
-/** A resident row (residents table): only active ones name the tenant on a rent line. */
+/** A resident row (residents table): only active ones count as the unit's tenants. */
 export type BuildResident = { unitId: string; fullName: string; active: boolean };
-
-/** The accountant's edits to a prefilled rent line (ownerStatements.rentOverrides). */
-export type BuildRentOverride = {
-  unitId: string;
-  amountCents?: number;
-  date?: string;
-  counterparty?: string;
-  memo?: string;
-};
 
 export type BuildLink = {
   _id: string;
@@ -119,6 +114,8 @@ export type BuildEntry = {
   source: CalcSource;
   statementId?: string;
   voided?: boolean;
+  /** rent_payment rows: the month the rent is for ("YYYY-MM"). */
+  rentForMonth?: string;
   createdAt: number;
 };
 
@@ -167,10 +164,7 @@ export type BuildStatementDoc = {
   includedKeys?: string[];
   adjustments: BuildAdjustment[];
   overrides: BuildOverride[];
-  rentOverrides?: BuildRentOverride[];
-  /** Set = the accountant confirmed the rent lines; valid only while rentCheckedHash matches. */
-  rentCheckedAt?: number;
-  rentCheckedHash?: string;
+  // rentOverrides / rentChecked* (the old roster-rent prefill) are no longer read (2026-11-12).
 };
 
 export type BuildPropertyData = {
@@ -195,13 +189,14 @@ export type BuildPropertyData = {
   units: BuildUnit[];
   /** Candidate ledger rows; filtered again here (unbilled, not voided, this owner, date <= periodEnd). */
   entries: BuildEntry[];
-  /** Residents of the property's units (roster-rent tenant names). Absent = none loaded. */
+  /** Residents of the property's units (who counts as a tenant, for the unpaid-rent check). Absent = none loaded. */
   residents?: BuildResident[];
   /**
-   * Extra ledger rows (any owner, billed or not) dated inside the period, used ONLY for the roster
-   * rent "already recorded" check; they never go on the statement from here.
+   * Ledger rows of the property's units (any owner, billed or not) used ONLY for the "no rent marked
+   * received" info warning: rent_payment rows by rentForMonth and rows dated in the checked months.
+   * They never go on the statement from here (that is `entries`).
    */
-  rentRecorded?: BuildEntry[];
+  rentRecords?: RentRecord[];
   /**
    * Work orders of the property: closed ones that are still pending for the ROS (rosPending, or
    * not backfilled yet) and status completed. Filtered again here (selectWorkOrders).
@@ -224,12 +219,13 @@ export type BuildData = {
 
 // --- outputs -------------------------------------------------------------------------------------
 
+/** "rent" = a historical roster-rent line (key "rent:<unitId>"), only on statements finalized before 2026-11-12. */
 export type LineKind = "entry" | "wo" | "fee" | "draw" | "rent";
 
-/** The roster values of a prefilled rent line (what "Reset to roster" goes back to). */
-export type RentDefault = { amountCents: number; date: string; counterparty: string; memo: string };
-
-/** A unit that got no roster-rent line, and why ("Not prefilled" card). */
+/**
+ * DEPRECATED (roster-rent prefill, removed 2026-11-12). `ownerStatements.get().rent.skipped` keeps
+ * this shape (always empty) so an older client still renders.
+ */
 export type RentSkip = {
   propertyId: string;
   propertyName: string;
@@ -237,16 +233,6 @@ export type RentSkip = {
   unit: string;
   code: RentSkipCode;
   reason: string;
-};
-
-export type RentSummary = {
-  /** Roster-rent lines on the statement, included and removed. */
-  lineCount: number;
-  /** Fingerprint of every rent line (roster and Rent Income ledger rows); null = no roster-rent line. */
-  hash: string | null;
-  /** True while the stored confirmation matches the current rent lines. */
-  checked: boolean;
-  skipped: RentSkip[];
 };
 
 export type LineView = {
@@ -271,9 +257,10 @@ export type LineView = {
   unitId?: string | null;
   billPropertyLevel?: boolean;
   editable: boolean;
-  /** Roster-rent lines only: the roster values, and whether the accountant changed any of them. */
-  rentDefault?: RentDefault;
-  rentEdited?: boolean;
+  /** A rent payment from the Payments page (source rent_payment): the month the rent is for. */
+  rentForMonth?: string;
+  /** A ledger row on the Rent Income account: rent is changed on the Payments page, not here. */
+  onRentAccount?: boolean;
   /**
    * True for a line dated before the owner's first statement month: it is left off unless the
    * accountant includes it (ownerStatements.includedKeys). `note` says why.
@@ -302,9 +289,15 @@ export type PropertyAdjustmentView = {
 
 /** What a candidate row came from, for LineViews and the finalize writes. */
 export type RowOrigin =
-  | { kind: "entry"; entryId: string; source: CalcSource; unitId: string | null }
-  | { kind: "wo"; workOrderId: string; number: number; unitId: string; billPropertyLevel: boolean }
-  | { kind: "rent"; unitId: string; rentDefault: RentDefault; edited: boolean };
+  | {
+      kind: "entry";
+      entryId: string;
+      source: CalcSource;
+      unitId: string | null;
+      onRentAccount: boolean;
+      rentForMonth?: string;
+    }
+  | { kind: "wo"; workOrderId: string; number: number; unitId: string; billPropertyLevel: boolean };
 
 export type BuiltStatement = {
   input: CalcInput;
@@ -320,7 +313,6 @@ export type BuiltStatement = {
   payeeName: string | null;
   /** This owner's link per property (null when not linked), in column order. */
   ownerLinks: (BuildLink | null)[];
-  rent: RentSummary;
 };
 
 // --- small pure helpers --------------------------------------------------------------------------
@@ -388,38 +380,9 @@ export function woToCalcRow(wo: BuildWorkOrder, unitLabel: string | null): CalcR
   };
 }
 
-/** Key of a unit's roster-rent line. */
+/** Key of a unit's (historical) roster-rent line: a billed roster_rent row maps back to it. */
 export function rentKey(unitId: string): string {
   return `rent:${unitId}`;
-}
-
-/** Deterministic sourceId of the roster-rent ledger row finalize writes for a unit. */
-export function rentSourceId(statementId: string, unitId: string): string {
-  return `${statementId}:${unitId}`;
-}
-
-/**
- * The effective rent line of a unit: the roster values with the accountant's overrides on top. An
- * override field that isn't valid (amount not 1..MAX cents, date outside the period, blank text) is
- * ignored, so a bad stored value can never reach the statement.
- */
-export function applyRentOverride(
-  def: RentDefault,
-  ov: BuildRentOverride | undefined,
-  periodStart: string,
-  periodEnd: string,
-): { value: RentDefault; edited: boolean } {
-  if (!ov) return { value: def, edited: false };
-  const a = ov.amountCents;
-  const amountCents = typeof a === "number" && Number.isSafeInteger(a) && a > 0 && a <= MAX_AMOUNT_CENTS ? a : def.amountCents;
-  const d = ov.date;
-  const date = typeof d === "string" && isIsoDate(d) && d >= periodStart && d <= periodEnd ? d : def.date;
-  const counterparty = (typeof ov.counterparty === "string" ? ov.counterparty.trim() : "") || def.counterparty;
-  const memo = (typeof ov.memo === "string" ? ov.memo.trim() : "") || def.memo;
-  const value = { amountCents, date, counterparty, memo };
-  const edited =
-    amountCents !== def.amountCents || date !== def.date || counterparty !== def.counterparty || memo !== def.memo;
-  return { value, edited };
 }
 
 /** "Manual" for hand-entered rows; the other sources (only seen in the ledger list) get a plain label. */
@@ -439,8 +402,13 @@ export function entrySourceLabel(source: CalcSource): string {
       return "Card payment";
     case "roster_rent":
       return ROSTER_RENT_LABEL;
+    case "rent_payment":
+      return RENT_PAYMENT_LABEL;
   }
 }
+
+/** Source label of a rent payment marked on the Payments page. */
+export const RENT_PAYMENT_LABEL = "Payments page";
 
 export function feeSourceLabel(overridden: boolean): string {
   return overridden ? "Management fee (edited)" : "Management fee (auto)";
@@ -498,8 +466,8 @@ function warningOrder(warnings: StatementWarning[], colOf: Map<string, number>):
     .map((x) => x.w);
 }
 
-/** `propertyId` / `workOrderId` (when the warning is about one) let the UI link to where it's fixed. */
-export type WarningView = { code: string; message: string; propertyId?: string; workOrderId?: string };
+/** `propertyId` / `workOrderId` / `rentMonth` (when the warning is about one) let the UI link to where it's fixed. */
+export type WarningView = { code: string; message: string; propertyId?: string; workOrderId?: string; rentMonth?: string };
 
 export function splitWarnings(warnings: StatementWarning[]): { blocking: WarningView[]; info: WarningView[] } {
   const view = (w: StatementWarning): WarningView => ({
@@ -507,6 +475,7 @@ export function splitWarnings(warnings: StatementWarning[]): { blocking: Warning
     message: w.message,
     ...(w.propertyId !== undefined ? { propertyId: w.propertyId } : {}),
     ...(w.workOrderId !== undefined ? { workOrderId: w.workOrderId } : {}),
+    ...(w.rentMonth !== undefined ? { rentMonth: w.rentMonth } : {}),
   });
   return {
     blocking: warnings.filter((w) => w.blocking).map(view),
@@ -525,10 +494,9 @@ export function assembleStatement(data: BuildData, isDraft = true): BuiltStateme
   const accountById = new Map(accounts.map((a) => [a._id, a]));
   const feeAccount = accounts.find((a) => a.systemKey === "management_fees") ?? null;
   const drawAccount = accounts.find((a) => a.systemKey === "owner_draw") ?? null;
-  const rentAccount = accounts.find((a) => a.systemKey === "rent_income") ?? null;
   const rentAccountIds = new Set(accounts.filter((a) => a.systemKey === "rent_income").map((a) => a._id));
-  const rentOv = new Map((st.rentOverrides ?? []).map((o) => [o.unitId, o]));
-  const rentSkipped: RentSkip[] = [];
+  /** Rent month -> units (all properties) with markable rent and nothing recorded (RENT_UNPAID). */
+  const unpaidByMonth = new Map<string, number>();
   const accountsMissing = !feeAccount || !drawAccount;
   const excluded = new Set(st.excludedKeys);
   const putBack = new Set(st.includedKeys ?? []);
@@ -650,21 +618,29 @@ export function assembleStatement(data: BuildData, isDraft = true): BuiltStateme
       (off ? excludedRows : included).push(row);
     };
 
-    // manual (and later Stripe) ledger rows
+    // ledger rows: entered by hand, and rent payments from the Payments page (source rent_payment,
+    // dated the day received: cash basis). Rent is no longer prefilled from the roster (2026-11-12).
     for (const e of pd.entries) {
       if (e.propertyId !== pid || e.statementId !== undefined || e.voided === true) continue;
       if (e.ownerId !== st.ownerId || e.date > st.periodEnd) continue;
       const unitLabel = e.unitId !== undefined ? (unitLabelOf.get(e.unitId) ?? null) : null;
       take(
         entryToCalcRow(e, unitLabel),
-        { kind: "entry", entryId: e._id, source: e.source, unitId: e.unitId ?? null },
+        {
+          kind: "entry",
+          entryId: e._id,
+          source: e.source,
+          unitId: e.unitId ?? null,
+          onRentAccount: rentAccountIds.has(e.accountId),
+          ...(e.source === "rent_payment" && e.rentForMonth !== undefined ? { rentForMonth: e.rentForMonth } : {}),
+        },
         e.date < floorDate ? MSG.ENTRY_BEFORE_START_NOTE : undefined,
       );
     }
 
-    // roster rent (until Stripe): one Rent Income line per occupied unit, dated periodStart, unless
-    // the unit is skipped (each skip is listed in rent.skipped, so nothing is dropped silently)
-    if (rentAccount !== null) {
+    // "No rent marked received" (info only): units whose rent can be marked (rentPaymentsPolicy
+    // .rentMarkability) with neither a rent payment for the month nor a Rent Income row dated in it.
+    if (pd.property && link) {
       const tenantsOf = new Map<string, string[]>();
       for (const r of pd.residents ?? []) {
         if (!r.active) continue;
@@ -672,55 +648,20 @@ export function assembleStatement(data: BuildData, isDraft = true): BuiltStateme
         list.push(r.fullName);
         tenantsOf.set(r.unitId, list);
       }
-      // A non-voided Rent Income row for the unit dated inside the period (any owner, billed or not):
-      // the rent is already recorded (by hand now, Stripe later), so it is not prefilled twice.
-      const recorded = new Set<string>();
-      for (const e of [...pd.entries, ...(pd.rentRecorded ?? [])]) {
-        if (e.voided === true || e.unitId === undefined || e.propertyId !== pid || !rentAccountIds.has(e.accountId)) continue;
-        if (e.date < st.periodStart || e.date > st.periodEnd) continue;
-        recorded.add(e.unitId);
+      const seen = new Set<string>();
+      const records: RentRecord[] = [];
+      for (const r of [...pd.entries, ...(pd.rentRecords ?? [])]) {
+        if (seen.has(r._id)) continue;
+        seen.add(r._id);
+        records.push(r);
       }
-      const units = [...pd.units].sort((a, b) => naturalCompare(a.unitNumber, b.unitNumber) || cmpStr(a._id, b._id));
-      for (const u of units) {
-        const d = rentPrefillDecision({
-          rent: u.rent,
-          rentPaidTo: u.rentPaidTo,
-          tenants: tenantsOf.get(u._id) ?? [],
-          alreadyRecorded: recorded.has(u._id),
-          occupancy: u.occupancy,
-          leaseType: u.leaseType,
-        });
-        if (!d.ok) {
-          rentSkipped.push({
-            propertyId: pid,
-            propertyName: name,
-            unitId: u._id,
-            unit: u.unitNumber,
-            code: d.code,
-            reason: d.code === "already_recorded" ? RENT_SKIP_TEXT.already_recorded(st.month) : RENT_SKIP_TEXT[d.code],
-          });
-          if (d.code === "invalid_rent") {
-            dbWarnings.push({ code: "RENT_INVALID", propertyId: pid, message: RENT_MSG.INVALID(u.unitNumber, name), blocking: false });
-          }
-          continue;
+      const months = unpaidCheckMonths(st.month, link.startMonth);
+      for (const u of pd.units) {
+        if (!rentMarkability(u, tenantsOf.get(u._id) ?? []).markable) continue;
+        for (const m of months) {
+          const rec = rentRecordsFor(u._id, m, records, rentAccountIds);
+          if (rec.payment === null && rec.ledger.length === 0) unpaidByMonth.set(m, (unpaidByMonth.get(m) ?? 0) + 1);
         }
-        const def: RentDefault = { amountCents: d.amountCents, date: st.periodStart, counterparty: d.counterparty, memo: ROSTER_RENT_MEMO };
-        const { value, edited } = applyRentOverride(def, rentOv.get(u._id), st.periodStart, st.periodEnd);
-        take(
-          {
-            key: rentKey(u._id),
-            propertyId: pid,
-            unitLabel: u.unitNumber,
-            date: value.date,
-            accountId: rentAccount._id,
-            counterparty: value.counterparty,
-            memo: value.memo,
-            amountCents: value.amountCents,
-            source: "roster_rent",
-            seq: 0,
-          },
-          { kind: "rent", unitId: u._id, rentDefault: def, edited },
-        );
       }
     }
 
@@ -788,30 +729,12 @@ export function assembleStatement(data: BuildData, isDraft = true): BuiltStateme
     if (open !== null) dbWarnings.push({ code: "PERIOD_OPEN", message: open, blocking: false });
   }
 
-  if (rentAccount === null && data.properties.some((pd) => pd.units.length > 0)) {
-    dbWarnings.push({ code: "RENT_ACCOUNT_MISSING", message: RENT_MSG.ACCOUNT_MISSING, blocking: false });
-  }
-
-  // The rent confirmation: a fingerprint of every rent line (roster lines and Rent Income ledger
-  // rows, on or off). Only statements with a roster-rent line need it; any change voids it.
-  const rentRows = [
-    ...included.map((r) => ({ r, on: true })),
-    ...excludedRows.map((r) => ({ r, on: false })),
-  ].filter(({ r }) => r.key.startsWith("rent:") || rentAccountIds.has(r.accountId));
-  const rosterRentCount = rentRows.filter(({ r }) => r.key.startsWith("rent:")).length;
-  const rentHash =
-    rosterRentCount === 0
-      ? null
-      : hashString(
-          JSON.stringify(
-            rentRows
-              .map(({ r, on }) => [r.key, on, r.propertyId, r.unitLabel, r.date, r.accountId, r.amountCents, r.counterparty, r.memo])
-              .sort((a, b) => cmpStr(a[0] as string, b[0] as string)),
-          ),
-        );
-  const rentChecked = rentHash !== null && st.rentCheckedAt !== undefined && st.rentCheckedHash === rentHash;
-  if (rentHash !== null && !rentChecked) {
-    dbWarnings.push({ code: "RENT_NOT_CHECKED", message: RENT_MSG.NOT_CHECKED(st.month), blocking: true });
+  // Info only (never blocks): rent not marked received yet, per rent month, oldest first.
+  if (isDraft) {
+    for (const m of [...unpaidByMonth.keys()].sort(cmpStr)) {
+      const n = unpaidByMonth.get(m) ?? 0;
+      if (n > 0) dbWarnings.push({ code: "RENT_UNPAID", rentMonth: m, message: RENT_PAY_MSG.UNPAID(n, m), blocking: false });
+    }
   }
 
   const input: CalcInput = {
@@ -896,7 +819,7 @@ export function assembleStatement(data: BuildData, isDraft = true): BuiltStateme
         origins[r.key],
         isDraft,
       );
-      return withDefaultOff(view.kind === "rent" ? { ...view, note: RENT_MSG.REMOVED_NOTE } : view, defaultOff);
+      return withDefaultOff(view, defaultOff);
     })
     .sort((a, b) => cmpStr(a.date, b.date) || cmpStr(a.key, b.key));
 
@@ -925,12 +848,6 @@ export function assembleStatement(data: BuildData, isDraft = true): BuiltStateme
     drawAccountId: drawAccount?._id ?? null,
     payeeName,
     ownerLinks,
-    rent: {
-      lineCount: rosterRentCount,
-      hash: rentHash,
-      checked: rentChecked,
-      skipped: rentSkipped,
-    },
   };
 }
 
@@ -950,17 +867,10 @@ function withOrigin(
       sourceLabel: entrySourceLabel(origin.source),
       entryId: origin.entryId,
       unitId: origin.unitId,
+      // Only rows entered by hand are edited here; a rent payment is changed on the Payments page.
       editable: isDraft && origin.source === "manual",
-    };
-  }
-  if (origin.kind === "rent") {
-    return {
-      ...base,
-      sourceLabel: ROSTER_RENT_LABEL,
-      unitId: origin.unitId,
-      editable: isDraft,
-      rentDefault: origin.rentDefault,
-      rentEdited: origin.edited,
+      ...(origin.onRentAccount ? { onRentAccount: true } : {}),
+      ...(origin.rentForMonth !== undefined ? { rentForMonth: origin.rentForMonth } : {}),
     };
   }
   return {
@@ -988,7 +898,7 @@ export type PlannedLedgerRow = {
   counterparty: string;
   memo: string;
   amountCents: number;
-  source: "work_order" | "management_fee" | "owner_draw" | "roster_rent";
+  source: "work_order" | "management_fee" | "owner_draw";
   sourceId: string;
   workOrderId?: string;
   woNumber?: number;
@@ -1004,9 +914,9 @@ export function generatedSourceId(statementId: string, propertyId: string): stri
  * - one row per included WO line, dated the WO's completion date (`date`) and posted on the line's
  *   EFFECTIVE date (`postedDate`), at property level when billPropertyLevel;
  * - one row per fee / draw line, dated and posted periodEnd, sourceId = `${statementId}:${propertyId}`;
- * - one Rent Income row per included roster-rent line (unit level, dated and posted on the line's
- *   date, which is inside the period), sourceId = `${statementId}:${unitId}`;
- * - the included ledger entries to stamp with statementId and their posted (effective) date.
+ * - the included ledger entries (manual rows AND rent payments from the Payments page) to stamp
+ *   with statementId and their posted (effective) date.
+ * Roster rent is no longer prefilled (2026-11-12), so no roster_rent row is ever written.
  */
 export function finalizePlan(
   built: BuiltStatement,
@@ -1014,12 +924,10 @@ export function finalizePlan(
 ): {
   woRows: PlannedLedgerRow[];
   generatedRows: PlannedLedgerRow[];
-  rentRows: PlannedLedgerRow[];
   entryIds: string[];
   entryPosts: { entryId: string; postedDate: string }[];
 } {
   const woRows: PlannedLedgerRow[] = [];
-  const rentRows: PlannedLedgerRow[] = [];
   const generatedRows: PlannedLedgerRow[] = [];
   const entryIds: string[] = [];
   const entryPosts: { entryId: string; postedDate: string }[] = [];
@@ -1056,26 +964,7 @@ export function finalizePlan(
       });
       continue;
     }
-    if (kind === "rent") {
-      const o = built.origins[l.key];
-      const r = rowByKey.get(l.key);
-      if (o?.kind !== "rent" || !r) throw new Error(`rosBuild: no origin for ${l.key}`);
-      rentRows.push({
-        key: l.key,
-        propertyId: l.propertyId,
-        unitId: o.unitId,
-        date: l.storedDate,
-        postedDate: l.date,
-        type: l.type,
-        accountId: r.accountId,
-        counterparty: r.counterparty,
-        memo: l.memo,
-        amountCents: l.amountCents,
-        source: "roster_rent",
-        sourceId: rentSourceId(statementId, o.unitId),
-      });
-      continue;
-    }
+    if (kind === "rent") throw new Error(`rosBuild: a draft has no roster-rent line (${l.key})`);
     const isFee = kind === "fee";
     const accountId = isFee ? built.feeAccountId : built.drawAccountId;
     if (accountId === null) throw new Error("rosBuild: system account missing at finalize");
@@ -1094,7 +983,7 @@ export function finalizePlan(
       sourceId: generatedSourceId(statementId, l.propertyId),
     });
   }
-  return { woRows, generatedRows, rentRows, entryIds, entryPosts };
+  return { woRows, generatedRows, entryIds, entryPosts };
 }
 
 /** The immutable final content (spec 5.4 finalize step 8). */
@@ -1127,6 +1016,7 @@ export type FinalLedgerRow = {
   counterparty: string;
   source: CalcSource;
   sourceId?: string;
+  rentForMonth?: string;
 };
 
 /** The line key a billed ledger row had on its statement. */
@@ -1179,6 +1069,7 @@ export function linesFromSnapshot(
       amountCents: l.amountCents,
       sourceLabel,
       ...(kind === "entry" && r ? { entryId: r._id } : {}),
+      ...(kind === "entry" && r?.source === "rent_payment" && r.rentForMonth !== undefined ? { rentForMonth: r.rentForMonth } : {}),
       ...(kind === "wo" ? { workOrderId: l.key.slice(3) } : {}),
       unitId: r?.unitId ?? null,
       editable: false,
@@ -1250,17 +1141,10 @@ export async function loadBuildData(
   };
 
   const prev = prevMonth(statement.month);
-  // Defensive input for the roster-rent "already recorded" check: this owner's BILLED rows dated in
-  // the period (unbilled ones are in `entries`). By the statement invariants there are none while
-  // the month has a draft, but a rent prefill must never double a recorded payment.
-  const billedInPeriod = (
-    await ctx.db
-      .query("ledgerEntries")
-      .withIndex("by_owner_and_date", (q) =>
-        q.eq("ownerId", statement.ownerId).gte("date", statement.periodStart).lte("date", statement.periodEnd),
-      )
-      .collect()
-  ).filter((e) => e.orgId === orgId && e.statementId !== undefined);
+  // The rent months the "no rent marked received" warning can look at (rentPaymentsPolicy
+  // .unpaidCheckMonths narrows this by the first statement month).
+  let firstCheckMonth = statement.month;
+  for (let i = 0; i < RECEIVED_WINDOW_MONTHS; i++) firstCheckMonth = prevMonth(firstCheckMonth);
   const properties: BuildPropertyData[] = [];
   for (const pid of statement.propertyIds) {
     const prop = await ctx.db.get(pid);
@@ -1294,12 +1178,27 @@ export async function loadBuildData(
     ).filter((u) => u.orgId === orgId);
 
     const residents: Doc<"residents">[] = [];
+    const rentRecords: Doc<"ledgerEntries">[] = [];
     for (const u of units) {
       const rows = await ctx.db
         .query("residents")
         .withIndex("by_unit", (q) => q.eq("unitId", u._id))
         .collect();
       for (const r of rows) if (r.orgId === orgId) residents.push(r);
+      // Rent payments for the checked rent months, and anything dated in them (rent entered by hand).
+      const paid = await ctx.db
+        .query("ledgerEntries")
+        .withIndex("by_unit_and_rent_month", (q) =>
+          q.eq("unitId", u._id).gte("rentForMonth", firstCheckMonth).lte("rentForMonth", statement.month),
+        )
+        .collect();
+      const dated = await ctx.db
+        .query("ledgerEntries")
+        .withIndex("by_unit_and_date", (q) =>
+          q.eq("unitId", u._id).gte("date", monthStart(firstCheckMonth)).lte("date", monthEnd(statement.month)),
+        )
+        .collect();
+      for (const e of [...paid, ...dated]) if (e.orgId === orgId && e.voided !== true) rentRecords.push(e);
     }
 
     const entries = (
@@ -1352,7 +1251,7 @@ export async function loadBuildData(
       units,
       entries,
       residents,
-      rentRecorded: billedInPeriod.filter((e) => e.propertyId === pid),
+      rentRecords,
       workOrders,
     });
   }

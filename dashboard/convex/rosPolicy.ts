@@ -427,6 +427,8 @@ export const ENTRY_MSG = {
   dateFuture: "The date can't be in the future.",
   accountMissing: "Select the account for this transaction.",
   accountOff: (name: string): string => `The account “${name}” is turned off. Pick another account.`,
+  /** Rent Income is recorded only on the Payments page (2026-11-12); other income accounts are fine. */
+  rentOnPaymentsPage: "Record rent on the Payments page.",
   counterpartyMissing: "Enter the name that prints on the statement (tenant, vendor or payee).",
   counterpartyLong: "Keep the name under 120 characters.",
   memoMissing: "Enter a memo (it prints on the statement).",
@@ -459,8 +461,11 @@ export type EntryFieldsRaw = {
   today: string;
   /** The resolved property for propertyId; null = not found (treated as not chosen). */
   property: { name: string } | null;
-  /** The resolved account for accountId; null = not found (treated as not chosen). */
-  account: { name: string; active: boolean } | null;
+  /**
+   * The resolved account for accountId; null = not found (treated as not chosen). systemKey
+   * "rent_income" is refused: rent is recorded on the Payments page.
+   */
+  account: { name: string; active: boolean; systemKey?: string | null } | null;
   /** Whether unitId belongs to the property. Ignored when unitId is blank. */
   unitInProperty: boolean;
 };
@@ -500,6 +505,7 @@ function entryChecks(i: EntryFieldsRaw): Check[] {
       field: "accountId",
       run: () => {
         if (blank(i.accountId) || !i.account) return ENTRY_MSG.accountMissing;
+        if (i.account.systemKey === "rent_income") return ENTRY_MSG.rentOnPaymentsPage;
         if (!i.account.active) return ENTRY_MSG.accountOff(i.account.name);
         return null;
       },

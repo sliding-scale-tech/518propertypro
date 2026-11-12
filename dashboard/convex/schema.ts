@@ -7,6 +7,7 @@ import { sarahConfigValidator } from "./sarahConfigLib";
 import {
   accountSystemKeyValidator,
   ledgerSourceValidator,
+  paymentMethodValidator,
   rowTypeValidator,
   statementStatusValidator,
 } from "./rosValidators";
@@ -1484,7 +1485,7 @@ export default defineSchema({
     memo: v.string(),
     amountCents: v.number(), // integer > 0; direction comes from type
     source: ledgerSourceValidator,
-    sourceId: v.optional(v.string()), // WO id; "<statementId>:<propertyId>" for fee/draw; "<statementId>:<unitId>" for roster_rent; Stripe id later
+    sourceId: v.optional(v.string()), // WO id; "<statementId>:<propertyId>" for fee/draw; "<statementId>:<unitId>" for (historical) roster_rent; none for rent_payment; Stripe id later
     statementId: v.optional(v.id("ownerStatements")), // set = billed on that FINAL statement -> immutable
     voided: v.optional(v.boolean()),
     voidedAt: v.optional(v.number()),
@@ -1493,6 +1494,12 @@ export default defineSchema({
     // Set at finalize on every billed row: the date it shows on the statement (a carried-forward
     // row posts on the period's first day). `date` keeps the original date.
     postedDate: v.optional(v.string()),
+    // --- Rent payments (source "rent_payment", Payments page, convex/rentPayments.ts). `date` is the
+    // day the rent was RECEIVED (cash basis: it lands on that month's statement); rentForMonth is the
+    // month the rent is for ("YYYY-MM"). At most one non-voided rent_payment per unit per rentForMonth.
+    rentForMonth: v.optional(v.string()),
+    paymentMethod: v.optional(paymentMethodValidator),
+    paymentNote: v.optional(v.string()), // <= 200 chars, e.g. a check number
     createdBy: v.optional(v.id("users")), // absent = system (finalize)
     createdAt: v.number(),
     updatedAt: v.number(),
@@ -1504,7 +1511,12 @@ export default defineSchema({
     .index("by_org_and_date", ["orgId", "date"])
     .index("by_account", ["accountId"])
     .index("by_owner_and_posted", ["ownerId", "postedDate"])
-    .index("by_org_and_posted", ["orgId", "postedDate"]),
+    .index("by_org_and_posted", ["orgId", "postedDate"])
+    // Rent payments: a unit's payment for a rent month (uniqueness), the org's payments for a month
+    // (Payments page), and a unit's rows by date (rent entered by hand in the ledger before payments).
+    .index("by_unit_and_rent_month", ["unitId", "rentForMonth"])
+    .index("by_org_and_rent_month", ["orgId", "rentForMonth"])
+    .index("by_unit_and_date", ["unitId", "date"]),
 
   // One statement per owner per month (draft -> final, or discarded).
   ownerStatements: defineTable({
@@ -1515,7 +1527,7 @@ export default defineSchema({
     periodEnd: v.string(), // last day of month
     propertyIds: v.array(v.id("properties")), // column order (sorted at create)
     status: statementStatusValidator,
-    excludedKeys: v.array(v.string()), // "entry:<ledgerEntryId>" | "wo:<workOrderId>" | "rent:<unitId>" (rent: didn't pay)
+    excludedKeys: v.array(v.string()), // "entry:<ledgerEntryId>" | "wo:<workOrderId>" ("rent:<unitId>" only on old drafts; ignored)
     // Lines that are left off by default (dated before the owner's first statement month) and that
     // the accountant put back on. Same key format as excludedKeys.
     includedKeys: v.optional(v.array(v.string())),
@@ -1537,9 +1549,9 @@ export default defineSchema({
         drawExcluded: v.optional(v.boolean()),
       }),
     ),
-    // Roster-rent prefill (until Stripe): the accountant's edits to the prefilled rent line of a unit
-    // (key "rent:<unitId>"). A field left out = the roster value (amount = units.rent, date =
-    // periodStart, name = active tenants, memo "Payment"). Removing a line uses excludedKeys.
+    // DEPRECATED (2026-11-12, rent moved to the Payments page): no longer read or written. Was the
+    // roster-rent prefill's edits to a unit's prefilled rent line (key "rent:<unitId>"). Kept
+    // optional so existing rows stay valid.
     rentOverrides: v.optional(
       v.array(
         v.object({
@@ -1551,8 +1563,8 @@ export default defineSchema({
         }),
       ),
     ),
-    // "I've checked the rent lines against what was actually received". Valid only while
-    // rentCheckedHash equals the current fingerprint of the rent lines; any change clears it.
+    // DEPRECATED (2026-11-12): the old "I've checked the rent lines" confirmation. No longer read or
+    // written (final statements keep what they had). Kept optional so existing rows stay valid.
     rentCheckedAt: v.optional(v.number()),
     rentCheckedBy: v.optional(v.id("users")),
     rentCheckedHash: v.optional(v.string()),

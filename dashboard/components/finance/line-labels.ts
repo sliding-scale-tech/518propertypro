@@ -12,7 +12,49 @@ export type LineLabelInput = {
   /** The date the row was entered with. */
   storedDate: string;
   carriedForward: boolean;
+  /** Set on a rent payment from the Payments page (the month the rent is for). */
+  rentForMonth?: string;
+  /** A ledger row on the Rent Income account. */
+  onRentAccount?: boolean;
+  /** Dated before the owner's first statement month: off unless put back. */
+  defaultExcluded?: boolean;
 };
+
+/** A rent payment line (source rent_payment): read-only here, changed on the Payments page. */
+export const PAYMENTS_LINK = {
+  edit: "Edit on Payments page",
+  view: "View on Payments page",
+  tooltip: "Rent is recorded on the Payments page. Change or undo the payment there.",
+  legacyRentTooltip: "Rent Income rows can't be edited here any more. Delete it, or record rent on the Payments page.",
+} as const;
+
+/** True for a rent payment marked on the Payments page. */
+export function isRentPaymentLine(l: LineLabelInput): boolean {
+  return l.kind === "entry" && typeof l.rentForMonth === "string" && l.rentForMonth !== "";
+}
+
+/** The Payments page filtered to the payment's rent month and property. */
+export function paymentsPageHref(l: { rentForMonth?: string; propertyId?: string }): string {
+  const q = new URLSearchParams();
+  if (l.rentForMonth) q.set("month", l.rentForMonth);
+  if (l.propertyId) q.set("property", l.propertyId);
+  const s = q.toString();
+  return s ? `/owner-statements/payments?${s}` : "/owner-statements/payments";
+}
+
+/** Edit is offered on a hand-entered draft row, but not on Rent Income (rent goes on the Payments page). */
+export function canEditEntryLine(l: LineLabelInput): boolean {
+  return l.kind === "entry" && l.editable && l.onRentAccount !== true;
+}
+
+/**
+ * "Leave off this month": every draft line except a rent payment from the Payments page (undo it
+ * there). A payment that is off by default (before the first statement month) and was put back can
+ * go back to its default.
+ */
+export function canLeaveOffLine(l: LineLabelInput): boolean {
+  return !isRentPaymentLine(l) || l.defaultExcluded === true;
+}
 
 /** Button and toast text for leaving a line off / putting it back (server names stay exclude / include). */
 export const LEAVE_OFF = {
@@ -37,10 +79,11 @@ export const DELETE_ENTRY = {
 
 /**
  * True when the row is a hand-entered ledger row that is still editable on this draft (so unbilled
- * and not voided). Roster rent, work orders, fees, draws, imported rows and final statements: false.
+ * and not voided). Rent payments from the Payments page, roster rent, work orders, fees, draws,
+ * imported rows and final statements: false.
  */
 export function canDeleteLine(l: LineLabelInput): boolean {
-  return l.kind === "entry" && l.editable && typeof l.entryId === "string" && l.entryId !== "";
+  return l.kind === "entry" && l.editable && !isRentPaymentLine(l) && typeof l.entryId === "string" && l.entryId !== "";
 }
 
 /** True when the row's own date is before the period it posts in (it carried forward). */

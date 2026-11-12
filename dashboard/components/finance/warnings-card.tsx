@@ -11,7 +11,7 @@ type Warning = WarningLinkInput;
 /**
  * Draft warnings (spec 6.3 item 1): blocking items in red under "Fix before finalizing", info items
  * in amber under "Check". A warning with a place to fix it gets a link there (warning-links.ts):
- * the owner page section, the work order, or the side panel's Confirm rent.
+ * the owner page section, the work order, or the Payments page (rent not marked received).
  */
 export function WarningsCard({ blocking, info, ownerId }: { blocking: Warning[]; info: Warning[]; ownerId: string }) {
   if (blocking.length === 0 && info.length === 0) return null;

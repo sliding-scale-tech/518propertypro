@@ -1,5 +1,5 @@
 // Tests for components/finance/warning-links.ts: every statement warning that has a place to fix
-// it links there (owner page section, work order, or the side panel's Confirm rent), and the rest
+// it links there (owner page section, work order, or the Payments page for unpaid rent), and the rest
 // get no link. No packages. From dashboard/:
 //   node --test scripts/probes/ros_warning_links.test.mjs
 import { test } from "node:test";
@@ -48,7 +48,10 @@ const CASES = {
     { propertyId: PID, workOrderId: "wo_6", message: "WO-13 (1 Main St) was completed before ..." },
     { kind: "href", href: "/work-orders/wo_6", label: "Open WO-13 →" },
   ],
-  RENT_NOT_CHECKED: [{}, { kind: "scroll", anchor: "confirm-rent", label: "Confirm rent →" }],
+  RENT_UNPAID: [
+    { rentMonth: "2026-10" },
+    { kind: "href", href: `/owner-statements/payments?month=2026-10&owner=${OWNER}&status=unpaid`, label: "Open Payments page →" },
+  ],
 };
 
 /** Codes with nowhere specific to fix them: no link. */
@@ -61,8 +64,6 @@ const NO_LINK = [
   "OWNER_CHANGED",
   "PERIOD_OPEN",
   "PRIOR_NOT_FINAL",
-  "RENT_ACCOUNT_MISSING",
-  "RENT_INVALID",
   "TOO_MANY_LINES",
   "SOMETHING_NEW",
 ];
@@ -114,14 +115,16 @@ test("splitWarnings carries propertyId and workOrderId, so the card can build th
   const split = B.splitWarnings([
     { code: "DEPOSITS_NOT_SET", propertyId: PID, message: "d", blocking: false },
     { code: "WO_MISSING_BILL", propertyId: PID, workOrderId: "wo_9", message: "WO-5 x", blocking: true },
-    { code: "RENT_NOT_CHECKED", message: "r", blocking: true },
+    { code: "RENT_UNPAID", rentMonth: "2026-09", message: "r", blocking: false },
   ]);
-  assert.deepStrictEqual(split.info, [{ code: "DEPOSITS_NOT_SET", message: "d", propertyId: PID }]);
-  assert.deepStrictEqual(split.blocking, [
-    { code: "WO_MISSING_BILL", message: "WO-5 x", propertyId: PID, workOrderId: "wo_9" },
-    { code: "RENT_NOT_CHECKED", message: "r" },
+  assert.deepStrictEqual(split.info, [
+    { code: "DEPOSITS_NOT_SET", message: "d", propertyId: PID },
+    { code: "RENT_UNPAID", message: "r", rentMonth: "2026-09" },
   ]);
+  assert.deepStrictEqual(split.blocking, [{ code: "WO_MISSING_BILL", message: "WO-5 x", propertyId: PID, workOrderId: "wo_9" }]);
   assert.equal(L.warningTarget(split.info[0], OWNER).href, owner(`property-${PID}-deposits`));
   assert.equal(L.warningTarget(split.blocking[0], OWNER).href, "/work-orders/wo_9");
-  assert.equal(L.warningTarget(split.blocking[1], OWNER).kind, "scroll");
+  assert.equal(L.warningTarget(split.info[1], OWNER).href, `/owner-statements/payments?month=2026-09&owner=${OWNER}&status=unpaid`);
+  // RENT_UNPAID without its month: no (broken) link
+  assert.equal(L.warningTarget({ code: "RENT_UNPAID", message: "r" }, OWNER), null);
 });

@@ -32,7 +32,10 @@ const WP3_FILE = "workOrderBilling.ts";
 // Management fee settings (2026-11-11): feeSettings.ts is gated like the WP2 files; feeMigration.ts
 // exports only an internal mutation (checked for its "why" comment).
 const FEE_FILES = ["feeSettings.ts"];
-const SCANNED = [...WP2_FILES, ...FEE_FILES, ...(existsSync(join(CONVEX, WP3_FILE)) ? [WP3_FILE] : [])];
+// Rent payments (2026-11-12): rentPayments.ts is gated like the WP2 files; its logic lives in
+// rentPaymentsLib.ts, which registers nothing and checks every record against the caller's org.
+const PAYMENT_FILES = ["rentPayments.ts"];
+const SCANNED = [...WP2_FILES, ...FEE_FILES, ...PAYMENT_FILES, ...(existsSync(join(CONVEX, WP3_FILE)) ? [WP3_FILE] : [])];
 
 /** Each top-level `export const X = query|mutation|action(` with its text up to the next top-level export. */
 function registeredFunctions(src) {
@@ -101,6 +104,17 @@ test("feeSettingsLib.ts registers no Convex function (helpers only)", () => {
   const src = read("feeSettingsLib.ts");
   assert.doesNotMatch(src, /\b(query|mutation|action|internalQuery|internalMutation|internalAction)\(\{/);
   assert.doesNotMatch(src, /^import \{[^}]*\} from "\.\/_generated\/server"/m);
+});
+
+test("rentPaymentsLib.ts / rentPaymentsPolicy.ts register no Convex function; the lib checks the org", () => {
+  for (const f of ["rentPaymentsLib.ts", "rentPaymentsPolicy.ts"]) {
+    const src = read(f);
+    assert.doesNotMatch(src, /\b(query|mutation|action|internalQuery|internalMutation|internalAction)\(\{/, f);
+    assert.doesNotMatch(src, /^import \{[^}]*\} from "\.\/_generated\/server"/m, f);
+  }
+  const lib = read("rentPaymentsLib.ts");
+  assert.match(lib, /orgId === org\.orgId/);
+  assert.match(lib, /orgId !== org\.orgId/);
 });
 
 test("WP2 files exist and rosBuild registers no Convex function", () => {

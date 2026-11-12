@@ -26,7 +26,15 @@ export type { RowType } from "./rosPolicy";
 
 export type CalcAccount = { id: string; name: string; kind: RowType; feeBase: boolean; systemKey?: string };
 
-export type CalcSource = "manual" | "work_order" | "management_fee" | "owner_draw" | "opening_balance" | "stripe" | "roster_rent";
+export type CalcSource =
+  | "manual"
+  | "work_order"
+  | "management_fee"
+  | "owner_draw"
+  | "opening_balance"
+  | "stripe"
+  | "roster_rent"
+  | "rent_payment";
 
 export type CalcRow = {
   key: string; // "entry:<id>" | "wo:<id>" | "rent:<unitId>" (fee/draw rows are produced by the engine)
@@ -100,6 +108,8 @@ export type StatementWarning = {
   propertyId?: string;
   /** The work order the warning is about (WO_MISSING_BILL, WO_AWAITING_REVIEW), for a link. */
   workOrderId?: string;
+  /** RENT_UNPAID: the rent month, so the UI links to the Payments page for it. */
+  rentMonth?: string;
   message: string;
   blocking: boolean;
 };

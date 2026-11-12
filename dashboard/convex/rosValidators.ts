@@ -17,8 +17,11 @@ export const rowTypeValidator = v.union(
 );
 
 /**
- * `opening_balance` and `stripe` are reserved: v1 never writes them. `roster_rent` = a Rent Income
- * row prefilled from the roster rent and written at finalize (sourceId `<statementId>:<unitId>`).
+ * `opening_balance` and `stripe` are reserved: v1 never writes them. `roster_rent` = DEPRECATED
+ * (2026-11-12): a Rent Income row prefilled from the roster rent and written at finalize (sourceId
+ * `<statementId>:<unitId>`); no longer written, kept so historical rows stay valid.
+ * `rent_payment` = rent marked received on the Payments page (convex/rentPayments.ts): Rent Income,
+ * one per unit per rent month (`rentForMonth`), dated the day it was received (cash basis).
  */
 export const ledgerSourceValidator = v.union(
   v.literal("manual"),
@@ -28,6 +31,15 @@ export const ledgerSourceValidator = v.union(
   v.literal("opening_balance"),
   v.literal("stripe"),
   v.literal("roster_rent"),
+  v.literal("rent_payment"),
+);
+
+/** How a rent payment was received (Payments page). */
+export const paymentMethodValidator = v.union(
+  v.literal("cash"),
+  v.literal("check"),
+  v.literal("money_order"),
+  v.literal("other"),
 );
 
 export const accountSystemKeyValidator = v.union(
