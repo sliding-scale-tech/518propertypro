@@ -64,3 +64,19 @@ test("units: filters and rent sort (missing rent last in both directions)", () =
   assert.deepEqual(F.unitsView(units, tOf, { sort: { key: "rent", dir: "asc" } }).map((u) => u._id), ["c", "a", "b"]);
   assert.deepEqual(F.unitsView(units, tOf, { sort: { key: "rent", dir: "desc" } }).map((u) => u._id), ["a", "c", "b"]);
 });
+
+test("units: a tour's exact-unit link shows that unit only (\"1\" is never 10 or 1A)", () => {
+  const rows = [
+    { _id: "u1", unitNumber: "1", available: true },
+    { _id: "u10", unitNumber: "10", available: true },
+    { _id: "u1a", unitNumber: "1A", available: false },
+    { _id: "u2b", unitNumber: "2B", available: true },
+  ];
+  const none = () => [];
+  assert.deepEqual(F.unitsView(rows, none, { unit: "1" }).map((u) => u._id), ["u1"]);
+  assert.deepEqual(F.unitsView(rows, none, { unit: "2b" }).map((u) => u._id), ["u2b"]);
+  // The old substring search would have matched all three of these.
+  assert.deepEqual(F.unitsView(rows, none, { q: "1" }).map((u) => u._id), ["u1", "u1a", "u10"]);
+  assert.equal(F.unitsView(rows, none, { unit: "" }).length, 4);
+  assert.equal(F.unitsView(rows, none, { unit: "9" }).length, 0);
+});

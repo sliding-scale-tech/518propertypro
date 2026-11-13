@@ -309,7 +309,7 @@ export function RoutingEditor({
           <FieldError message={errors.enabled} />
           <p className="mt-1 text-xs text-muted-foreground">
             The menu offers only people with a number. For the others Sarah says they aren&apos;t available by phone and takes a
-            message. It also needs the &quot;Owner call routing menu&quot; call type switched on and approved, then a publish.
+            message. It also needs the &quot;Owner call routing menu&quot; call type switched on and approved.
           </p>
         </div>
       ) : null}

@@ -59,6 +59,8 @@ export function Kpi({
   subTone = "muted",
   icon,
   progress,
+  onClick,
+  active,
 }: {
   label: string;
   value: ReactNode;
@@ -67,10 +69,15 @@ export function Kpi({
   icon?: ReactNode;
   /** 0..1 fills the progress bar. */
   progress?: number;
+  /** Makes the card a button (e.g. to apply a filter). */
+  onClick?: () => void;
+  /** With `onClick`: marks the card as the one currently applied. */
+  active?: boolean;
 }) {
   const pct = progress === undefined ? undefined : Math.max(0, Math.min(1, progress)) * 100;
-  return (
-    <div className="flex flex-col gap-0.5 rounded-[18px] border border-border bg-card px-4 py-3.5">
+  const box = "flex flex-col gap-0.5 rounded-[18px] border bg-card px-4 py-3.5";
+  const body = (
+    <>
       <div className="flex items-center gap-1.5 text-[12.5px] text-muted-foreground [&_svg]:h-3.5 [&_svg]:w-3.5">
         {icon}
         {label}
@@ -100,7 +107,22 @@ export function Kpi({
           {sub}
         </div>
       ) : null}
-    </div>
+    </>
+  );
+  if (!onClick) return <div className={cx(box, "border-border")}>{body}</div>;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active ?? false}
+      className={cx(
+        box,
+        "text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+        active ? "border-primary bg-accent/60" : "border-border hover:bg-muted/50",
+      )}
+    >
+      {body}
+    </button>
   );
 }
 

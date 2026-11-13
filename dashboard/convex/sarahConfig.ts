@@ -44,6 +44,7 @@ import { publishedConfig } from "./sarahConfigRead";
 import { dialableNumber, MAX_ROUTING_ENTRIES, normalizeRoutingEntry, parseHours } from "./ownerRoutingLib";
 import { ownLines } from "./ownerRouting";
 import { ownerEmailsOf } from "./ownerVerifyLib";
+import { requestPush } from "./sarahPush";
 
 /** Trims and normalises every routing entry (E.164 numbers, digit extensions, canonical hours). */
 function normalizeRouting(c: SarahConfig): SarahConfig {
@@ -63,13 +64,15 @@ function normalizeRouting(c: SarahConfig): SarahConfig {
 /**
  * Sarah configuration (build plan P17).
  *
- * Draft vs published: /sarah edits `draft`. Nothing a caller hears changes until `publish`,
- * which copies the draft to `published`, records a version row, and re-pushes the ElevenLabs
- * agent (agents.pushKnowledgeBase composes the prompt from the PUBLISHED config).
+ * Save goes live (B43): there is no separate Publish step. An admin's save, an approval and a
+ * rollback commit the draft as a new published version (goLive / commitCore: version row, the
+ * `published` copy) in the same mutation, then ask sarahPush for a debounced push to ElevenLabs
+ * (agents.pushKnowledgeBase composes the prompt from the PUBLISHED config). A save that is not an
+ * admin's stays in the draft until an admin approves it; the approval is what makes it live.
  *
  * Who may do what, all checked here and not only in the UI:
  *   - read: the admin view (admins, Pat, Alex).
- *   - save draft / publish / roll back: any Admin.
+ *   - save / roll back: any Admin.
  *   - approve / request changes / reject: anyone in the admin view (team admin, executive, maintenance lead,
  *     simplr_admin). Every action is audited with actor and time; the stamp records who approved.
  * Approval stamps (approvedBy / approvedAt) are NEVER taken from the client: saveDraft carries
@@ -189,13 +192,13 @@ function assertApprovals(c: SarahConfig): void {
       const f = (c.flows ?? []).find((x) => x.key === t.key);
       if (!f?.approved || !f.approvedBy) {
         throw new ConvexError(
-          `"${t.key.replace(/_/g, " ")}" cannot be enabled until its wording has been approved. Save the draft, then use Approve.`,
+          `"${t.key.replace(/_/g, " ")}" cannot be enabled until its wording has been approved. Save first, then use Approve.`,
         );
       }
     }
     if (t.enabled && isApprovalRequired(t.key) && !t.approvedBy) {
       throw new ConvexError(
-        `"${t.key.replace(/_/g, " ")}" cannot be enabled until it has been approved. Save the draft, then use Approve.`,
+        `"${t.key.replace(/_/g, " ")}" cannot be enabled until it has been approved. Save first, then use Approve.`,
       );
     }
   }
@@ -258,8 +261,6 @@ export const get = query({
       progress: pilotProgress(draft, ex),
       version: row?.version ?? 0,
       publishedAt: row?.publishedAt ?? null,
-      // True when the draft differs from what is live (or nothing has ever been published).
-      dirty: published === null ? true : stable(draft) !== stable(published),
       canEdit: canEdit(org),
       canApprove: canApproveItems(org),
       versions: versionRows,
@@ -434,6 +435,8 @@ export const saveDraft = mutation({
       action: "config_draft_saved",
       actorUserId: org.user._id,
     });
+    // An admin's save is live: new version + scheduled push. Anyone else's waits for an approval.
+    await goLive(ctx, org);
   },
 });
 
@@ -673,6 +676,7 @@ async function applyChange(
     if (id !== targetId) await logItem(ctx, org, id, "edited", `Changed together with ${targetId}`);
   }
   for (const id of autoApproved) await logItem(ctx, org, id, "approved", AUTO_NOTE);
+  await goLive(ctx, org);
   return { changed: true };
 }
 
@@ -1055,8 +1059,8 @@ function clearApproval(draft: SarahConfig, id: string): SarahConfig {
 //
 // Every person who can reach this module is an Admin (requireAdminView), and an Admin has full
 // power, so a separate sign-off step only adds friction. An admin's save re-approves what changed,
-// switching a call type on approves its current wording, and publish approves whatever is still a
-// draft among the things that are switched on. All of it is audited with the actor and the time.
+// switching a call type on approves its current wording, and a rollback approves whatever is still a
+// draft among the things that are switched on (commitCore). All of it is audited with the actor and the time.
 
 const AUTO_NOTE = "Approved automatically (admin)";
 const ADMIN_NOTE = "Approved on the admin's instruction";
@@ -1182,6 +1186,7 @@ export const approveItem = mutation({
   handler: async (ctx, args): Promise<void> => {
     const org = await requireAdminView(ctx);
     await approveCore(ctx, org, args.itemId, args.fingerprint);
+    await goLive(ctx, org);
   },
 });
 
@@ -1226,6 +1231,7 @@ export const approveBundle = mutation({
         throw new ConvexError(`${BUNDLE_LABEL[id] ?? id}: ${reason ?? "could not be approved. Try again in a minute."}`);
       }
     }
+    await goLive(ctx, org);
     return { approved };
   },
 });
@@ -1303,6 +1309,7 @@ export const approveAllDrafts = mutation({
   handler: async (ctx): Promise<{ approved: number }> => {
     const org = await requireAdminView(ctx);
     const res = await approveAllCore(ctx, org, { enable: false, note: "Approved all drafts by an admin" });
+    await goLive(ctx, org);
     return { approved: res.approved.length };
   },
 });
@@ -1323,7 +1330,10 @@ export const adminApproveAll = internalMutation({
     if (!user || !member || member.orgId !== args.orgId) throw new ConvexError("That user is not on this team.");
     const isAdmin = member.role === "admin";
     const org: Org = { orgId: args.orgId, role: member.role, isAdmin, jobRoles: member.jobRoles ?? [], user };
-    return approveAllCore(ctx, org, { enable: true, note: ADMIN_NOTE });
+    const res = await approveAllCore(ctx, org, { enable: true, note: ADMIN_NOTE });
+    // An approval (here on the admin's instruction) is what makes the setup live.
+    await goLive(ctx, org);
+    return res;
   },
 });
 
@@ -1444,6 +1454,8 @@ export const requestChanges = mutation({
       updatedAt: now,
     });
     await logItem(ctx, org, def.id, args.reject ? "rejected" : "changes_requested", note);
+    // Pulling an approval back is an admin decision too: Sarah stops using that wording on new calls.
+    await goLive(ctx, org);
   },
 });
 
@@ -1610,7 +1622,7 @@ export const approve = mutation({
       throw new ConvexError(NOT_ADMIN_MSG);
     }
     const row = await rowFor(ctx, org.orgId);
-    if (!row) throw new ConvexError("Save the draft before approving anything.");
+    if (!row) throw new ConvexError("Save first, then approve.");
 
     const itemId =
       args.kind === "emergencyScript"
@@ -1628,6 +1640,7 @@ export const approve = mutation({
       const draft = normalizeConfig(row.draft);
       if (!allItems(draft).some((i) => i.id === itemId)) throw new ConvexError("That item could not be found. Refresh the page and try again.");
       await approveCore(ctx, org, itemId);
+      await goLive(ctx, org);
       return;
     }
 
@@ -1655,111 +1668,130 @@ export const approve = mutation({
       actorUserId: org.user._id,
       note: `${args.kind}: ${args.key}`,
     });
+    await goLive(ctx, org);
   },
 });
 
 /**
  * Makes `config` (the draft, or an older version for rollback) the live one and records it.
- * Runs as one mutation so a version row and the published copy never disagree. The ElevenLabs
- * push happens afterwards, in the action, because mutations cannot call out.
+ * Runs inside the caller's mutation so a version row and the published copy never disagree. The
+ * ElevenLabs push happens afterwards, in sarahPush.run, because mutations cannot call out.
+ *
+ * `stampEnabled` keeps the old publish rule for a rollback only: an admin's commit approves whatever
+ * is switched on but still a draft. A save or an approval does NOT do this: the save already
+ * stamped what the admin changed, and an approval must make live only what was approved.
  */
-export const commitPublish = internalMutation({
-  args: {
-    orgId: v.string(),
-    userId: v.id("users"),
-    rollbackTo: v.optional(v.number()),
-  },
-  handler: async (ctx, args): Promise<number> => {
-    const row = await rowFor(ctx, args.orgId);
-    let config: SarahConfig;
-    if (args.rollbackTo !== undefined) {
-      const old = await ctx.db
-        .query("sarahConfigVersions")
-        .withIndex("by_org_and_version", (q) => q.eq("orgId", args.orgId).eq("version", args.rollbackTo!))
-        .first();
-      if (!old) throw new ConvexError("That version does not exist.");
-      config = normalizeConfig(old.config);
-    } else {
-      config = normalizeConfig(row?.draft ?? defaultConfig());
-    }
-    validateConfigShape(config, { ownLines: ownLines() });
-
-    // An admin's publish approves whatever is switched on but still a draft. If a non-admin ever got
-    // here, nothing is stamped, assertApprovals applies, and the prompt falls back to "call 911".
-    const member = await ctx.db
-      .query("memberships")
-      .withIndex("by_user", (q) => q.eq("userId", args.userId))
+async function commitCore(
+  ctx: MutationCtx,
+  org: Org,
+  opts: { rollbackTo?: number; stampEnabled: boolean },
+): Promise<number> {
+  const row = await rowFor(ctx, org.orgId);
+  let config: SarahConfig;
+  if (opts.rollbackTo !== undefined) {
+    const old = await ctx.db
+      .query("sarahConfigVersions")
+      .withIndex("by_org_and_version", (q) => q.eq("orgId", org.orgId).eq("version", opts.rollbackTo!))
       .first();
-    const publisher = await ctx.db.get(args.userId);
-    const isAdmin =
-      !!member &&
-      !!publisher &&
-      String(member.orgId) === args.orgId &&
-      isAdminView({ isAdmin: member.role === "admin", jobRoles: member.jobRoles ?? [] });
-    if (isAdmin && publisher) {
-      const wfs = await workflowMap(ctx, args.orgId);
-      const res = adminStamp({
-        merged: config,
-        prev: config,
-        wfsBefore: wfs,
-        wfsAfter: wfs,
-        changed: new Set(),
-        targets: new Set(),
-        by: nameOf(publisher),
-        at: Date.now(),
-      });
-      config = res.config;
-      await recordAutoApprovals(ctx, { orgId: args.orgId, user: publisher }, config, wfs, res.ids, AUTO_NOTE);
-    }
-    assertApprovals(config);
+    if (!old) throw new ConvexError("That version does not exist. Refresh the page and pick another one.");
+    config = normalizeConfig(old.config);
+  } else {
+    config = normalizeConfig(row?.draft ?? defaultConfig());
+  }
+  validateConfigShape(config, { ownLines: ownLines() });
 
-    const version = (row?.version ?? 0) + 1;
-    const now = Date.now();
-    await ctx.db.insert("sarahConfigVersions", {
-      orgId: args.orgId,
-      version,
-      config,
-      publishedBy: args.userId,
-      publishedAt: now,
-      note: args.rollbackTo !== undefined ? `Rollback to version ${args.rollbackTo}` : undefined,
+  if (opts.stampEnabled && canApproveItems(org)) {
+    const wfs = await workflowMap(ctx, org.orgId);
+    const res = adminStamp({
+      merged: config,
+      prev: config,
+      wfsBefore: wfs,
+      wfsAfter: wfs,
+      changed: new Set(),
+      targets: new Set(),
+      by: nameOf(org.user),
+      at: Date.now(),
     });
-    const fields = {
-      draft: config,
-      published: config,
-      publishedAt: now,
-      publishedBy: args.userId,
-      version,
-      updatedAt: now,
-    };
-    if (row) await ctx.db.patch(row._id, fields);
-    else await ctx.db.insert("sarahConfig", { orgId: args.orgId, ...fields });
+    config = res.config;
+    await recordAutoApprovals(ctx, org, config, wfs, res.ids, AUTO_NOTE);
+  }
+  assertApprovals(config);
 
-    // The first message is stored on the agent row (Settings shows it), keep it in step.
-    const agent = await ctx.db
-      .query("agents")
-      .withIndex("by_org", (q) => q.eq("orgId", args.orgId))
-      .first();
-    if (agent) {
-      await ctx.db.patch(agent._id, { firstMessage: config.identity.firstMessage, updatedAt: now });
-    }
+  const version = (row?.version ?? 0) + 1;
+  const now = Date.now();
+  await ctx.db.insert("sarahConfigVersions", {
+    orgId: org.orgId,
+    version,
+    config,
+    publishedBy: org.user._id,
+    publishedAt: now,
+    note: opts.rollbackTo !== undefined ? `Rollback to version ${opts.rollbackTo}` : undefined,
+  });
+  const fields = {
+    draft: config,
+    published: config,
+    publishedAt: now,
+    publishedBy: org.user._id,
+    version,
+    updatedAt: now,
+  };
+  if (row) await ctx.db.patch(row._id, fields);
+  else await ctx.db.insert("sarahConfig", { orgId: org.orgId, ...fields });
 
-    await writeAudit(ctx, {
-      orgId: args.orgId,
-      entity: "config",
-      entityId: "sarah",
-      action: args.rollbackTo !== undefined ? "config_rolled_back" : "config_published",
-      actorUserId: args.userId,
-      to: String(version),
-      from: args.rollbackTo !== undefined ? String(args.rollbackTo) : undefined,
-      note: `version ${version}`,
-    });
-    return version;
+  // The first message is stored on the agent row (Settings shows it), keep it in step.
+  const agent = await ctx.db
+    .query("agents")
+    .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
+    .first();
+  if (agent) {
+    await ctx.db.patch(agent._id, { firstMessage: config.identity.firstMessage, updatedAt: now });
+  }
+
+  await writeAudit(ctx, {
+    orgId: org.orgId,
+    entity: "config",
+    entityId: "sarah",
+    action: opts.rollbackTo !== undefined ? "config_rolled_back" : "config_published",
+    actorUserId: org.user._id,
+    to: String(version),
+    from: opts.rollbackTo !== undefined ? String(opts.rollbackTo) : undefined,
+    note: `version ${version}`,
+  });
+  return version;
+}
+
+/**
+ * The "go live" moment (B43). Called at the end of every write that can change what Sarah says:
+ * an admin's save (saveDraft, saveItem, resetItem), an approval (approve, approveItem, approveBundle,
+ * approveAllDrafts, adminApproveAll) and request changes / reject. For an admin, when the draft now
+ * differs from what is live, it commits a new version and schedules ONE debounced push. For anyone
+ * else it does nothing: their edit stays in the draft until an admin approves it.
+ */
+async function goLive(ctx: MutationCtx, org: Org): Promise<boolean> {
+  if (!canApproveItems(org)) return false;
+  const row = await rowFor(ctx, org.orgId);
+  if (!row) return false;
+  if (row.published && stable(normalizeConfig(row.draft)) === stable(normalizeConfig(row.published))) return false;
+  await commitCore(ctx, org, { stampEnabled: false });
+  await requestPush(ctx, org.orgId, org.user._id);
+  return true;
+}
+
+/** Version history (behind Advanced): makes an older version live again as a new version, and pushes it. */
+export const rollback = mutation({
+  args: { version: v.number() },
+  handler: async (ctx, args): Promise<{ version: number }> => {
+    const org = await requireAdminView(ctx);
+    if (!canEdit(org)) throw new ConvexError("Only an admin can roll back Sarah's setup.");
+    const version = await commitCore(ctx, org, { rollbackTo: args.version, stampEnabled: true });
+    await requestPush(ctx, org.orgId, org.user._id);
+    return { version };
   },
 });
 
-// --- Actions (they talk to ElevenLabs) ---------------------------------------------------------------
+// --- Actions -------------------------------------------------------------------------------------
 
-/** The prompt exactly as it would be sent if the current draft were published now. */
+/** The prompt exactly as it would be sent for the current draft (after a save, that is what is live). */
 export const preview = action({
   args: {},
   handler: async (ctx): Promise<string> => {
@@ -1772,52 +1804,4 @@ export const preview = action({
     const disabledCore: string[] = await ctx.runQuery(internal.screening.disabledBuiltinsForOrg, { orgId });
     return composePrompt(agentPrompt ?? LEASING_PROMPT, questions, disabledCore, draft);
   },
-});
-
-async function commitAndPush(
-  ctx: Parameters<typeof requireAdminViewId>[0],
-  rollbackTo: number | undefined,
-): Promise<{ version: number; kbResynced: boolean }> {
-  const org = await requireAdminViewId(ctx);
-  if (!isAdminView(org)) throw new ConvexError("You don't have access to that.");
-  // Same guarantee as saveAgent: the team has an agent to push to.
-  await ctx.runAction(internal.agents.ensure, { orgId: org.orgId, userId: org.userId });
-  const version: number = await ctx.runMutation(internal.sarahConfig.commitPublish, {
-    orgId: org.orgId,
-    userId: org.userId,
-    rollbackTo,
-  });
-  // Refresh the "policies" knowledge-base doc from what was just published. Never blocks a publish:
-  // the doc is reference material, the prompt is what enforces the rules.
-  try {
-    await ctx.runAction(internal.sarahKb.regenerate, { orgId: org.orgId, userId: org.userId });
-  } catch (err) {
-    console.error("[sarahConfig.publish] policy doc refresh failed:", err);
-  }
-  let kbResynced = false;
-  try {
-    const pushed: { resynced: boolean } = await ctx.runAction(internal.agents.pushKnowledgeBase, {
-      orgId: org.orgId,
-    });
-    kbResynced = pushed.resynced;
-  } catch (err) {
-    // Detail stays in the logs: the upstream message can carry raw voice-service response text.
-    console.error("[sarahConfig.publish] voice service update failed:", err);
-    throw new ConvexError(
-      `Saved as version ${version}, but the voice service could not be updated. Publish again to retry.`,
-    );
-  }
-  return { version, kbResynced };
-}
-
-export const publish = action({
-  args: {},
-  handler: async (ctx): Promise<{ version: number; kbResynced: boolean }> =>
-    commitAndPush(ctx, undefined),
-});
-
-export const rollback = action({
-  args: { version: v.number() },
-  handler: async (ctx, args): Promise<{ version: number; kbResynced: boolean }> =>
-    commitAndPush(ctx, args.version),
 });

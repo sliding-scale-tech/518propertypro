@@ -11,22 +11,36 @@ import {
   MoreVertical,
   Phone,
   PhoneCall,
-  Search,
-  SlidersHorizontal,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { Dropdown } from "@/components/ui/dropdown";
-import { RequireView } from "@/components/require-view";
+import { RequireView, useMyRoles } from "@/components/require-view";
 import { areaLabel } from "@/components/dashboard/format";
 import { ConversationTranscript } from "@/components/transcript";
-import { Card, CardHead, Chips, Kpi, KpiRow, PageHeader, Pagination, Pill, type Tone } from "@/components/ui";
+import {
+  Card,
+  CardHead,
+  FilterSelect,
+  FilterToggle,
+  FilterToolbar,
+  Kpi,
+  KpiRow,
+  PageHeader,
+  Pagination,
+  Pill,
+  SearchBox,
+  Seg,
+  type Tone,
+} from "@/components/ui";
 import { Spinner } from "@/components/finance/form-bits";
 import { useCursorPaging } from "@/lib/use-cursor-paging";
+import { formatAnswer } from "@/convex/tourDisplay";
 import {
+  AssignLeadControl,
   AssigneeCell,
   TourLine,
+  assignmentLabel,
   UnassignedHint,
   isUnassigned,
   type LeadAssignmentFields,
@@ -49,7 +63,7 @@ const INTENT_FILTER_OPTIONS = Object.entries(INTENT_LABELS).filter(
 );
 
 const INTENT_DROPDOWN_OPTIONS = [
-  { value: "all", label: "All intents" },
+  { value: "all", label: "All" },
   ...INTENT_FILTER_OPTIONS.map(([value, label]) => ({ value, label })),
 ];
 
@@ -68,7 +82,7 @@ const OUTCOME_LABELS: Record<string, string> = {
 };
 
 const OUTCOME_DROPDOWN_OPTIONS = [
-  { value: "all", label: "All outcomes" },
+  { value: "all", label: "All" },
   ...Object.entries(OUTCOME_LABELS).map(([value, label]) => ({ value, label })),
 ];
 
@@ -144,7 +158,16 @@ function LeadsPageInner() {
     return f === "mine" || f === "unassigned" ? f : "all";
   });
 
-  const filtersActive = intentFilter !== "all" || outcomeFilter !== "all" || assignFilter !== "all" || search.trim() !== "";
+  const filtersActive =
+    intentFilter !== "all" || outcomeFilter !== "all" || assignFilter !== "all" || ownerOnly || search.trim() !== "";
+  const clearFilters = () => {
+    setIntentFilter("all");
+    setOutcomeFilter("all");
+    setAssignFilter("all");
+    setOwnerOnly(false);
+    setSearch("");
+    paging.reset();
+  };
 
   const filtered = useMemo(() => {
     if (!history) return history;
@@ -185,78 +208,82 @@ function LeadsPageInner() {
       {funnel ? <FunnelChart funnel={funnel} /> : null}
 
       <section className="overflow-hidden rounded-[20px] border border-border bg-card">
-        <div className="border-b border-border px-4 pt-4 pb-3 sm:px-5">
-          <Chips<AssignFilter>
-            label="Filter by assignment"
-            value={assignFilter}
-            onChange={(v) => {
-              setAssignFilter(v);
-              paging.reset();
-            }}
-            options={[
-              { value: "all", label: "All" },
-              { value: "mine", label: "Mine" },
-              { value: "unassigned", label: "Unassigned" },
-            ]}
-          />
-        </div>
-        <div className="flex flex-col gap-3 border-b border-border px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
-          <div className="flex flex-wrap gap-3">
-            <Dropdown
-              value={intentFilter}
-              onChange={(v) => {
-                setIntentFilter(v);
-                paging.reset();
-              }}
-              options={INTENT_DROPDOWN_OPTIONS}
-              buttonClassName="h-10 min-w-32"
-            />
-            <button
-              type="button"
-              onClick={() => {
-                setOwnerOnly((v) => !v);
-                paging.reset();
-              }}
-              aria-pressed={ownerOnly}
-              className={`h-10 rounded-xl border px-3 text-[13px] ${
-                ownerOnly
-                  ? "border-violet bg-violet-soft text-violet"
-                  : "border-border bg-card text-muted-foreground hover:bg-muted"
-              }`}
-            >
-              Owner prospects
-            </button>
-            <Dropdown
-              value={outcomeFilter}
-              onChange={(v) => {
-                setOutcomeFilter(v);
-                paging.reset();
-              }}
-              options={OUTCOME_DROPDOWN_OPTIONS}
-              buttonClassName="h-10 min-w-36"
-            />
-          </div>
-          <div className="flex gap-2">
-            <label className="relative block min-w-0 flex-1 sm:w-60">
-              <Search className="absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <input
-                value={search}
-                onChange={(event) => {
-                  setSearch(event.target.value);
+        <div className="border-b border-border px-4 py-4 sm:px-5">
+          <FilterToolbar
+            active={filtersActive}
+            onClear={clearFilters}
+            searchAfter
+            leading={
+              <Seg<AssignFilter>
+                label="Filter by assignment"
+                value={assignFilter}
+                onChange={(v) => {
+                  setAssignFilter(v);
                   paging.reset();
                 }}
-                placeholder="Search calls..."
-                className="h-10 w-full rounded-xl border border-input bg-card pr-3 pl-9 text-[13.5px] outline-none placeholder:text-faint focus:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                options={[
+                  { value: "all", label: "All" },
+                  { value: "mine", label: "Mine" },
+                  { value: "unassigned", label: "Unassigned" },
+                ]}
               />
-            </label>
-            <button
-              type="button"
-              aria-label="More filters"
-              className="flex h-10 w-10 items-center justify-center rounded-xl border border-border text-muted-foreground hover:bg-muted"
+            }
+            search={
+              <SearchBox
+                id="leads-search"
+                label="Search leads"
+                value={search}
+                onChange={(v) => {
+                  setSearch(v);
+                  paging.reset();
+                }}
+                onClear={() => {
+                  setSearch("");
+                  paging.reset();
+                }}
+                placeholder="Search caller number, channel, intent or outcome"
+              />
+            }
+          >
+            <FilterSelect
+              label="Intent"
+              active={intentFilter !== "all"}
+              value={intentFilter}
+              onChange={(e) => {
+                setIntentFilter(e.target.value || "all");
+                paging.reset();
+              }}
             >
-              <SlidersHorizontal className="h-4 w-4" />
-            </button>
-          </div>
+              {INTENT_DROPDOWN_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </FilterSelect>
+            <FilterSelect
+              label="Outcome"
+              active={outcomeFilter !== "all"}
+              value={outcomeFilter}
+              onChange={(e) => {
+                setOutcomeFilter(e.target.value || "all");
+                paging.reset();
+              }}
+            >
+              {OUTCOME_DROPDOWN_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </FilterSelect>
+            <FilterToggle
+              label="Owner prospects"
+              pressed={ownerOnly}
+              onChange={(v) => {
+                setOwnerOnly(v);
+                paging.reset();
+              }}
+            />
+          </FilterToolbar>
         </div>
 
         {filtered === undefined ? <Spinner label="Loading leads…" /> : null}
@@ -624,15 +651,19 @@ function ExpandedDetail({
   qualification?: Qualification;
   summary?: string;
 }) {
+  const isAdmin = useMyRoles()?.includes("admin") ?? false;
+  const how = assignmentLabel(lead);
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
         <span className="flex items-center gap-2 text-xs text-muted-foreground">
           Assigned to <AssigneeCell lead={lead} />
         </span>
+        {how ? <span className="text-xs text-muted-foreground">{how}</span> : null}
         <TourLine lead={lead} />
       </div>
-      <UnassignedHint lead={lead} />
+      <UnassignedHint lead={lead} isAdmin={isAdmin} />
+      {isAdmin ? <AssignLeadControl lead={lead} conversationId={conversationId} /> : null}
       {summary ? <p className="text-sm italic text-muted-foreground">{summary}</p> : null}
       {qualification ? (
         <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm sm:grid-cols-3">
@@ -685,13 +716,7 @@ function ExpandedDetail({
             {qualification.screeningAnswers.map((answer) => (
               <div key={answer.key}>
                 <span className="text-muted-foreground">{answer.question} </span>
-                <span className="font-medium">
-                  {typeof answer.value === "boolean"
-                    ? answer.value
-                      ? "Yes"
-                      : "No"
-                    : String(answer.value)}
-                </span>
+                <span className="font-medium">{formatAnswer(answer.value)}</span>
               </div>
             ))}
           </div>

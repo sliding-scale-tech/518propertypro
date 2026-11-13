@@ -290,8 +290,10 @@ test("the prompt is byte-identical while the menu is off, however far it is set 
 
 test("while live, the prompt carries the owners-only block with only the reachable people", () => {
   const extra = L.composeSarahSections(liveConfig({ 4: "+15185550104", 5: "+15185550105" })).extra;
-  assert.match(extra, /OWNER CALL ROUTING \(existing property owners only/);
-  assert.match(extra, /The phone menu, word for word, ONLY after verify_owner returned verified: "Press 4 for Nina\. Press 5 for Delia in Accounting\. Or you can just say the name\."\n/);
+  assert.match(extra, /OWNER CALL ROUTING \(property owners only/);
+  assert.match(extra, /The phone menu, word for word, ONLY after verify_owner returned verified: "Who would you like to speak with\? I can connect you with Nina or Delia in accounting\."\n/);
+  // The keypad still works, silently: the keys are in the prompt for Sarah only, never read out.
+  assert.match(extra, /Keypad keys, for you only: 4 Nina, 5 Delia in Accounting\. Never say a key number or "press" to the caller\./);
   assert.doesNotMatch(extra, /Name the people only if they ask/);
   // Order (user, 2026-11-03): property, name (optional), email (read back), verify, THEN the menu,
   // availability, transfer. The menu is never read before verify_owner returned verified.
@@ -330,7 +332,7 @@ test("while live, the prompt carries the owners-only block with only the reachab
   assert.match(extra, /fails, errors or gives no answer, never end\s+the call/);
   assert.match(extra, /An email read-back\s+follows the same confirm-before-use rule as phone numbers \(rule 8\)/);
   assert.match(extra, /Never say which part failed,\s+and never say or hint at any email on file/);
-  assert.match(extra, /Never transfer anyone verify_owner did not verify in this call/);
+  assert.match(extra, /Never transfer anyone except an existing owner verify_owner verified in this call or a new owner\nroute_owner_prospect recorded in this call\./);
   assert.match(extra, /Not reachable by phone \(take a message\): 1: Pat Fiore, 2: Alex Buell, 3: Nikki, 6: Alyssa\./);
   assert.doesNotMatch(extra, /\+1518555010[45]/); // never a staff number in the prompt
   // The general rule stays for everything else.
@@ -340,11 +342,16 @@ test("while live, the prompt carries the owners-only block with only the reachab
 test("the spoken menu is built from the directory, in order, only for people with a number", () => {
   const one = "+17542795559";
   const all = R.menuOf({ enabled: true, entries: six({ 1: one, 2: one, 3: one, 4: one, 5: one, 6: one }) });
-  const MENU = "Press 1 for Pat Fiore. Press 2 for Alex Buell. Press 3 for Nikki. Press 4 for Nina. Press 5 for Delia in Accounting. Press 6 for Alyssa. Or you can just say the name.";
+  const MENU = "Who would you like to speak with? I can connect you with Pat Fiore, Alex Buell, Nikki, Nina, Delia in accounting, or Alyssa.";
   assert.equal(R.spokenMenu(all), MENU);
-  // Keys stay the directory position: people without a number leave a gap, never a renumbering.
-  assert.equal(R.spokenMenu(R.menuOf({ enabled: true, entries: six({ 1: one, 4: one }) })), "Press 1 for Pat Fiore. Press 4 for Nina. Or you can just say the name.");
-  assert.equal(R.spokenMenu(R.menuOf({ enabled: true, entries: six({ 4: one }) })), "Press 4 for Nina. Or you can just say the name.");
+  // Conversational, no keys read out (user, 2026-11-13); only people with a number.
+  assert.equal(R.spokenMenu(R.menuOf({ enabled: true, entries: six({ 1: one, 4: one }) })), "Who would you like to speak with? I can connect you with Pat Fiore or Nina.");
+  assert.equal(R.spokenMenu(R.menuOf({ enabled: true, entries: six({ 4: one }) })), "Would you like me to put you through to Nina?");
+  // Keys stay the directory position (a gap, never a renumbering), and still map silently.
+  const gap = R.menuOf({ enabled: true, entries: six({ 1: one, 4: one }) });
+  assert.equal(R.menuKeyList(gap), "1 Pat Fiore, 4 Nina");
+  assert.equal(R.findMenuEntry(gap, "4")?.label, "Nina");
+  assert.equal(R.findMenuEntry(gap, "press four")?.label, "Nina");
   // Nobody with a number: no menu at all.
   assert.equal(R.spokenMenu(R.menuOf({ enabled: true, entries: six() })), "");
   // In the live prompt: the menu once, the step that reads it, and nobody "not reachable".
@@ -418,4 +425,105 @@ test("a busy or unanswered transfer keeps the caller on the line with a voicemai
   assert.match(R.ownerTransferFallbackTwiml({ label: null, voicemailUrl: "https://a.b/v" }), /the team couldn't take your call/);
   assert.match(R.ownerVoicemailThanksTwiml("Delia & Co"), /saved for Delia &amp; Co/);
   assert.match(R.hangupTwiml(), /<Hangup\/>/);
+});
+
+// --- New owners (B46): no email check, the menu with Alex recommended ---------------------------
+
+test("the new-owner menu is built from the directory and recommends Alex's entry", () => {
+  const one = "+17542795559";
+  const all = R.menuOf({ enabled: true, entries: six({ 1: one, 2: one, 3: one, 4: one, 5: one, 6: one }) });
+  assert.equal(R.newOwnerContact(all)?.label, "Alex Buell");
+  // Conversational, no "press N" (user, 2026-11-13); the say line and the menu read as one turn.
+  assert.equal(R.NEW_OWNER_LOGGED_SAY, "Thanks, I've passed your details along.");
+  assert.equal(
+    R.spokenNewOwnerMenu(all),
+    "Alex Buell looks after new properties, so he's the best person to speak with. Shall I put you through to him? Or I can connect you with Pat Fiore, Nikki, Nina, Delia in accounting, or Alyssa.",
+  );
+  assert.doesNotMatch(`${R.NEW_OWNER_LOGGED_SAY} ${R.spokenNewOwnerMenu(all)}`, /thank.*thank/is); // one thank-you
+  // Only people with a number.
+  assert.equal(
+    R.spokenNewOwnerMenu(R.menuOf({ enabled: true, entries: six({ 2: one, 4: one }) })),
+    "Alex Buell looks after new properties, so he's the best person to speak with. Shall I put you through to him? Or I can connect you with Nina.",
+  );
+  assert.equal(
+    R.spokenNewOwnerMenu(R.menuOf({ enabled: true, entries: six({ 2: one, 4: one, 6: one }) })),
+    "Alex Buell looks after new properties, so he's the best person to speak with. Shall I put you through to him? Or I can connect you with Nina or Alyssa.",
+  );
+  // Only Alex reachable.
+  assert.equal(
+    R.spokenNewOwnerMenu(R.menuOf({ enabled: true, entries: six({ 2: one }) })),
+    "Alex Buell looks after new properties, so he's the best person to speak with. Shall I put you through to him?",
+  );
+  // Alex without a number: no recommendation, never someone who cannot be put through.
+  const noAlex = R.menuOf({ enabled: true, entries: six({ 1: one, 4: one, 5: one }) });
+  assert.equal(R.newOwnerContact(noAlex), null);
+  assert.equal(R.spokenNewOwnerMenu(noAlex), "Who would you like to speak with? I can connect you with Pat Fiore, Nina, or Delia in accounting.");
+  // No Alex in the directory at all: matched by a role naming owners instead (no guessed pronoun), else nobody.
+  const roles = R.menuOf({ enabled: true, entries: [{ label: "Sam (Owner Relations)", phone: one }, { label: "Nina", phone: one }] });
+  assert.equal(R.newOwnerContact(roles)?.label, "Sam (Owner Relations)");
+  assert.equal(
+    R.spokenNewOwnerMenu(roles),
+    "Sam in owner relations looks after new properties and is the best person to speak with. Shall I put you through? Or I can connect you with Nina.",
+  );
+  const plain = R.menuOf({ enabled: true, entries: [{ label: "Pat Fiore", phone: one }, { label: "Nina", phone: one }] });
+  assert.equal(R.newOwnerContact(plain), null);
+  assert.equal(R.spokenNewOwnerMenu(plain), "Who would you like to speak with? I can connect you with Pat Fiore or Nina.");
+  // A role suffix only where the directory has one; an acronym keeps its case.
+  const hr = R.menuOf({ enabled: true, entries: [{ label: "Pat Fiore", phone: one }, { label: "Kim (HR)", phone: one }] });
+  assert.equal(R.spokenNewOwnerMenu(hr), "Who would you like to speak with? I can connect you with Pat Fiore or Kim in HR.");
+  // Nobody reachable: no menu at all.
+  assert.equal(R.spokenNewOwnerMenu(R.menuOf({ enabled: true, entries: six() })), "");
+  // No "press" or key number anywhere Sarah speaks.
+  for (const m of [all, noAlex, roles, plain, hr, R.menuOf({ enabled: true, entries: six({ 4: one }) })]) {
+    for (const line of [R.spokenMenu(m), R.spokenNewOwnerMenu(m), R.NEW_OWNER_LOGGED_SAY]) {
+      assert.doesNotMatch(line, /press|\b[0-9]\b|key/i, line);
+    }
+  }
+  // The named-person line.
+  assert.equal(R.namedPersonLine(R.findMenuEntry(all, "Pat")), "Sure, let me put you through to Pat Fiore.");
+  assert.equal(R.namedPersonLine(R.findMenuEntry(all, "Delia")), "Sure, let me put you through to Delia in accounting.");
+});
+
+test("while live: one existing-or-new question, and the new-owner path skips email verification", () => {
+  const one = "+17542795559";
+  const s = L.composeSarahSections(liveConfig({ 1: one, 2: one, 3: one, 4: one, 5: one, 6: one }));
+  const extra = s.extra;
+  // The question is asked once, in OWNER CALL ROUTING only (leasing step 7 points there).
+  assert.equal(extra.split(R.OWNER_KIND_QUESTION).length, 2);
+  assert.match(extra, /EXISTING OR NEW: if an owner has not said which, ask once: "Do you already have a property with us, or are you looking for us to manage one\?"\nSkip it if they already said\./);
+  assert.match(extra, /7\. A property owner is not a renter: follow OWNER CALL ROUTING above/);
+  // Existing owners still verify before the menu; the old flow is unchanged.
+  assert.ok(extra.indexOf("EXISTING OWNERS:") < extra.indexOf("1. Ask which property they own"));
+  assert.match(extra, /if verify_owner does not verify\s+them, never switch them to the new-owner path/);
+  // New owners: no email, no owner data, logged before the menu, the menu with Alex recommended.
+  const at = (x) => {
+    const i = extra.indexOf(x);
+    assert.ok(i >= 0, `missing: ${x}`);
+    return i;
+  };
+  assert.ok(at("NEW OWNERS (want") > at("8. Otherwise say its say line"));
+  assert.match(extra, /A\. Never call verify_owner and never ask for an email on file\. A new owner gets nothing about any\s+existing owner, property, statement, payment or account/);
+  assert.ok(at("B. Ask their name, then the best callback number (rule 8)") < at("Call route_owner_prospect with them."));
+  assert.ok(at("Call route_owner_prospect with them.") < at("C. If it returns menu_live true"));
+  assert.ok(extra.includes(`then stop and wait: "${R.spokenNewOwnerMenu(R.menuOf(liveConfig({ 1: one, 2: one, 3: one, 4: one, 5: one, 6: one }).routingDirectory))}"`));
+  assert.match(extra, /Alex Buell looks after new properties, so he's the best person to speak with\./);
+  // A person the caller already named skips the menu (loose name match, straight to availability).
+  assert.match(extra, /If they already asked for someone on the keypad list above \(by first or full name\), skip the\n     menu: say "Sure, let me put you through to <their name as the keypad list has it>\." \(for "Pat": "Sure, let me put you through to Pat Fiore\."\),\n     then call check_staff_availability with that person straight away, then step 7\./);
+  assert.match(extra, /Otherwise \(nobody named, or a name not in the directory\), read the new-owner menu/);
+  assert.ok(at("skip the\n     menu") < at("read the new-owner menu"));
+  // A digit still maps silently; no spoken line in the block says "press N".
+  assert.match(extra, /Keypad keys, for you only: 1 Pat Fiore, 2 Alex Buell, 3 Nikki, 4 Nina, 5 Delia in Accounting, 6 Alyssa\./);
+  for (const q of extra.match(/"[^"\n]*"/g) ?? []) assert.doesNotMatch(q, /\bpress [1-9]/i, q); // "press 0" only appears in the never-offer rule
+  assert.match(extra, /If it returns menu_live false.*\n.*Alex will call them back, and read no menu\./);
+  assert.match(extra, /\(person: who they wanted, else "Alex Buell"\)/);
+  // Still never a staff number in the prompt.
+  assert.doesNotMatch(extra, /\+17542795559/);
+});
+
+test("while off: the one question, the prospect is logged and Alex calls back, no menu or verification", () => {
+  const off = L.composeSarahSections(L.normalizeConfig(L.defaultConfig())).extra;
+  assert.equal(off.split(R.OWNER_KIND_QUESTION).length, 2);
+  assert.match(off, /7\. A property owner is not a renter\. If they have not said whether they already have a property with\n   518 Property Pro or want 518 Property Pro to manage one, ask once:/);
+  assert.match(off, /call route_owner_prospect\. No email check\. Say its say\n   line: Alex will call them back\./);
+  assert.doesNotMatch(off, /OWNER CALL ROUTING|verify_owner|NEW OWNERS|looks after new properties/);
 });

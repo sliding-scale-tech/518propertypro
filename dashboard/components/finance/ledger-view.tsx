@@ -13,12 +13,12 @@ import {
   Card,
   DEFAULT_PAGE_SIZE,
   DataTable,
-  Field,
+  FilterSelect,
+  FilterToggle,
+  FilterToolbar,
   PageHeader,
   Pagination,
   Pill,
-  Select,
-  Toggle,
   type Column,
 } from "@/components/ui";
 import { FinanceNav, useNow } from "./finance-nav";
@@ -188,70 +188,77 @@ export function LedgerView() {
       />
       <FinanceNav active="ledger" />
       <Card>
-        <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_200px_auto]">
-          <Field label="Owner" htmlFor="ledger-owner">
-            <Select
-              id="ledger-owner"
-              value={ownerId}
-              onChange={(e) => {
-                setOwnerId(e.target.value || "");
-                resetPaging();
-              }}
-            >
-              <option value="">All owners</option>
-              {(owners ?? []).map((o) => (
-                <option key={o._id} value={o._id}>
-                  {o.legalName}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <Field label="Property" htmlFor="ledger-property">
-            <Select
-              id="ledger-property"
-              value={propertyId}
-              onChange={(e) => {
-                setPropertyId(e.target.value || "");
-                resetPaging();
-              }}
-            >
-              <option value="">All properties</option>
-              {(opts?.properties ?? []).map((p) => (
-                <option key={p.propertyId} value={p.propertyId}>
-                  {p.name}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <Field label="Month" htmlFor="ledger-month">
-            <Select
-              id="ledger-month"
-              value={month}
-              onChange={(e) => {
-                setMonth(e.target.value || "");
-                resetPaging();
-              }}
-            >
-              <option value="">Any month</option>
-              {months.map((m) => (
-                <option key={m.value} value={m.value}>
-                  {m.label}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <div className="flex items-end gap-2 pb-2">
-            <Toggle
-              checked={includeVoided}
-              label="Show deleted"
-              onChange={(v) => {
-                setIncludeVoided(v);
-                resetPaging();
-              }}
-            />
-            <span className="text-[13px]">Show deleted</span>
-          </div>
-        </div>
+        <FilterToolbar
+          className="mb-3.5"
+          active={ownerId !== "" || propertyId !== "" || month !== "" || includeVoided}
+          onClear={() => {
+            setOwnerId("");
+            setPropertyId("");
+            setMonth("");
+            setIncludeVoided(false);
+            resetPaging();
+          }}
+        >
+          <FilterSelect
+            label="Owner"
+            active={ownerId !== ""}
+            value={ownerId || "all"}
+            onChange={(e) => {
+              setOwnerId(!e.target.value || e.target.value === "all" ? "" : e.target.value);
+              resetPaging();
+            }}
+            className="sm:w-56"
+          >
+            <option value="all">All</option>
+            {(owners ?? []).map((o) => (
+              <option key={o._id} value={o._id}>
+                {o.legalName}
+              </option>
+            ))}
+          </FilterSelect>
+          <FilterSelect
+            label="Property"
+            active={propertyId !== ""}
+            value={propertyId || "all"}
+            onChange={(e) => {
+              setPropertyId(!e.target.value || e.target.value === "all" ? "" : e.target.value);
+              resetPaging();
+            }}
+            className="sm:w-56"
+          >
+            <option value="all">All</option>
+            {(opts?.properties ?? []).map((p) => (
+              <option key={p.propertyId} value={p.propertyId}>
+                {p.name}
+              </option>
+            ))}
+          </FilterSelect>
+          <FilterSelect
+            label="Month"
+            active={month !== ""}
+            value={month || "all"}
+            onChange={(e) => {
+              setMonth(!e.target.value || e.target.value === "all" ? "" : e.target.value);
+              resetPaging();
+            }}
+            className="sm:w-52"
+          >
+            <option value="all">Any</option>
+            {months.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
+          </FilterSelect>
+          <FilterToggle
+            label="Show deleted"
+            pressed={includeVoided}
+            onChange={(v) => {
+              setIncludeVoided(v);
+              resetPaging();
+            }}
+          />
+        </FilterToolbar>
 
         {page === undefined ? (
           <Spinner label="Loading transactions…" />

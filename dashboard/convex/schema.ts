@@ -81,8 +81,9 @@ export default defineSchema({
     // Free-text speciality shown as the subtitle on Team and the dashboard, and matched against
     // the issue type when suggesting a technician (workOrders.suggestTechnician).
     skill: v.optional(v.string()),
-    // Admin-chosen: receives new leasing leads and is the ONLY pool tours are booked from (also
-    // needs the asset_manager job role, a connected calendar, tours on, and not out of office).
+    // Admin-chosen: receives new leasing leads and is the pool tours are booked from while no
+    // building is chosen (also needs the asset_manager job role, a connected calendar, tours on,
+    // and not out of office). Once a building is chosen, its team's tourStaff list is used instead.
     leadAssignee: v.optional(v.boolean()),
     // Admin-chosen: receives callback contacts for callers Sarah could not match to a unit.
     unmatchedAssignee: v.optional(v.boolean()),
@@ -182,6 +183,17 @@ export default defineSchema({
     updatedAt: v.number(),
   }).index("by_user", ["userId"]),
 
+  // Who gives tours for one property team's buildings (B40, convex/tourStaff.ts). No row = the
+  // default: that team's asset managers (the AMs of its units). A row with an empty list is allowed
+  // and means nobody, so Sarah takes the caller's preferred time for that team instead of booking.
+  tourStaff: defineTable({
+    orgId: v.string(),
+    category: v.union(v.literal("gold"), v.literal("silver"), v.literal("make_up")),
+    userIds: v.array(v.id("users")),
+    updatedAt: v.number(),
+    updatedBy: v.id("users"),
+  }).index("by_org_and_category", ["orgId", "category"]),
+
   // The times find_tour_times last gave the agent on one call. request_tour may only book one of
   // these: a small model on a phone call will otherwise book a slot from an earlier list after the
   // caller has asked for something else (a caller asked for 9am and was booked at 2pm).
@@ -206,6 +218,14 @@ export default defineSchema({
     callerName: v.optional(v.string()),
     callerPhone: v.optional(v.string()),
     elevenLabsConversationId: v.optional(v.string()),
+    // The apartment the tour is for, when the caller chose one and request_tour matched it to this
+    // team's own building (and an AVAILABLE unit). Absent on older rows and on tours booked without
+    // a specific apartment. propertyAddress / unitLabel are a snapshot taken at booking, so the
+    // tour still reads right if the unit is later relabelled or removed.
+    propertyId: v.optional(v.id("properties")),
+    unitId: v.optional(v.id("units")),
+    propertyAddress: v.optional(v.string()),
+    unitLabel: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -343,13 +363,18 @@ export default defineSchema({
     workOrderId: v.optional(v.id("workOrders")),
     // Set when Sarah created the task from a resident call (log_task_request); upsert key.
     elevenLabsConversationId: v.optional(v.string()),
+    // B44: a lease-ended follow-up made by the daily job (leaseFollowUp.ts) for this resident.
+    // At most one open (status != completed) per resident; closed by its one-click resolutions.
+    kind: v.optional(v.literal("lease_follow_up")),
+    residentId: v.optional(v.id("residents")),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index("by_org", ["orgId"])
     .index("by_user", ["userId"])
     .index("by_assignee", ["assigneeUserId"])
-    .index("by_conversation", ["elevenLabsConversationId"]),
+    .index("by_conversation", ["elevenLabsConversationId"])
+    .index("by_resident", ["residentId"]),
 
   // Files attached to a task from the Create task modal or the detail panel's Attach files
   // button. `taskId` is optional because the create modal uploads to storage (so the file picks
@@ -547,7 +572,13 @@ export default defineSchema({
     assignedUserId: v.optional(v.id("users")),
     assignedAt: v.optional(v.number()),
     assignmentReason: v.optional(v.string()),
+    // How assignedUserId was set (B41, rules in leadRoutingLib.ts): "auto_building" = Sarah, from the
+    // building the caller picked (assignedPropertyId); "manual" = an admin on the Leads page, which
+    // Sarah never changes. Unset with an assignee = assigned before B41, treated as manual.
+    assignedBy: v.optional(v.union(v.literal("auto_building"), v.literal("manual"))),
+    assignedPropertyId: v.optional(v.id("properties")),
     leadNotifiedAt: v.optional(v.number()), // staff were texted about this lead
+    leadNotifiedUserId: v.optional(v.id("users")), // the assignee that "new lead" text went to, if any
     // Capture-and-flag: staff-facing only, NEVER relayed to the caller.
     leadClass: v.optional(v.string()), // "ready" | "partial"
     leadFlags: v.optional(v.array(v.string())),
@@ -579,7 +610,10 @@ export default defineSchema({
       ),
     ),
     updatedAt: v.number(),
-  }).index("by_elevenlabs_conversation_id", ["elevenLabsConversationId"]),
+  })
+    .index("by_elevenlabs_conversation_id", ["elevenLabsConversationId"])
+    // The leads a building routed (B42 bulk asset-manager change moves them without scanning every row).
+    .index("by_assigned_property", ["assignedPropertyId"]),
 
   // Extra questions this property manager wants Sarah to ask every leasing caller, on top of
   // the five that are built in. Data, not prompt text: `key` becomes a property on that
@@ -923,6 +957,11 @@ export default defineSchema({
     phones: v.array(v.string()), // E.164. Source of truth; residentPhones mirrors it for lookup.
     email: v.optional(v.string()),
     leaseEnd: v.optional(v.string()), // YYYY-MM-DD
+    // B44 leases. All optional: rows created before them stay valid.
+    leaseStart: v.optional(v.string()), // YYYY-MM-DD, from the New renter form
+    // Set by a person (a lease follow-up's "Month-to-month"): no lease-ended reminders, tag says so.
+    leaseStatus: v.optional(v.literal("month_to_month")),
+    movedOutOn: v.optional(v.string()), // YYYY-MM-DD, set by Move out / New renter (never automatically)
     active: v.boolean(), // false = moved out / removed. Never hard-deleted, history points at it.
     // roster_import = a tenant name from the client unit rosters (names only, no phones).
     source: v.union(v.literal("manual"), v.literal("buildium_csv"), v.literal("roster_import")),
@@ -1386,6 +1425,28 @@ export default defineSchema({
     note: v.optional(v.string()),
     at: v.number(),
   }).index("by_org_and_item", ["orgId", "itemId", "at"]),
+
+  // B43: the last "update Sarah" push per team, after a dashboard save, approval or rollback.
+  // One row per team; see convex/sarahPushLib.ts for the state machine (debounce, lock, retries).
+  sarahPushes: defineTable({
+    orgId: v.string(),
+    generation: v.number(), // bumped by every request; only the newest request's run pushes
+    status: v.union(
+      v.literal("pending"),
+      v.literal("pushing"),
+      v.literal("ok"),
+      v.literal("failed"),
+      v.literal("no_agent"),
+    ),
+    attempt: v.number(), // failed attempts for the current generation
+    requestedBy: v.optional(v.id("users")),
+    requestedAt: v.number(),
+    runningGeneration: v.optional(v.number()), // lock: the push in progress
+    runningSince: v.optional(v.number()),
+    lastError: v.optional(v.string()), // short, user-safe reason; never raw upstream text
+    lastOkAt: v.optional(v.number()),
+    updatedAt: v.number(),
+  }).index("by_org", ["orgId"]),
 
   // --- Rental Owner Statements (ROS) ---------------------------------------------------------
   //

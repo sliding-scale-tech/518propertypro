@@ -39,4 +39,5 @@ export { useUrlPaging } from "./use-url-paging";
 export { SortHeader } from "./sort-header";
 export { readSort, toggleSort, ariaSortOf, sortRows, type SortDir, type SortState } from "./table-sort";
 export { SearchBox, useUrlSearch, SEARCH_DEBOUNCE_MS } from "./search-box";
+export { FilterToolbar, FilterSelect, FilterToggle } from "./filter-toolbar";
 export { RowMenu, type RowMenuItem } from "./row-menu";

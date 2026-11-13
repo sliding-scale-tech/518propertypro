@@ -44,6 +44,7 @@ export const TEMPLATES = [
   "request_note",
   "request_sent_back",
   "request_reassigned",
+  "units_reassigned",
   "request_new",
   "lead_assigned",
   "tour_booked",
@@ -70,6 +71,7 @@ const templateValidator = v.union(
   v.literal("request_note"),
   v.literal("request_sent_back"),
   v.literal("request_reassigned"),
+  v.literal("units_reassigned"),
   v.literal("request_new"),
   v.literal("lead_assigned"),
   v.literal("tour_booked"),
@@ -94,6 +96,12 @@ export const notifyDataValidator = v.object({
   when: v.optional(v.string()),
   // lead_assigned / tour_booked: first name of the asset manager the lead is assigned to.
   assignee: v.optional(v.string()),
+  // units_reassigned (bulk asset manager change): how many units / open leads moved, the building
+  // or team name, and the first name of the admin who made the change.
+  units: v.optional(v.number()),
+  leads: v.optional(v.number()),
+  scope: v.optional(v.string()),
+  by: v.optional(v.string()),
 });
 
 export type NotifyArgs = {
@@ -111,6 +119,10 @@ export type NotifyArgs = {
     phone?: string;
     when?: string;
     assignee?: string;
+    units?: number;
+    leads?: number;
+    scope?: string;
+    by?: string;
   };
 };
 
@@ -176,6 +188,18 @@ function bodyFor(template: NotifyTemplate, data: NotifyArgs["data"]): string {
       return `${mr}${at} was sent back to the asset manager.`;
     case "request_reassigned":
       return `${mr}${at} is now yours (unit reassigned to you).`;
+    case "units_reassigned": {
+      // Counts and a building/team name only: nothing about residents or leads' contact details.
+      const n = Math.max(0, Math.floor(data.units ?? 0));
+      const leads = Math.max(0, Math.floor(data.leads ?? 0));
+      const scope = clean(data.scope, 40);
+      const by = clean(data.by, 30);
+      const what = n > 0 ? `${n} unit${n === 1 ? "" : "s"}` : leads > 0 ? `${leads} open lead${leads === 1 ? "" : "s"}` : "Units";
+      const label = `${what}${scope ? ` in ${scope}` : ""}`;
+      const withLeads = n > 0 && leads > 0 ? `, with ${leads} open lead${leads === 1 ? "" : "s"}` : "";
+      const are = (n > 0 ? n === 1 : leads === 1) ? "is" : "are";
+      return `${label} ${are} now yours${withLeads}${by ? ` (bulk change by ${by})` : ""}.`;
+    }
     case "request_new":
       return `${mr}${at}${who} is ready for your review.`;
     case "lead_assigned": {

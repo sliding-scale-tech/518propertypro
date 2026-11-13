@@ -15,14 +15,16 @@ export function TeamSettings({ orgName, isAdmin }: { orgName: string; isAdmin: b
   // Same underlying query the Calendar page uses for tour settings; timeZone is the one field needed.
   const availability = useQuery(api.tours.availabilitySettings);
   return (
-    <Card className="divide-y divide-border !p-0">
-      <div className="px-[22px] py-5">
-        <TeamNameSection orgName={orgName} isAdmin={isAdmin} />
-      </div>
-      <div className="px-[22px] py-5">
-        <TimeZoneSection isAdmin={isAdmin} timeZone={availability?.timeZone ?? null} loading={availability === undefined} />
-      </div>
-    </Card>
+    <div className="space-y-4">
+      <Card className="divide-y divide-border !p-0">
+        <div className="px-[22px] py-5">
+          <TeamNameSection orgName={orgName} isAdmin={isAdmin} />
+        </div>
+        <div className="px-[22px] py-5">
+          <TimeZoneSection isAdmin={isAdmin} timeZone={availability?.timeZone ?? null} loading={availability === undefined} />
+        </div>
+      </Card>
+    </div>
   );
 }
 

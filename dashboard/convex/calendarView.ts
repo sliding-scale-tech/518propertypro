@@ -30,6 +30,9 @@ export type WeekTour = {
   end: number;
   callerName?: string;
   callerPhone?: string;
+  // The apartment the tour is for (the booking-time snapshot), when one was recorded.
+  propertyAddress?: string;
+  unitLabel?: string;
 };
 
 export type WeekView = {
@@ -207,6 +210,8 @@ export const toursFor = internalQuery({
         end: t.end,
         callerName: t.callerName,
         callerPhone: t.callerPhone,
+        propertyAddress: t.propertyAddress,
+        unitLabel: t.unitLabel,
       }));
   },
 });

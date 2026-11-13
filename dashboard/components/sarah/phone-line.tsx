@@ -11,7 +11,7 @@ import { errorMessage, useToast } from "@/components/toast";
  * "Business line forwarding (optional)". The admin enters their existing office number; THEY set
  * up forwarding at their carrier. Nothing here changes any carrier, and the badge never says
  * forwarding works until a call has actually been seen after they confirmed the setup.
- * Saves immediately: this is not prompt behaviour, so it is outside Sarah's draft/publish flow.
+ * Saves immediately: this is not prompt behaviour, so it is separate from Sarah's Save.
  */
 
 type LineType = "verizon_mobile" | "other_mobile" | "landline_office" | "phone_system" | "unknown";
@@ -238,7 +238,7 @@ export function PhoneLine() {
           ) : null}
         </div>
         <p className="text-xs text-muted-foreground">
-          This saves immediately. It is not part of Sarah&apos;s draft or Publish, because it doesn&apos;t change what she says.
+          This saves immediately. It is separate from Sarah&apos;s Save, because it doesn&apos;t change what she says.
           Saving only stores the number here; it does not change anything at your phone carrier.
         </p>
 

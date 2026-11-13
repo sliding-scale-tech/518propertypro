@@ -11,6 +11,7 @@ import { LeadRouting } from "@/components/team/lead-routing";
 import { MembersList } from "@/components/team/members-list";
 import { AuditTab } from "@/components/team/audit-tab";
 import { InviteDialog } from "@/components/team/invite-panel";
+import { PhoneRoutingTab } from "@/components/team/phone-routing-tab";
 import { PendingInvites } from "@/components/team/pending-invites";
 import { TeamSettings } from "@/components/team/team-settings";
 import { parseTeamTab, teamTabHref, visibleTeamTabs, type TeamTab } from "@/components/team/team-tabs";
@@ -121,6 +122,8 @@ function TeamPageInner() {
 
       {activeTab === "routing" ? <LeadRouting members={data.members} /> : null}
 
+      {activeTab === "phone" ? <PhoneRoutingTab /> : null}
+
       {activeTab === "settings" ? <TeamSettings orgName={data.orgName} isAdmin={data.isAdmin} /> : null}
 
       {activeTab === "audit" ? <AuditTab /> : null}
@@ -154,7 +157,7 @@ function Header({ isAdmin, actions }: { isAdmin?: boolean; actions?: ReactNode }
       subtitle={
         isAdmin === false
           ? "See who is on the team. Only an Admin can invite or remove people."
-          : "Who is on the team, what they can do, and who receives new leads."
+          : "Who is on the team, what they can do, and who Sarah sends tours and callbacks to."
       }
       actions={actions}
     />

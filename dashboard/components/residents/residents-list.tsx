@@ -11,6 +11,14 @@ import { ResidentModal } from "@/components/residents/resident-modal";
 import { useKept, useTenantUrl } from "@/components/residents/use-tenant-url";
 import { readChoice } from "@/components/residents/tenant-list-params";
 import { useResidentActions } from "@/components/residents/use-resident-actions";
+import {
+  LeaseFollowUpActions,
+  LeaseTagPill,
+  MoveOutDialog,
+  NewRenterDialog,
+  RenewDialog,
+} from "@/components/residents/lease-dialogs";
+import { LEASE_FILTERS, LEASE_FILTER_LABEL } from "@/convex/leaseLib";
 import { errorMessage, useToast } from "@/components/toast";
 import {
   Btn,
@@ -19,8 +27,10 @@ import {
   DataTable,
   Pagination,
   Pill,
+  FilterSelect,
+  FilterToolbar,
   SearchBox,
-  Select,
+  RowMenu,
   SortHeader,
   ariaSortOf,
   readSort,
@@ -42,16 +52,19 @@ export function ResidentsList() {
   const toast = useToast();
   const router = useRouter();
   const access = useQuery(api.team.myAccess);
-  const isAdmin = access?.view === "admin";
+  const isAdmin = access?.isAdmin === true;
+  // B45: an asset manager adds residents to, and edits residents of, the units they manage.
+  const isAm = access?.roles.includes("asset_manager") === true;
   const properties = useQuery(api.properties.list);
   const create = useMutation(api.residents.create);
-  const actions = useResidentActions();
+  const actions = useResidentActions(undefined, { onlyMine: !isAdmin });
 
   const url = useTenantUrl();
   const search = useUrlSearch();
   const paging = useUrlPaging();
   const status = readChoice(url.params.get("status"), STATUSES, "active");
   const team = readChoice(url.params.get("team"), [...TEAMS, "all"] as const, "all");
+  const lease = readChoice(url.params.get("lease"), LEASE_FILTERS, "all");
   const sort = readSort(url.params.get("sort"), url.params.get("dir"), SORT_KEYS, SORT_DEFAULT);
   // The property filter is only sent once it is known to be one of the viewer's properties.
   const propertyParam = url.params.get("property") ?? "";
@@ -60,6 +73,10 @@ export function ResidentsList() {
 
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
+  // B44 lease flows opened from a row.
+  const [newRenterUnit, setNewRenterUnit] = useState<string | null>(null);
+  const [movingOut, setMovingOut] = useState<{ unitId: string; residentId: string } | null>(null);
+  const [renewing, setRenewing] = useState<{ _id: string; fullName: string; leaseEnd?: string } | null>(null);
 
   const result = useQuery(
     api.residents.listPage,
@@ -70,6 +87,7 @@ export function ResidentsList() {
           search: search.q.trim() || undefined,
           status,
           team: team === "all" ? undefined : team,
+          lease: lease === "all" ? undefined : lease,
           sortKey: sort.key,
           sortDir: sort.dir,
           page: paging.page,
@@ -110,36 +128,74 @@ export function ResidentsList() {
   }
   if (showEmail) columns.push({ key: "email", header: "Email", render: (r) => r.email ?? "—" });
   columns.push(
-    { key: "lease", ...sortable("lease", "Lease end"), className: "tabular-nums", render: (r) => r.leaseEnd ?? "—" },
+    {
+      key: "lease",
+      ...sortable("lease", "Lease end"),
+      className: "tabular-nums",
+      render: (r) => (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span>{r.leaseEnd ?? "—"}</span>
+          <LeaseTagPill tag={r.leaseTag} />
+        </div>
+      ),
+    },
     {
       key: "status",
       ...sortable("status", "Status"),
       render: (r) => <Pill tone={r.active ? "ok" : "neutral"}>{r.active ? "Active" : "Inactive"}</Pill>,
     },
   );
-  if (isAdmin) {
+  // Admins get the row menu; an asset manager the follow-up answers and a row menu on their own units.
+  if (isAdmin || data?.rows.some((r) => r.canManage || (r.openFollowUpTaskId && r.canResolveLease))) {
     columns.push({
       key: "actions",
       header: <span className="sr-only">Actions</span>,
       render: (r) => (
-        <div className="flex justify-end gap-2">
-          <Btn sm onClick={() => actions.edit(r)}>
-            Edit
-          </Btn>
-          {r.active ? (
-            <Btn sm variant="dng" onClick={() => actions.deactivate(r)}>
-              Deactivate
-            </Btn>
+        <div className="flex items-center justify-end gap-2" onClick={(e) => e.stopPropagation()}>
+          {r.openFollowUpTaskId && r.canResolveLease ? (
+            <div className="flex flex-col items-end gap-1">
+              <span className="text-[11.5px] text-muted-foreground">Lease ended: renewed, moving out or month-to-month?</span>
+              <LeaseFollowUpActions target={r} canMoveOut={r.canManage} />
+            </div>
+          ) : null}
+          {r.canManage ? (
+            <RowMenu
+              label={`Actions for ${r.fullName}`}
+              items={[
+                { label: "Edit", onSelect: () => actions.edit(r) },
+                ...(r.active
+                  ? [
+                      { label: "Move out…", onSelect: () => setMovingOut({ unitId: r.unitId, residentId: r._id }) },
+                      { label: "New renter for this unit…", onSelect: () => setNewRenterUnit(r.unitId) },
+                      {
+                        label: "Lease renewed…",
+                        onSelect: () => setRenewing({ _id: r._id, fullName: r.fullName, leaseEnd: r.leaseEnd }),
+                      },
+                      ...(isAdmin
+                        ? [
+                            {
+                              label: "Deactivate…",
+                              danger: true,
+                              title: "Remove a resident entered by mistake. To record a move-out, use Move out.",
+                              onSelect: () => actions.deactivate(r),
+                            },
+                          ]
+                        : []),
+                    ]
+                  : []),
+              ]}
+            />
           ) : null}
         </div>
       ),
     });
   }
 
-  const filtered = search.q.trim() !== "" || propertyId !== undefined || team !== "all" || status !== "active";
+  const filtered =
+    search.q.trim() !== "" || propertyId !== undefined || team !== "all" || status !== "active" || lease !== "all";
   const clearAll = () => {
     search.setInput("");
-    url.set({ q: null, property: null, team: null, status: null });
+    url.set({ q: null, property: null, team: null, status: null, lease: null });
   };
 
   return (
@@ -148,7 +204,7 @@ export function ResidentsList() {
         title="Residents"
         hint="Tenant directory used to recognise callers."
         right={
-          isAdmin ? (
+          isAdmin || isAm ? (
             <Btn variant="pri" sm onClick={() => setAdding(true)}>
               <Plus className="h-3.5 w-3.5" />
               Add resident
@@ -156,54 +212,73 @@ export function ResidentsList() {
           ) : undefined
         }
       />
-      <div className="mb-3.5 flex flex-col gap-3">
-        <SearchBox
-          id="residents-search"
-          label="Search residents"
-          value={search.input}
-          onChange={search.setInput}
-          onClear={search.clear}
-          placeholder="Search name, unit, property, phone or email"
-        />
-        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
-          <Select
-            value={propertyId ?? "all"}
-            onChange={(e) => url.set({ property: e.target.value === "all" ? null : e.target.value })}
-            aria-label="Filter by property"
-            className="sm:w-56"
-          >
-            <option value="all">All properties</option>
-            {(properties ?? []).map((p) => (
-              <option key={p._id} value={p._id}>
-                {p.name}
-              </option>
-            ))}
-          </Select>
-          <Select
-            value={team}
-            onChange={(e) => url.set({ team: e.target.value === "all" ? null : e.target.value })}
-            aria-label="Filter by team"
-            className="sm:w-40"
-          >
-            <option value="all">All teams</option>
-            {TEAMS.map((t) => (
-              <option key={t} value={t}>
-                {TEAM_LABEL[t]}
-              </option>
-            ))}
-          </Select>
-          <Select
-            value={status}
-            onChange={(e) => url.set({ status: e.target.value === "active" ? null : e.target.value })}
-            aria-label="Filter by status"
-            className="sm:w-44"
-          >
-            <option value="active">Active</option>
-            <option value="inactive">Moved out / inactive</option>
-            <option value="all">All residents</option>
-          </Select>
-        </div>
-      </div>
+      <FilterToolbar
+        className="mb-3.5"
+        active={filtered}
+        onClear={clearAll}
+        search={
+          <SearchBox
+            id="residents-search"
+            label="Search residents"
+            value={search.input}
+            onChange={search.setInput}
+            onClear={search.clear}
+            placeholder="Search name, unit, property, phone or email"
+          />
+        }
+      >
+        <FilterSelect
+          label="Property"
+          active={propertyId !== undefined}
+          value={propertyId ?? "all"}
+          onChange={(e) => url.set({ property: !e.target.value || e.target.value === "all" ? null : e.target.value })}
+          className="sm:w-56"
+        >
+          <option value="all">All</option>
+          {(properties ?? []).map((p) => (
+            <option key={p._id} value={p._id}>
+              {p.name}
+            </option>
+          ))}
+        </FilterSelect>
+        <FilterSelect
+          label="Team"
+          active={team !== "all"}
+          value={team}
+          onChange={(e) => url.set({ team: !e.target.value || e.target.value === "all" ? null : e.target.value })}
+        >
+          <option value="all">All</option>
+          {TEAMS.map((t) => (
+            <option key={t} value={t}>
+              {TEAM_LABEL[t]}
+            </option>
+          ))}
+        </FilterSelect>
+        <FilterSelect
+          label="Status"
+          active={status !== "active"}
+          value={status}
+          onChange={(e) => url.set({ status: !e.target.value || e.target.value === "active" ? null : e.target.value })}
+          className="sm:w-52"
+        >
+          <option value="active">Active</option>
+          <option value="inactive">Moved out / inactive</option>
+          <option value="all">All residents</option>
+        </FilterSelect>
+        <FilterSelect
+          label="Lease"
+          active={lease !== "all"}
+          value={lease}
+          onChange={(e) => url.set({ lease: !e.target.value || e.target.value === "all" ? null : e.target.value })}
+          className="sm:w-48"
+        >
+          {LEASE_FILTERS.map((l) => (
+            <option key={l} value={l}>
+              {LEASE_FILTER_LABEL[l]}
+            </option>
+          ))}
+        </FilterSelect>
+      </FilterToolbar>
 
       {data === undefined ? (
         <p className="text-sm text-muted-foreground">Loading residents…</p>
@@ -246,7 +321,19 @@ export function ResidentsList() {
         </div>
       )}
 
-      {isAdmin ? actions.dialogs : null}
+      {actions.dialogs}
+      {newRenterUnit ? <NewRenterDialog unitId={newRenterUnit} onClose={() => setNewRenterUnit(null)} /> : null}
+      {movingOut ? (
+        <MoveOutDialog unitId={movingOut.unitId} residentId={movingOut.residentId} onClose={() => setMovingOut(null)} />
+      ) : null}
+      {renewing ? (
+        <RenewDialog
+          residentId={renewing._id}
+          fullName={renewing.fullName}
+          oldLeaseEnd={renewing.leaseEnd}
+          onClose={() => setRenewing(null)}
+        />
+      ) : null}
 
       {adding ? (
         <ResidentModal

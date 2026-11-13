@@ -20,6 +20,7 @@ import {
   SevChip,
 } from "@/components/ui";
 import { AmLeadCards } from "@/components/dashboard/lead-cards";
+import { LeasesCard } from "@/components/dashboard/leases-card";
 import { browserTimeZone, relativeDay } from "@/components/dashboard/format";
 
 function hourWord(at: Date) {
@@ -229,6 +230,8 @@ export function AmDashboard() {
           )}
         </Card>
       </Grid2>
+
+      <LeasesCard />
 
       <Card>
         <CardHead title="Your properties" icon={<Building2 />} />

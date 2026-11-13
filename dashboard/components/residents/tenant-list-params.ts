@@ -19,3 +19,8 @@ export function nextQuery(current: string, updates: Record<string, string | null
   next.delete(pageKey);
   return next.toString();
 }
+
+/** True when every filter in `current` equals its default (the search is passed in trimmed). */
+export function filtersAtDefault(current: Record<string, string>, defaults: Record<string, string>): boolean {
+  return Object.keys(defaults).every((k) => (current[k] ?? defaults[k]) === defaults[k]);
+}

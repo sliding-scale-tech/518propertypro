@@ -8,6 +8,7 @@ import { ownerRoutingMenu } from "./sarahConfigLib";
 import { findMenuEntry, MENU_OFF_SAY, OWNER_DIAL_TIMEOUT_SECS, STAFF_MESSAGE_PREFIX, staffCheck } from "./ownerRoutingLib";
 import type { StaffCheck } from "./ownerRoutingLib";
 import {
+  callCleared,
   hasLiveVerification,
   maskEmail,
   MAX_EMAIL_ATTEMPTS_PER_CALL,
@@ -28,7 +29,8 @@ import { lookupAddress, streetLine } from "./sarahTools";
  *
  *   verify_owner: the caller's property (matched like find_unit) and the email on file for it, checked
  *   against every owner email of that property. The result is stored per call (ownerVerifications).
- *   check_staff_availability: refuses (verify_first) unless this call has a verified owner. Then it
+ *   check_staff_availability: refuses (verify_first) unless this call has a verified owner, or a new
+ *   owner route_owner_prospect recorded (B46: wants us to manage a property; no email check). Then it
  *   decides from the directory and the clock, never the model, whether the person can be put through
  *   now, and gives Sarah the number to transfer to and the line to say. That number is also what the
  *   transfer tool dials (a dynamic variable set from this result), so nothing else can reach a phone.
@@ -59,19 +61,50 @@ async function verificationsFor(ctx: QueryCtx, orgId: string, elevenLabsConversa
   ).filter((r) => r.orgId === orgId);
 }
 
-/** Whether this call has a verified owner right now. The one gate on putting a call through. */
-export async function callIsVerified(ctx: QueryCtx, orgId: string, elevenLabsConversationId: string): Promise<boolean> {
-  return hasLiveVerification(await verificationsFor(ctx, orgId, elevenLabsConversationId), Date.now());
+/** Audit action route_owner_prospect writes on the call (B46): a NEW owner recorded on this call. */
+export const NEW_OWNER_RECORDED = "owner_prospect_logged";
+const TRANSFER_DIALING = "owner_transfer_dialing";
+
+/** This call's audit events with one of `actions`, this team's only, newest first. */
+async function callEvents(ctx: QueryCtx, orgId: string, elevenLabsConversationId: string, actions: string[]): Promise<Doc<"auditEvents">[]> {
+  return (
+    await ctx.db
+      .query("auditEvents")
+      .withIndex("by_entity", (q) => q.eq("entity", "conversation").eq("entityId", elevenLabsConversationId))
+      .order("desc")
+      .collect()
+  ).filter((e) => e.orgId === orgId && actions.includes(e.action));
+}
+
+/** Whether route_owner_prospect recorded a new owner on this call (server-side, never the model). */
+async function newOwnerRecorded(ctx: QueryCtx, orgId: string, elevenLabsConversationId: string): Promise<boolean> {
+  return (await callEvents(ctx, orgId, elevenLabsConversationId, [NEW_OWNER_RECORDED])).length > 0;
+}
+
+/**
+ * The one gate on putting a call through: a verified existing owner on this call, or a new owner
+ * route_owner_prospect recorded on it (ownerVerifyLib.callCleared).
+ */
+export async function callClearance(
+  ctx: QueryCtx,
+  orgId: string,
+  elevenLabsConversationId: string,
+  rows?: Doc<"ownerVerifications">[],
+): Promise<{ cleared: boolean; newOwner: boolean }> {
+  const r = rows ?? (await verificationsFor(ctx, orgId, elevenLabsConversationId));
+  return callCleared(r, await newOwnerRecorded(ctx, orgId, elevenLabsConversationId), Date.now());
 }
 
 export const checkStaffAvailability = internalMutation({
   args: { orgId: v.string(), elevenLabsConversationId: v.string(), person: v.string() },
-  handler: async (ctx, args): Promise<StaffCheck> => {
+  handler: async (ctx, args): Promise<StaffCheck & { newOwner: boolean }> => {
     const config = await publishedConfig(ctx, args.orgId);
     const menu = config ? ownerRoutingMenu(config, ownLines()) : null;
-    // The gate: verified on THIS call (server-side rows), never anything the model says.
-    const verified = menu ? await callIsVerified(ctx, args.orgId, args.elevenLabsConversationId) : false;
-    const out: StaffCheck = staffCheck(menu, verified, args.person, Date.now(), {
+    // The gate: a verified owner or a recorded new owner on THIS call (server-side rows), never
+    // anything the model says.
+    const gate = menu ? await callClearance(ctx, args.orgId, args.elevenLabsConversationId) : { cleared: false, newOwner: false };
+    const who = gate.newOwner ? "New owner (wants us to manage a property)" : "Verified owner";
+    const out: StaffCheck = staffCheck(menu, gate.cleared, args.person, Date.now(), {
       fallback: config?.routingDirectory.fallback,
       afterHours: config?.routingDirectory.afterHours,
     });
@@ -83,10 +116,10 @@ export const checkStaffAvailability = internalMutation({
       to: out.label ?? undefined,
       note:
         out.status === "available"
-          ? `Verified owner asked for ${out.label} (key ${out.key}). Available now: Sarah was told to put the call through (blind transfer).`
+          ? `${who} asked for ${out.label} (key ${out.key}). Available now: Sarah was told to put the call through.`
           : `Owner asked for "${args.person.slice(0, 80)}": ${
               out.status === "verify_first"
-                ? "refused, the caller has not been verified as an owner on this call (verify_owner)"
+                ? "refused, the caller was not verified as an owner (verify_owner) or recorded as a new owner (route_owner_prospect) on this call"
                 : out.status === "after_hours"
                   ? `${out.label} is outside their hours`
                   : out.status === "no_number"
@@ -96,7 +129,32 @@ export const checkStaffAvailability = internalMutation({
                       : "the owner call menu is off"
             }.${out.status === "verify_first" ? " No number was given." : " Sarah takes a message."}`,
     });
-    return out;
+    return { ...out, newOwner: gate.newOwner };
+  },
+});
+
+/**
+ * route_owner_prospect recorded a NEW owner (wants the company to manage a property) on this call
+ * (B46). Writes the audit event that clears the call for the phone menu, once per call, and says
+ * whether the menu is live: if not, Sarah tells them Alex will call them back and reads no menu.
+ */
+export const recordNewOwner = internalMutation({
+  args: { orgId: v.string(), elevenLabsConversationId: v.string(), name: v.string() },
+  handler: async (ctx, args): Promise<{ menuLive: boolean }> => {
+    const config = await publishedConfig(ctx, args.orgId);
+    const menu = config ? ownerRoutingMenu(config, ownLines()) : null;
+    if (!(await newOwnerRecorded(ctx, args.orgId, args.elevenLabsConversationId))) {
+      await writeAudit(ctx, {
+        orgId: args.orgId,
+        entity: "conversation",
+        entityId: args.elevenLabsConversationId,
+        action: NEW_OWNER_RECORDED,
+        note:
+          `New owner prospect recorded (${args.name.replace(/\s+/g, " ").trim().slice(0, 80)}); executives notified. ` +
+          (menu ? "Sarah offers the owner phone menu (no email check: new owners get no owner data)." : "The owner phone menu is off: Sarah says Alex will call them back."),
+      });
+    }
+    return { menuLive: menu !== null };
   },
 });
 
@@ -326,7 +384,8 @@ export const beginOwnerTransfer = internalMutation({
     const menu = config ? ownerRoutingMenu(config, ownLines()) : null;
     const rows = menu ? await verificationsFor(ctx, args.orgId, args.elevenLabsConversationId) : [];
     const now = Date.now();
-    const out = staffCheck(menu, hasLiveVerification(rows, now), args.person, now, {
+    const gate = menu ? await callClearance(ctx, args.orgId, args.elevenLabsConversationId, rows) : { cleared: false, newOwner: false };
+    const out = staffCheck(menu, gate.cleared, args.person, now, {
       fallback: config?.routingDirectory.fallback,
       afterHours: config?.routingDirectory.afterHours,
     });
@@ -341,18 +400,26 @@ export const beginOwnerTransfer = internalMutation({
       });
       return { ok: false, reason: out.status, label: out.label, say: out.say || MENU_OFF_SAY };
     }
+    // Once per call. A verified owner's row is stamped; a new owner has no row, so the dialing audit
+    // event written below is the stamp (same mutation, so two tool calls never both dial).
     const verified = rows.filter((r) => r.verified).sort((a, b) => (b.verifiedAt ?? 0) - (a.verifiedAt ?? 0));
     if (verified.some((r) => r.transferStartedAt)) {
       return { ok: false, reason: "already", label: out.label, say: "" };
     }
-    await ctx.db.patch(verified[0]._id, { transferStartedAt: now, transferTo: out.label ?? args.person.slice(0, 120) });
+    if (gate.newOwner) {
+      if ((await callEvents(ctx, args.orgId, args.elevenLabsConversationId, [TRANSFER_DIALING])).length > 0) {
+        return { ok: false, reason: "already", label: out.label, say: "" };
+      }
+    } else {
+      await ctx.db.patch(verified[0]._id, { transferStartedAt: now, transferTo: out.label ?? args.person.slice(0, 120) });
+    }
     await writeAudit(ctx, {
       orgId: args.orgId,
       entity: "conversation",
       entityId: args.elevenLabsConversationId,
-      action: "owner_transfer_dialing",
+      action: TRANSFER_DIALING,
       to: out.label ?? undefined,
-      note: `Handing the call to Twilio to ring ${out.label} (key ${out.key}). If they do not pick up within ${OWNER_DIAL_TIMEOUT_SECS} seconds, the caller stays on the line and can leave a voicemail.`,
+      note: `Handing the call${gate.newOwner ? " (a new owner)" : ""} to Twilio to ring ${out.label} (key ${out.key}). If they do not pick up within ${OWNER_DIAL_TIMEOUT_SECS} seconds, the caller stays on the line and can leave a voicemail.`,
     });
     return { ok: true, label: out.label ?? args.person.slice(0, 120), number: out.transferNumber, digits: out.transferDigits };
   },
@@ -361,14 +428,23 @@ export const beginOwnerTransfer = internalMutation({
 /** The team and staff member of a call handed to Twilio by transfer_owner_call, for the Dial callbacks. */
 export const transferContext = internalQuery({
   args: { elevenLabsConversationId: v.string() },
-  handler: async (ctx, args): Promise<{ orgId: string; label: string } | null> => {
+  handler: async (ctx, args): Promise<{ orgId: string; label: string; newOwner: boolean } | null> => {
     const row = (
       await ctx.db
         .query("ownerVerifications")
         .withIndex("by_conversation", (q) => q.eq("elevenLabsConversationId", args.elevenLabsConversationId))
         .collect()
     ).find((r) => r.verified && r.transferStartedAt);
-    return row ? { orgId: row.orgId, label: row.transferTo ?? "the team" } : null;
+    if (row) return { orgId: row.orgId, label: row.transferTo ?? "the team", newOwner: false };
+    // A new owner's transfer (B46) has no verification row: its dialing audit event carries the team and person.
+    const ev = (
+      await ctx.db
+        .query("auditEvents")
+        .withIndex("by_entity", (q) => q.eq("entity", "conversation").eq("entityId", args.elevenLabsConversationId))
+        .order("desc")
+        .collect()
+    ).find((e) => e.action === TRANSFER_DIALING);
+    return ev ? { orgId: ev.orgId, label: ev.to ?? "the team", newOwner: true } : null;
   },
 });
 
@@ -406,6 +482,7 @@ export async function flagUnverifiedTransfer(
 ): Promise<boolean> {
   const verified = (await verificationsFor(ctx, args.orgId, args.elevenLabsConversationId)).some((r) => r.verified);
   if (verified) return false;
+  if ((await callClearance(ctx, args.orgId, args.elevenLabsConversationId)).newOwner) return false;
   const prior = await ctx.db
     .query("auditEvents")
     .withIndex("by_entity", (q) => q.eq("entity", "conversation").eq("entityId", args.elevenLabsConversationId))

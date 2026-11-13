@@ -9,6 +9,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  MapPin,
   PawPrint,
   Phone,
   RefreshCw,
@@ -23,6 +24,7 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import type { WeekView } from "@/convex/calendarView";
 import * as sched from "@/convex/tourSchedule";
+import { apartmentHref, apartmentLine, formatAnswer, phoneForDisplay, streetOf } from "@/convex/tourDisplay";
 import { AvailabilityModal } from "@/components/asset-managers/availability-modal";
 import type { TourHours } from "@/components/tour-hours-editor";
 import { errorMessage, useToast } from "@/components/toast";
@@ -612,6 +614,8 @@ type Block = {
   key: string;
   kind: keyof typeof BLOCK_STYLES;
   title: string;
+  /** A tour's apartment ("1 Washington Ave · Unit 1"), when one was recorded. */
+  place: string | null;
   detail: string;
   top: number;
   height: number;
@@ -626,13 +630,22 @@ function layoutDay(day: string, view: WeekView): Block[] {
   const dayEnd = sched.startOfLocalDay(sched.addDays(day, 1), tz);
   const time = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "numeric", minute: "2-digit" });
 
-  const raw: Array<{ key: string; kind: Block["kind"]; title: string; detail: string; start: number; end: number }> = [];
+  const raw: Array<{
+    key: string;
+    kind: Block["kind"];
+    title: string;
+    place: string | null;
+    detail: string;
+    start: number;
+    end: number;
+  }> = [];
   view.items.forEach((item, i) => {
     if (item.kind === "allDay") return;
     raw.push({
       key: `i${i}`,
       kind: item.kind,
       title: item.kind === "event" ? item.title : "Busy",
+      place: null,
       detail: `${time.format(item.start)} – ${time.format(item.end)}`,
       start: item.start,
       end: item.end,
@@ -643,7 +656,10 @@ function layoutDay(day: string, view: WeekView): Block[] {
       key: tour.id,
       kind: "tour",
       title: `Tour: ${tour.callerName || "Prospective renter"}`,
-      detail: [`${time.format(tour.start)} – ${time.format(tour.end)}`, tour.callerPhone].filter(Boolean).join(" · "),
+      place: apartmentLine(tour, "short"),
+      detail: [`${time.format(tour.start)} – ${time.format(tour.end)}`, phoneForDisplay(tour.callerPhone)?.text]
+        .filter(Boolean)
+        .join(" · "),
       start: tour.start,
       end: tour.end,
     });
@@ -666,6 +682,7 @@ function layoutDay(day: string, view: WeekView): Block[] {
     key: r.key,
     kind: r.kind,
     title: r.title,
+    place: r.place,
     detail: r.detail,
     lane: r.lane,
     lanes: laneEnds.length,
@@ -777,7 +794,7 @@ function WeekGrid({ view, onOpenTour }: { view: WeekView; onOpenTour: (id: Id<"t
                       key={b.key}
                       role={clickable ? "button" : undefined}
                       tabIndex={clickable ? 0 : undefined}
-                      title={`${b.title}\n${b.detail}`}
+                      title={[b.title, b.place, b.detail].filter(Boolean).join("\n")}
                       onClick={clickable ? () => onOpenTour(b.key as Id<"tours">) : undefined}
                       onKeyDown={
                         clickable
@@ -795,7 +812,9 @@ function WeekGrid({ view, onOpenTour }: { view: WeekView; onOpenTour: (id: Id<"t
                       }}
                     >
                       <div className="truncate font-medium">{b.title}</div>
-                      {b.height > 30 ? <div className="truncate opacity-80">{b.detail}</div> : null}
+                      {/* A 45-minute tour has room for two lines: its apartment comes before the time. */}
+                      {b.place && b.height > 30 ? <div className="truncate opacity-80">{b.place}</div> : null}
+                      {b.height > (b.place ? 44 : 30) ? <div className="truncate opacity-80">{b.detail}</div> : null}
                     </div>
                   );
                 })}
@@ -808,7 +827,15 @@ function WeekGrid({ view, onOpenTour }: { view: WeekView; onOpenTour: (id: Id<"t
   );
 }
 
-type DayEntry = { key: string; kind: keyof typeof BLOCK_STYLES; title: string; time: string; start: number };
+type DayEntry = {
+  key: string;
+  kind: keyof typeof BLOCK_STYLES;
+  title: string;
+  /** A tour's apartment ("1 Washington Ave · Unit 1"), when one was recorded. */
+  place?: string | null;
+  time: string;
+  start: number;
+};
 
 /** Month-at-a-glance: one row per week, each day listing its items with no hour positioning. */
 function MonthGrid({
@@ -864,6 +891,7 @@ function MonthGrid({
         key: tour.id,
         kind: "tour",
         title: `Tour: ${tour.callerName || "Prospective renter"}`,
+        place: apartmentLine(tour, "short"),
         time: time.format(tour.start),
         start: tour.start,
       });
@@ -918,7 +946,7 @@ function MonthGrid({
                       key={e.key}
                       role={clickable ? "button" : undefined}
                       tabIndex={clickable ? 0 : undefined}
-                      title={e.time ? `${e.time} · ${e.title}` : e.title}
+                      title={[e.time ? `${e.time} · ${e.title}` : e.title, e.place].filter(Boolean).join("\n")}
                       onClick={clickable ? () => onOpenTour(e.key as Id<"tours">) : undefined}
                       onKeyDown={
                         clickable
@@ -931,6 +959,7 @@ function MonthGrid({
                     >
                       {e.time ? `${e.time} ` : ""}
                       {e.title}
+                      {e.place ? <div className="truncate font-normal opacity-80">{e.place}</div> : null}
                     </div>
                   );
                 })}
@@ -982,6 +1011,7 @@ function TourModal({
   onCancelled: () => void;
 }) {
   const details = useQuery(api.tours.tourDetails, { tourId });
+  const phone = phoneForDisplay(details?.callerPhone);
   const cancelBookedTour = useAction(api.tours.cancelBookedTour);
   const toast = useToast();
   const [confirming, setConfirming] = useState(false);
@@ -1026,6 +1056,8 @@ function TourModal({
                 </p>
               </div>
 
+              <TourApartment apartment={details.apartment} />
+
               <div className="space-y-2.5 rounded-xl border border-border p-4">
                 <div className="flex items-center gap-2.5 text-sm">
                   <User className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -1033,10 +1065,13 @@ function TourModal({
                 </div>
                 <div className="flex items-center gap-2.5 text-sm">
                   <Phone className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  {details.callerPhone ? (
-                    <a href={`tel:${details.callerPhone.replace(/[^\d+]/g, "")}`} className="font-medium text-primary hover:underline">
-                      {details.callerPhone}
+                  {phone?.tel ? (
+                    <a href={`tel:${phone.tel}`} className="font-medium text-primary hover:underline">
+                      {phone.text}
                     </a>
+                  ) : phone ? (
+                    // Not a valid number: shown as it was given, never as a link that dials someone else.
+                    <span className="font-medium">{phone.text}</span>
                   ) : (
                     <span className="text-muted-foreground">Not given</span>
                   )}
@@ -1073,7 +1108,7 @@ function TourModal({
                       </div>
                     ) : null}
                     {details.fromCall.screeningAnswers.map((a) => (
-                      <Row key={a.key} label={a.question} value={String(a.value)} />
+                      <Row key={a.key} label={a.question} value={formatAnswer(a.value)} />
                     ))}
                     {details.fromCall.qualifies !== undefined ? (
                       <span
@@ -1125,6 +1160,49 @@ function TourModal({
           </div>
         ) : null}
       </Modal>
+  );
+}
+
+/**
+ * The apartment the tour is for: its address and unit as one link to that building's page, with its
+ * unit list narrowed to the unit. Says so plainly when the caller chose no specific apartment.
+ */
+function TourApartment({
+  apartment,
+}: {
+  apartment: {
+    propertyId: Id<"properties"> | null;
+    propertyAddress: string;
+    unitLabel: string | null;
+    unitChosen: boolean;
+  } | null;
+}) {
+  const line = apartment ? apartmentLine(apartment, "long") : null;
+  const href = apartment ? apartmentHref(apartment.propertyId, apartment.unitLabel) : null;
+  // "Albany, NY 12210": the rest of the address, under the street line.
+  const rest = apartment ? apartment.propertyAddress.slice(streetOf(apartment.propertyAddress).length).replace(/^\s*,\s*/, "") : "";
+  return (
+    <div className="rounded-xl border border-border p-4">
+      <h3 className="mb-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase">Apartment</h3>
+      <div className="flex items-start gap-2.5 text-sm">
+        <MapPin className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+        {line ? (
+          <div className="min-w-0">
+            {href ? (
+              <Link href={href} className="font-medium text-primary hover:underline">
+                {line}
+              </Link>
+            ) : (
+              <span className="font-medium">{line}</span>
+            )}
+            {rest ? <p className="mt-0.5 text-muted-foreground">{rest}</p> : null}
+            {!apartment?.unitChosen ? <p className="mt-0.5 text-muted-foreground">No specific unit chosen</p> : null}
+          </div>
+        ) : (
+          <span className="text-muted-foreground">No specific apartment chosen</span>
+        )}
+      </div>
+    </div>
   );
 }
 

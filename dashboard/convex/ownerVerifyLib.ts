@@ -279,6 +279,22 @@ export function hasLiveVerification(
   return rows.some((r) => r.verified && typeof r.verifiedAt === "number" && nowMs - r.verifiedAt <= VERIFIED_TTL_MS);
 }
 
+/**
+ * Who may be put through on THIS call (B46): a verified existing owner (hasLiveVerification), or a
+ * NEW owner route_owner_prospect recorded on this call (wants the company to manage a property; no
+ * email check, and Sarah has no owner data to give them). A call where an email check already failed
+ * is never cleared by claiming to be new afterwards: that would get round verification.
+ */
+export function callCleared(
+  rows: Array<{ verified: boolean; verifiedAt?: number | null; failures: number }>,
+  newOwnerRecorded: boolean,
+  nowMs: number,
+): { cleared: boolean; newOwner: boolean } {
+  if (hasLiveVerification(rows, nowMs)) return { cleared: true, newOwner: false };
+  const ok = newOwnerRecorded && !rows.some((r) => !r.verified && r.failures > 0);
+  return { cleared: ok, newOwner: ok };
+}
+
 // --- The address the caller said ----------------------------------------------------------------
 
 /**

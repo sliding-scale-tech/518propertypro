@@ -1,19 +1,18 @@
 "use client";
 
 import { useQuery } from "convex/react";
-import { Columns3, LayoutList, Plus, Search } from "lucide-react";
+import { Columns3, LayoutList, Plus } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { RequireView, rolesOfAccess } from "@/components/require-view";
 import { Kanban, StatusChips, WorkOrderTable, type ItemRef } from "@/components/board/board";
-import { DesignSelect } from "@/components/board/design-select";
 import { ExceptionsDrawer } from "@/components/board/exceptions-drawer";
 import { NewWorkOrderDrawer } from "@/components/board/new-wo-drawer";
 import { PRIORITY_LEVELS, tableStatusFromParam, type Severity, type TableStatus } from "@/components/board/shared";
 import { WorkOrderDrawer } from "@/components/board/wo-drawer";
-import { Btn, cx, useUrlPaging } from "@/components/ui";
+import { Btn, FilterSelect, FilterToolbar, SearchBox, cx, useUrlPaging } from "@/components/ui";
 import { KANBAN_STEP } from "@/components/board/board";
 
 type View = "table" | "kanban";
@@ -161,45 +160,63 @@ function WorkOrdersInner() {
       </header>
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        <label className="relative min-w-[180px] flex-1 sm:max-w-[220px]">
-          <Search aria-hidden className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-          <input
-            value={searchText}
-            onChange={(e) => setSearchText(e.target.value)}
-            placeholder="Search Records"
-            aria-label="Search records"
-            className="h-[38px] w-full rounded-[10px] border border-slate-300 bg-white pl-9 pr-3 text-[14px] outline-none focus:border-blue-500"
-          />
-        </label>
-        <DesignSelect
-          ariaLabel="Priority"
-          variant="toolbar"
-          value={priority}
-          onChange={(v) => {
-            setPriority(v as typeof priority);
+        <FilterToolbar
+          className="min-w-0 flex-[1_1_480px]"
+          active={searchText.trim() !== "" || priority !== "all" || techId !== "all"}
+          onClear={() => {
+            setSearchText("");
+            setPriority("all");
+            setTechId("all");
             paging.resetPage();
           }}
-          options={[
-            { value: "all", label: "All Priorities" },
-            ...PRIORITY_LEVELS.map((p) => ({ value: p.value, label: p.label, dot: p.dot })),
-          ]}
-        />
-        {isAdmin ? (
-          <DesignSelect
-            ariaLabel="Technician"
-            variant="toolbar"
-            value={techId}
-            onChange={(v) => {
-              setTechId(v);
+          search={
+            <SearchBox
+              id="wo-search"
+              label="Search records"
+              value={searchText}
+              onChange={setSearchText}
+              onClear={() => setSearchText("")}
+              placeholder="Search records"
+            />
+          }
+        >
+          <FilterSelect
+            label="Priority"
+            active={priority !== "all"}
+            value={priority}
+            onChange={(e) => {
+              setPriority((e.target.value || "all") as typeof priority);
               paging.resetPage();
             }}
-            options={[
-              { value: "all", label: "All Technicians" },
-              ...technicians.map((t) => ({ value: t.userId as string, label: t.name })),
-            ]}
-          />
-        ) : null}
-        <div className="ml-auto flex flex-wrap items-center gap-2">
+          >
+            <option value="all">All</option>
+            {PRIORITY_LEVELS.map((p) => (
+              <option key={p.value} value={p.value}>
+                {p.label}
+              </option>
+            ))}
+          </FilterSelect>
+          {isAdmin ? (
+            <FilterSelect
+              label="Technician"
+              active={techId !== "all"}
+              value={techId}
+              onChange={(e) => {
+                setTechId(e.target.value || "all");
+                paging.resetPage();
+              }}
+              className="sm:w-52"
+            >
+              <option value="all">All</option>
+              {technicians.map((t) => (
+                <option key={t.userId as string} value={t.userId as string}>
+                  {t.name}
+                </option>
+              ))}
+            </FilterSelect>
+          ) : null}
+        </FilterToolbar>
+        <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
           <div role="group" aria-label="View" className="inline-flex rounded-[10px] border border-slate-200 bg-white p-[3px]">
             {(
               [

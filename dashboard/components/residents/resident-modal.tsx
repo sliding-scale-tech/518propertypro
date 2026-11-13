@@ -1,9 +1,11 @@
 "use client";
 
 import { Plus, X } from "lucide-react";
-import { useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { Dialog } from "@/components/properties/dialog";
-import { Btn, DatePicker, Field, IconBtn, Input, LabeledField, Select } from "@/components/ui";
+import { LEASE_MSG, MAX_PHONES, cleanPhoneList, emailProblem, isRealDate, type FieldErrors } from "@/convex/leaseLib";
+import { Btn, DatePicker, Field, IconBtn, Input, Select } from "@/components/ui";
+import { useFieldErrors } from "@/components/finance/form-bits";
 
 export type ResidentFormValue = {
   unitId: string;
@@ -15,9 +17,38 @@ export type ResidentFormValue = {
 
 export type UnitOption = { id: string; label: string };
 
-const E164 = /^\+[1-9]\d{6,14}$/;
+const ORDER = ["unitId", "fullName", "phones", "phone0", "phone1", "phone2", "phone3", "phone4", "email", "leaseEnd"] as const;
 
-/** Add / edit a resident. Phones must be E.164 (the server re-validates). */
+export const RESIDENT_FORM_MSG = {
+  unitMissing: "Select the unit this resident lives in.",
+  nameMissing: "Enter the resident's full name.",
+  nameLong: "Keep the name under 120 characters.",
+} as const;
+
+/** Every failing field of the Add / Edit resident form (field -> message). Phones are cleaned to E.164. */
+function validate(v: { unitId: string; fullName: string; phones: string[]; email: string; leaseEnd: string }): {
+  errors: FieldErrors;
+  phones: string[];
+} {
+  const errors: FieldErrors = {};
+  if (!v.unitId.trim()) errors.unitId = RESIDENT_FORM_MSG.unitMissing;
+  const name = v.fullName.trim();
+  if (!name) errors.fullName = RESIDENT_FORM_MSG.nameMissing;
+  else if (name.length > 120) errors.fullName = RESIDENT_FORM_MSG.nameLong;
+  const phones = cleanPhoneList(v.phones);
+  Object.assign(errors, phones.errors);
+  const email = emailProblem(v.email);
+  if (email) errors.email = email;
+  if (v.leaseEnd.trim() && !isRealDate(v.leaseEnd.trim())) errors.leaseEnd = LEASE_MSG.leaseEndInvalid;
+  return { errors, phones: phones.phones };
+}
+
+/**
+ * Add / edit a resident. Validates every field before it submits (red border + message under the
+ * field, the first one toasted); phones may be typed as 10 digits and are sent as E.164. The server
+ * re-validates. `unitOptions` is already limited to the units the viewer may add residents to (an
+ * asset manager: the units they manage).
+ */
 export function ResidentModal({
   title,
   initial,
@@ -38,61 +69,98 @@ export function ResidentModal({
   const [phones, setPhones] = useState<string[]>(initial.phones.length ? initial.phones : [""]);
   const [email, setEmail] = useState(initial.email);
   const [leaseEnd, setLeaseEnd] = useState(initial.leaseEnd);
+  const base = useId();
+  const ids = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const k of ORDER) m[k] = `${base}-${k}`;
+    return m;
+  }, [base]);
+  const f = useFieldErrors(ids);
 
-  const cleaned = phones.map((p) => p.trim()).filter(Boolean);
-  const phonesOk = cleaned.every((p) => E164.test(p)) && cleaned.length <= 5;
-  const ready = unitId !== "" && fullName.trim() !== "" && phonesOk && !busy;
+  function submit() {
+    if (busy) return;
+    const { errors, phones: cleaned } = validate({ unitId, fullName, phones, email, leaseEnd });
+    if (!f.check(errors, ORDER)) return;
+    onSubmit({ unitId, fullName: fullName.trim(), phones: cleaned, email: email.trim(), leaseEnd: leaseEnd.trim() });
+  }
 
   return (
     <Dialog title={title} onClose={onClose}>
       <form
         className="space-y-4"
+        noValidate
         onSubmit={(e) => {
           e.preventDefault();
-          if (ready) {
-            onSubmit({ unitId, fullName: fullName.trim(), phones: cleaned, email: email.trim(), leaseEnd });
-          }
+          submit();
         }}
       >
-        <LabeledField label="Unit">
-          {(id) => (
-            <Select id={id} value={unitId} onChange={(e) => setUnitId(e.target.value)}>
-              <option value="" disabled>
-                Select a unit
+        <Field label="Unit *" htmlFor={ids.unitId}>
+          <Select
+            id={ids.unitId}
+            value={unitId}
+            onChange={(e) => {
+              setUnitId(e.target.value ?? "");
+              f.clear("unitId");
+            }}
+            {...f.control("unitId")}
+          >
+            <option value="">Select a unit</option>
+            {unitOptions.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.label}
               </option>
-              {unitOptions.map((u) => (
-                <option key={u.id} value={u.id}>
-                  {u.label}
-                </option>
-              ))}
-            </Select>
-          )}
-        </LabeledField>
-        <LabeledField label="Full name">
-          {(id) => <Input id={id} value={fullName} maxLength={120} onChange={(e) => setFullName(e.target.value)} />}
-        </LabeledField>
-        <Field
-          label="Phone numbers"
-          hint={<span className={phonesOk ? undefined : "text-danger-ink"}>E.164 format, e.g. +15185551234. Up to 5.</span>}
-        >
+            ))}
+          </Select>
+          {unitOptions.length === 0 ? <p className="text-xs text-muted-foreground">No units you can add residents to.</p> : null}
+          {f.message("unitId")}
+        </Field>
+        <Field label="Full name *" htmlFor={ids.fullName}>
+          <Input
+            id={ids.fullName}
+            value={fullName}
+            maxLength={120}
+            onChange={(e) => {
+              setFullName(e.target.value);
+              f.clear("fullName");
+            }}
+            {...f.control("fullName")}
+          />
+          {f.message("fullName")}
+        </Field>
+        <Field label="Phone numbers" hint="Optional. 10 digits, like (518) 555-1234. Up to 5." htmlFor={ids.phone0}>
           <div className="space-y-1.5">
             {phones.map((p, i) => (
-              <div key={i} className="flex gap-2">
-                <Input
-                  value={p}
-                  inputMode="tel"
-                  aria-label={`Phone ${i + 1}`}
-                  placeholder="+15185551234"
-                  onChange={(e) => setPhones(phones.map((x, j) => (j === i ? e.target.value : x)))}
-                />
-                {phones.length > 1 ? (
-                  <IconBtn label="Remove phone" onClick={() => setPhones(phones.filter((_, j) => j !== i))}>
-                    <X />
-                  </IconBtn>
-                ) : null}
+              <div key={i}>
+                <div className="flex gap-2">
+                  <Input
+                    id={ids[`phone${i}`]}
+                    value={p}
+                    inputMode="tel"
+                    aria-label={`Phone ${i + 1}`}
+                    placeholder="(518) 555-1234"
+                    onChange={(e) => {
+                      setPhones(phones.map((x, j) => (j === i ? e.target.value : x)));
+                      f.clear(`phone${i}`);
+                    }}
+                    {...f.control(`phone${i}`)}
+                  />
+                  {phones.length > 1 ? (
+                    <IconBtn
+                      label={`Remove phone ${i + 1}`}
+                      onClick={() => {
+                        setPhones(phones.filter((_, j) => j !== i));
+                        f.setErrors({});
+                      }}
+                    >
+                      <X />
+                    </IconBtn>
+                  ) : null}
+                </div>
+                {f.message(`phone${i}`)}
               </div>
             ))}
-            {phones.length < 5 ? (
+            {f.message("phones")}
+            {phones.length < MAX_PHONES ? (
               <button
                 type="button"
                 onClick={() => setPhones([...phones, ""])}
@@ -104,15 +172,35 @@ export function ResidentModal({
             ) : null}
           </div>
         </Field>
-        <LabeledField label="Email (optional)">
-          {(id) => <Input id={id} type="email" value={email} maxLength={200} onChange={(e) => setEmail(e.target.value)} />}
-        </LabeledField>
-        <LabeledField label="Lease end (optional)">
-          {(id) => <DatePicker id={id} value={leaseEnd} onChange={setLeaseEnd} />}
-        </LabeledField>
+        <Field label="Email" hint="Optional." htmlFor={ids.email}>
+          <Input
+            id={ids.email}
+            type="email"
+            value={email}
+            maxLength={200}
+            onChange={(e) => {
+              setEmail(e.target.value);
+              f.clear("email");
+            }}
+            {...f.control("email")}
+          />
+          {f.message("email")}
+        </Field>
+        <Field label="Lease end" hint="Optional." htmlFor={ids.leaseEnd}>
+          <DatePicker
+            id={ids.leaseEnd}
+            value={leaseEnd}
+            onChange={(v) => {
+              setLeaseEnd(v);
+              f.clear("leaseEnd");
+            }}
+            {...f.control("leaseEnd")}
+          />
+          {f.message("leaseEnd")}
+        </Field>
         <div className="flex justify-end gap-2">
           <Btn onClick={onClose}>Cancel</Btn>
-          <Btn type="submit" variant="pri" disabled={!ready}>
+          <Btn type="submit" variant="pri" disabled={busy}>
             {busy ? "Saving…" : "Save"}
           </Btn>
         </div>

@@ -14,17 +14,19 @@ import {
 import * as waha from "./wahaApi";
 import { isOtlpPayload, parseOtlp } from "./otlp";
 import { isVagueIssue, realPhone, realValue, stripAudioTags } from "./sanitize";
-import { WAIT_FOR_CALLER, confirmedPhoneLines, maintenanceLogLines, photoReplyLines } from "./sarahReplies";
+import { WAIT_FOR_CALLER, confirmedPhoneLines, leadLogLines, maintenanceLogLines, photoReplyLines } from "./sarahReplies";
 import { toE164 } from "./phone";
 import { handleClerkWebhook } from "./clerkWebhook";
 import { handleOAuthCallback as handleGoogleOAuthCallback } from "./googleCalendar";
 import type { FunctionReturnType } from "convex/server";
-import { bookTour, cancelTourNow, findTourTimes, rescheduleTour, type IgnoredTour } from "./tours";
+import { bookTour, cancelTourNow, changeTourApartment, findTourTimes, rescheduleTour, type IgnoredTour } from "./tours";
+import { TEAM_CONFIRMS_ADDRESS, TOUR_ADDRESS_NOT_CHANGED_SAY, tourApartmentChangedSay, tourBookedSay } from "./tourDisplay";
 import { formatLocalDateTime, phoneKey, spokenLabel } from "./tourSchedule";
 import { matchCities } from "./unitMatch";
-import { ROOM_SAY } from "./sarahTools";
+import { groupOfferedUnits, offeredUnitForAgent, type OfferedUnitType } from "./sarahTools";
 import {
   CALL_SID_RE,
+  NEW_OWNER_LOGGED_SAY,
   OWNER_TRANSFER_DELAY_MS,
   TRANSFER_MECHANISM,
   dialAnswered,
@@ -166,24 +168,6 @@ async function findCallerTour(
   return tour ? { orgId, tour } : null;
 }
 
-/** One unit type Sarah may offer, summed over the available units of that type. */
-type OfferedUnitType = {
-  community: string | null;
-  /** The building's address and city, so Sarah can say where it is (roster import, B3). */
-  address: string | null;
-  city: string | null;
-  bedrooms: string;
-  rentMin: number | null;
-  rentMax: number | null;
-  /** Null when we only have the property's per-type summary, which carries no count. */
-  count: number | null;
-  availableFrom: string | null;
-  /** How the unit must be described (e.g. a room in a shared apartment). Null when none. */
-  leasingFacts: string | null;
-  /** "room" for one room of a shared apartment, null for a whole unit. */
-  rentedAs: "room" | null;
-};
-
 /**
  * What Sarah is allowed to offer: ONLY units with available = true (PRD section 7). A team with
  * rows in the units table is answered from those; otherwise from the older per-property bedroom
@@ -211,35 +195,7 @@ async function offeredWithCities(
   if (orgId) {
     const fromUnits = await ctx.runQuery(internal.sarahTools.availableUnits, { orgId });
     if (fromUnits.hasUnits) {
-      const groups = new Map<string, OfferedUnitType>();
-      for (const u of fromUnits.available) {
-        // Units with their own leasing facts, or rented as a room, are never merged into a plain
-        // bedroom group, so the facts always reach Sarah with the right rent.
-        const key = `${u.community ?? ""}|${u.bedrooms}|${u.leasingFacts ?? ""}|${u.rentedAs ?? ""}`;
-        const g = groups.get(key) ?? {
-          community: u.community,
-          address: u.address,
-          city: u.city,
-          bedrooms: u.bedrooms,
-          rentMin: null,
-          rentMax: null,
-          count: 0,
-          availableFrom: null,
-          leasingFacts: u.leasingFacts,
-          rentedAs: u.rentedAs,
-        };
-        g.count = (g.count ?? 0) + 1;
-        if (u.rent !== null) {
-          g.rentMin = g.rentMin === null ? u.rent : Math.min(g.rentMin, u.rent);
-          g.rentMax = g.rentMax === null ? u.rent : Math.max(g.rentMax, u.rent);
-        }
-        // The earliest date any unit of this type frees up, compared as written (ISO dates sort).
-        if (u.availableFrom && (!g.availableFrom || u.availableFrom < g.availableFrom)) {
-          g.availableFrom = u.availableFrom;
-        }
-        groups.set(key, g);
-      }
-      return { offered: [...groups.values()], cities: fromUnits.cities };
+      return { offered: groupOfferedUnits(fromUnits.available), cities: fromUnits.cities };
     }
   }
   return {
@@ -256,6 +212,7 @@ async function offeredWithCities(
         availableFrom: null,
         leasingFacts: null,
         rentedAs: null,
+        units: [],
       })),
     cities: [],
   };
@@ -361,25 +318,14 @@ function applyCity(offered: OfferedUnitType[], cities: string[], spoken: unknown
   };
 }
 
-function offeredForAgent(t: OfferedUnitType) {
-  return {
-    community: t.community,
-    address: t.address,
-    city: t.city,
-    bedrooms: t.bedrooms,
-    rent_min: t.rentMin,
-    rent_max: t.rentMax,
-    units_available: t.count,
-    available_from: t.availableFrom,
-    // When present, describe the unit exactly this way (it overrides bedrooms / rent wording).
-    leasing_facts: t.leasingFacts ?? (t.rentedAs === "room" ? ROOM_SAY : null),
-    rented_as: t.rentedAs,
-  };
-}
+/** One offered unit type as Sarah gets it in a tool result (sarahTools.offeredUnitForAgent). */
+const offeredForAgent = offeredUnitForAgent;
 
 const LEASING_FACTS_RULE =
   "When a unit has leasing_facts, describe it exactly as leasing_facts says. A unit with " +
-  "bedrooms 'room' is one room in a shared apartment: never call it an apartment of that size.";
+  "bedrooms 'room' is one room in a shared apartment: never call it an apartment of that size. " +
+  "address is where the building is and units names some of its available units: answer 'where is it' " +
+  "from these, without another tool call.";
 
 /**
  * The single building's leasing profile, or nulls when it does not apply. A team with several
@@ -525,6 +471,80 @@ function leasingCaptured(body: Record<string, unknown>) {
 }
 
 /** Up to three spoken times, "Tuesday at 3pm, Wednesday at 10am or Thursday at 2pm". */
+/**
+ * What request_tour tells Sarah about the apartment a booked tour is for. `apartment` is undefined
+ * when she named none, so nothing is said; otherwise the result says plainly what was recorded, so
+ * she never claims a unit the tour is not for. Building and unit labels only, nothing about residents.
+ */
+function tourApartmentLines(apartment: FunctionReturnType<typeof internal.sarahTools.tourApartment> | null | undefined): {
+  apartment: { property_address: string; unit: string | null } | null;
+  message?: string;
+} {
+  if (!apartment) return { apartment: null };
+  if (!apartment.property) {
+    return {
+      apartment: null,
+      message:
+        "Booked without a specific apartment: that building did not match one of ours exactly. Never say the " +
+        "tour is for a particular building or unit; the team will go over it with them.",
+    };
+  }
+  const where = { property_address: apartment.property.street, unit: apartment.unit?.label ?? null };
+  if (apartment.unitStatus === "not_available") {
+    return {
+      apartment: where,
+      message:
+        `Booked for ${apartment.property.street}, but not for a specific unit: that unit is not one of the ` +
+        "available units there. Never say a unit is set for the tour; the team will show them what is available.",
+    };
+  }
+  return { apartment: where };
+}
+
+/**
+ * On every booked / moved / corrected tour result: Sarah only ever states what the latest tour result
+ * says. conv_0001m7acgw57fpwagbr0ydncsybk: she said a different building out loud while the booking and
+ * the calendar event stayed at the old one.
+ */
+const TOUR_FACTS_RULE =
+  "Never state a tour address, unit, day or time other than what this result says. If the caller says the " +
+  "address or apartment is wrong, read back the listing from your results they mean (never an address that is " +
+  "not in your results; if theirs is not, say it isn't showing as available and offer what is), and after their " +
+  "yes call reschedule_tour with this tour_id, this slot_start, caller_confirmed true and that listing's address " +
+  "as spoken_building (and spoken_unit). If that is not possible, say the team will confirm the address with them.";
+
+/**
+ * The apartment for a tour from what Sarah passed (sarahTools.tourApartment, this team's buildings and
+ * available units only), shaped for bookTour / changeTourApartment. Undefined without a matched building.
+ */
+function tourApartmentInput(
+  apartment: FunctionReturnType<typeof internal.sarahTools.tourApartment> | null | undefined,
+) {
+  if (!apartment?.property) return undefined;
+  return {
+    propertyId: apartment.property.id,
+    propertyName: apartment.property.name,
+    propertyAddress: apartment.property.address,
+    unitId: apartment.unit?.id,
+    unitLabel: apartment.unit?.label ?? undefined,
+  };
+}
+
+/** changeTourApartment, where any failure means "not changed" (the team then confirms the address). */
+async function tryChangeTourApartment(
+  ctx: GenericActionCtx<DataModel>,
+  orgId: string,
+  tourId: Id<"tours">,
+  input: NonNullable<ReturnType<typeof tourApartmentInput>>,
+): Promise<{ status: "changed" | "failed" }> {
+  try {
+    return await changeTourApartment(ctx, orgId, tourId, input);
+  } catch (err) {
+    console.error(`[reschedule-tour] could not change the apartment of ${tourId}:`, err);
+    return { status: "failed" };
+  }
+}
+
 function sayTimes(times: Array<{ label: string }>): string {
   const labels = times.slice(0, 3).map((t) => t.label);
   if (labels.length <= 1) return labels.join("");
@@ -690,8 +710,11 @@ http.route({
             ? "We have several buildings like that. What's the street number?"
             : "I couldn't find that building. Could you say the street address again?",
         message:
-          "No building matched and nothing is close enough to offer. Ask the say line once, then call " +
-          "get_unit_details again. If it still does not match, say the team will follow up. Never read a list of buildings.",
+          "No building matched and nothing is close enough to offer. If you sent a city or area rather than a " +
+          "building (conv_0001m7acgw57fpwagbr0ydncsybk), do not say the say line and do not call again: answer from " +
+          "the address and units in the available_units or check_availability results you already have. Otherwise " +
+          "ask the say line once, then call get_unit_details again. If it still does not match, say the team will " +
+          "follow up. Never read a list of buildings.",
       });
     }
 
@@ -816,8 +839,8 @@ http.route({
         ],
       });
 
-      // Hand the lead to an asset manager (fewest tours this week among lead assignees). Never
-      // allowed to fail the tool: the lead is already recorded.
+      // Link the lead and send the "new lead" text if due (leads.routeLead; it never assigns: a lead
+      // goes to a building's asset manager once a building is picked). Never allowed to fail the tool.
       if (orgId) {
         try {
           await ctx.runMutation(internal.leads.routeLead, { orgId, elevenLabsConversationId: conversationId });
@@ -928,10 +951,36 @@ http.route({
 
     // Moving an existing tour: it must not block the times around it.
     let ignoreTour: IgnoredTour | undefined;
+    let tourPropertyId: Id<"properties"> | undefined;
     if (orgId && typeof body.tour_id === "string" && body.tour_id) {
       const tour = await ctx.runQuery(internal.tours.byIdString, { tourId: body.tour_id });
       if (tour && tour.orgId === orgId && tour.status === "booked") {
         ignoreTour = { id: tour._id, assignedUserId: tour.assignedUserId, start: tour.start, end: tour.end };
+        tourPropertyId = tour.propertyId;
+      }
+    }
+
+    // The building the caller chose, matched exactly as request_tour does (this team's buildings only):
+    // the times come from that building's team's tour list, so a time offered here can be booked there.
+    // No building: today's pool. Moving a tour with no building named: the tour's own building.
+    const spokenBuilding = optString(body.spoken_building, 300);
+    const spokenUnit = optString(body.spoken_unit, 60);
+    const chosen =
+      orgId && (spokenBuilding || spokenUnit)
+        ? await ctx.runQuery(internal.sarahTools.tourApartment, { orgId, spokenAddress: spokenBuilding, spokenUnit })
+        : null;
+
+    // The caller picked a building for a new tour: the lead goes to its asset manager now (B41), even if
+    // no tour is booked in the end. Moving an existing tour routes in reschedule_tour instead.
+    if (orgId && typeof conversationId === "string" && conversationId && chosen?.property && !ignoreTour) {
+      try {
+        await ctx.runMutation(internal.leads.routeLeadToBuilding, {
+          orgId,
+          elevenLabsConversationId: conversationId,
+          propertyId: chosen.property.id,
+        });
+      } catch (err) {
+        console.error("[find-tour-times] could not route the lead to the building:", err);
       }
     }
 
@@ -941,9 +990,11 @@ http.route({
       date,
       typeof body.time === "string" ? body.time : undefined,
       ignoreTour,
+      chosen?.property?.id ?? tourPropertyId,
     );
 
     if (!result.available) {
+      // Nobody on that team can be booked (or booking is not set up): today's fallback, unchanged.
       return Response.json({
         booking_available: false,
         say: "I can't see the calendar right now. What day and time would you like? I'll pass it to the team and they'll confirm.",
@@ -1035,9 +1086,12 @@ http.route({
       slot_start: slotStart,
       preferred_slot: preferredSlot,
       caller_name: callerName,
-      caller_phone: callerPhone,
+      caller_phone: rawCallerPhone,
       caller_id: callerId,
     } = body;
+    // Stored and matched as E.164 like every other phone; what the caller said is kept as given
+    // only when it is not a valid number, so nothing they said is lost.
+    const callerPhone = typeof rawCallerPhone === "string" ? (toE164(rawCallerPhone) ?? rawCallerPhone) : rawCallerPhone;
 
     if (!conversationId || (!slotStart && !preferredSlot) || !callerPhone) {
       return Response.json(
@@ -1094,11 +1148,21 @@ http.route({
         }
       }
 
+      // The apartment the caller chose, matched on this team's own buildings and AVAILABLE units
+      // only. Anything that does not match exactly is left off and the tour is still booked.
+      const spokenBuilding = optString(body.spoken_building, 300);
+      const spokenUnit = optString(body.spoken_unit, 60);
+      const apartment =
+        orgId && (spokenBuilding || spokenUnit)
+          ? await ctx.runQuery(internal.sarahTools.tourApartment, { orgId, spokenAddress: spokenBuilding, spokenUnit })
+          : null;
+
       const result = await bookTour(ctx, orgId, {
         slotStart,
         callerName,
         callerPhone,
         elevenLabsConversationId: conversationId,
+        apartment: tourApartmentInput(apartment),
       });
 
       if (result.status === "booked") {
@@ -1109,13 +1173,15 @@ http.route({
           tourSlot: `${result.label} with ${result.memberFirstName}`,
           tourConfirmed: true,
         });
-        // The lead now belongs to whoever the tour is with; they and the admins are told.
+        // The lead goes to the chosen building's asset manager (never to the tour host); the host, the
+        // lead's owner and the admins are told about the tour.
         if (orgId) {
           try {
-            await ctx.runMutation(internal.leads.assignOnTour, {
+            await ctx.runMutation(internal.leads.leadTourBooked, {
               orgId,
               elevenLabsConversationId: conversationId,
               userId: result.memberUserId,
+              propertyId: apartment?.property?.id,
               callerName: optString(callerName, 120),
               callerPhone: optString(callerPhone, 40),
               when: result.label,
@@ -1125,13 +1191,33 @@ http.route({
             console.error("[request-tour] booked, but could not assign the lead:", err);
           }
         }
+        const lines = tourApartmentLines(spokenBuilding || spokenUnit ? apartment : undefined);
+        // Only the building the caller chose, never the team's first one: with none matched there is
+        // no property_name / property_address at all and the say line leaves the address to the team.
+        const chosen = apartment?.property ?? null;
         return Response.json({
           booked: true,
+          tour_id: result.tourId,
+          slot_start: slotStart,
           when: result.label,
           team_member: result.memberFirstName,
-          property_name: result.propertyName,
-          property_address: result.propertyAddress,
-          say: `You're all set for ${result.label} with ${result.memberFirstName}${result.propertyAddress ? ` at ${result.propertyAddress}` : ""}.`,
+          ...(chosen ? { property_name: chosen.name, property_address: chosen.address } : {}),
+          apartment: lines.apartment,
+          say: tourBookedSay({
+            when: result.label,
+            memberFirstName: result.memberFirstName,
+            address: chosen?.address,
+            unitLabel: apartment?.unit?.label,
+          }),
+          message: [
+            lines.message ??
+              (chosen
+                ? null
+                : "Booked with no specific apartment. Say the say line: the team will confirm the address. Never name a building or address for this tour yourself."),
+            TOUR_FACTS_RULE,
+          ]
+            .filter(Boolean)
+            .join(" "),
         });
       }
       if (result.status === "taken") {
@@ -1170,6 +1256,30 @@ http.route({
       tourSlot: preferredSlot,
       tourConfirmed: true,
     });
+
+    // A preferred time for a building the caller picked: the lead goes to that building's asset manager.
+    const captureBuilding = optString(body.spoken_building, 300);
+    if (captureBuilding) {
+      try {
+        const captureOrgId = await resolveBookingOrg(ctx, conversationId, agentId);
+        const picked = captureOrgId
+          ? await ctx.runQuery(internal.sarahTools.tourApartment, {
+              orgId: captureOrgId,
+              spokenAddress: captureBuilding,
+              spokenUnit: optString(body.spoken_unit, 60),
+            })
+          : null;
+        if (captureOrgId && picked?.property) {
+          await ctx.runMutation(internal.leads.routeLeadToBuilding, {
+            orgId: captureOrgId,
+            elevenLabsConversationId: conversationId,
+            propertyId: picked.property.id,
+          });
+        }
+      } catch (err) {
+        console.error("[request-tour] preferred time noted, but could not route the lead:", err);
+      }
+    }
 
     // Disabled: tour confirmation SMS to the customer — turned off per request. The tour is
     // still captured above and visible in the dashboard; only the outbound text is skipped.
@@ -1305,17 +1415,84 @@ http.route({
   handler: toolAction(async (ctx, request) => {
     const body = await request.json();
     const { conversation_id: conversationId, tour_id: tourId, slot_start: slotStart } = body;
-    if (!conversationId || !tourId || !slotStart) {
+    // A building or unit means the caller is correcting which apartment the tour is for.
+    const spokenBuilding = optString(body.spoken_building, 300);
+    const spokenUnit = optString(body.spoken_unit, 60);
+    const correcting = Boolean(spokenBuilding || spokenUnit);
+    if (!conversationId || !tourId || (!slotStart && !correcting)) {
       return Response.json({ error: "missing conversation_id, tour_id or slot_start" }, { status: 400 });
     }
     if (!isConfirmed(body.caller_confirmed)) {
       return Response.json({
         rescheduled: false,
-        reason:
-          "Not moved yet. Read the new day and time back to the caller, wait for a clear yes, then call " +
-          "reschedule_tour again with caller_confirmed set to true.",
+        reason: correcting
+          ? "Not changed yet. Read the building back to the caller, wait for a clear yes, then call " +
+            "reschedule_tour again with caller_confirmed set to true."
+          : "Not moved yet. Read the new day and time back to the caller, wait for a clear yes, then call " +
+            "reschedule_tour again with caller_confirmed set to true.",
       });
     }
+
+    // Same day and time (or none sent) with a building: only the apartment changes. The tour must be
+    // this caller's (findCallerTour), the building one of this team's (tourApartment), and the change
+    // reaches the booking and its calendar event, or nothing changes and the team confirms the address.
+    if (correcting) {
+      const target = await findCallerTour(ctx, body);
+      if (!target) {
+        return Response.json({
+          rescheduled: false,
+          reason: "No upcoming tour with that tour_id belongs to this caller. Call find_my_tour and use a tour_id it returns.",
+        });
+      }
+      const currentSlot = formatLocalDateTime(target.tour.start, target.tour.timeZone);
+      if (!slotStart || slotStart === currentSlot) {
+        const when = spokenLabel(target.tour.start, target.tour.timeZone);
+        const apartment = await ctx.runQuery(internal.sarahTools.tourApartment, {
+          orgId: target.orgId,
+          spokenAddress: spokenBuilding,
+          spokenUnit,
+        });
+        const input = tourApartmentInput(apartment);
+        const changed = input ? await tryChangeTourApartment(ctx, target.orgId, target.tour.id, input) : null;
+        if (!input || changed?.status !== "changed") {
+          return Response.json({
+            rescheduled: false,
+            apartment_changed: false,
+            when,
+            say: TOUR_ADDRESS_NOT_CHANGED_SAY,
+            message:
+              (input
+                ? "The apartment could not be changed right now. "
+                : "That building did not match one of ours exactly, so the tour was not changed. ") +
+              "Say the say line. Never name a building or address for this tour yourself.",
+          });
+        }
+        // The caller switched buildings: the lead follows to the new building's asset manager (B41).
+        try {
+          await ctx.runMutation(internal.leads.routeLeadToBuilding, {
+            orgId: target.orgId,
+            elevenLabsConversationId: target.tour.elevenLabsConversationId ?? conversationId,
+            propertyId: input.propertyId,
+          });
+        } catch (err) {
+          console.error("[reschedule-tour] apartment changed, but could not route the lead:", err);
+        }
+        const lines = tourApartmentLines(apartment);
+        return Response.json({
+          rescheduled: false,
+          apartment_changed: true,
+          tour_id: target.tour.id,
+          slot_start: currentSlot,
+          when,
+          property_name: input.propertyName,
+          property_address: input.propertyAddress,
+          apartment: lines.apartment,
+          say: tourApartmentChangedSay({ when, address: input.propertyAddress, unitLabel: input.unitLabel }),
+          message: [lines.message, TOUR_FACTS_RULE].filter(Boolean).join(" "),
+        });
+      }
+    }
+
     const offered = await ctx.runQuery(internal.tours.lastTimeCheck, { elevenLabsConversationId: conversationId });
     if (!offered || !offered.includes(slotStart)) {
       return Response.json({
@@ -1335,7 +1512,28 @@ http.route({
     }
 
     const previousTime = spokenLabel(target.tour.start, target.tour.timeZone);
-    const result = await rescheduleTour(ctx, target.orgId, { tour: target.tour, slotStart });
+    // A corrected building is matched first: its team's tour list gives the moved tour (else the tour's own).
+    const correctedApartment = correcting
+      ? await ctx.runQuery(internal.sarahTools.tourApartment, {
+          orgId: target.orgId,
+          spokenAddress: spokenBuilding,
+          spokenUnit,
+        })
+      : null;
+    const result = await rescheduleTour(ctx, target.orgId, {
+      tour: target.tour,
+      slotStart,
+      propertyId: correctedApartment?.property?.id,
+    });
+    // A new time AND a corrected building: the time moves first, then the apartment (same rules as above).
+    let corrected: { input: NonNullable<ReturnType<typeof tourApartmentInput>>; unitMessage?: string } | null = null;
+    if (result.status === "booked" && correcting && correctedApartment) {
+      const apartment = correctedApartment;
+      const input = tourApartmentInput(apartment);
+      if (input && (await tryChangeTourApartment(ctx, target.orgId, target.tour.id, input)).status === "changed") {
+        corrected = { input, unitMessage: tourApartmentLines(apartment).message };
+      }
+    }
 
     if (result.status === "booked") {
       if (target.tour.elevenLabsConversationId) {
@@ -1345,13 +1543,15 @@ http.route({
           tourConfirmed: true,
         });
       }
-      // A tour that moved to a different person takes the lead with it.
+      // The lead goes to the tour building's asset manager (the corrected one, else the tour's own); a
+      // tour that moved to a different person is texted to them, the lead's owner and the admins.
       const leadConversationId = target.tour.elevenLabsConversationId ?? conversationId;
       try {
-        await ctx.runMutation(internal.leads.assignOnTour, {
+        await ctx.runMutation(internal.leads.leadTourBooked, {
           orgId: target.orgId,
           elevenLabsConversationId: leadConversationId,
           userId: result.memberUserId,
+          propertyId: corrected?.input.propertyId ?? target.tour.propertyId ?? undefined,
           callerName: target.tour.callerName,
           callerPhone: target.tour.callerPhone,
           when: result.label,
@@ -1360,13 +1560,23 @@ http.route({
       } catch (err) {
         console.error("[reschedule-tour] moved, but could not assign the lead:", err);
       }
+      // The address only when the tour is for a chosen building (its own, or the one just corrected).
+      const address = corrected?.input.propertyAddress ?? result.propertyAddress;
       return Response.json({
         rescheduled: true,
+        tour_id: result.tourId,
+        slot_start: slotStart,
         previous_time: previousTime,
         when: result.label,
         team_member: result.memberFirstName,
-        property_address: result.propertyAddress,
-        say: `Done. I've moved your tour to ${result.label} with ${result.memberFirstName}.`,
+        ...(address ? { property_address: address } : {}),
+        ...(correcting ? { apartment_changed: corrected !== null } : {}),
+        say: corrected
+          ? `Done. I've moved your tour to ${result.label} with ${result.memberFirstName}, at ${corrected.input.propertyAddress}.`
+          : correcting
+            ? `Done. I've moved your tour to ${result.label} with ${result.memberFirstName}. ${TEAM_CONFIRMS_ADDRESS}`
+            : `Done. I've moved your tour to ${result.label} with ${result.memberFirstName}.`,
+        message: [corrected?.unitMessage, TOUR_FACTS_RULE].filter(Boolean).join(" "),
       });
     }
     if (result.status === "taken") {
@@ -1651,8 +1861,10 @@ http.route({
         status: "verify_first",
         say: "",
         message:
-          "Not verified yet. Do not transfer and do not read the menu. Remember who they asked for. Ask which " +
-          "property they own, then their email on file, and call verify_owner. Call this again only after it returns verified.",
+          "Not cleared yet. Do not transfer and do not read the menu. Remember who they asked for. An existing owner: " +
+          "ask which property they own, then their email on file, and call verify_owner; call this again only after it " +
+          "returns verified. A new owner (wants us to manage a property): call route_owner_prospect first. Someone whose " +
+          "verify_owner did not verify them: take a message with take_staff_message.",
       });
     }
     if (r.status === "available" && r.transferNumber) {
@@ -1660,7 +1872,7 @@ http.route({
       await ctx.runMutation(internal.conversations.markEscalation, {
         elevenLabsConversationId: conversationId,
         reason: "owner_transfer",
-        summary: `Existing owner asked for ${r.label}; Sarah put the call through to their phone (the result is on the call's audit trail).`,
+        summary: `${r.newOwner ? "New owner (wants us to manage a property)" : "Existing owner"} asked for ${r.label}; Sarah put the call through to their phone (the result is on the call's audit trail).`,
         escalatedTo: r.label ?? "staff",
       });
       if (TRANSFER_MECHANISM === "twilio_dial") {
@@ -1756,7 +1968,8 @@ http.route({
           status: "verify_first",
           say: "",
           message:
-            "Not verified yet. Do not transfer. Ask which property they own, then their email on file, and call verify_owner.",
+            "Not cleared yet. Do not transfer. An existing owner: ask which property they own, then their email on file, " +
+            "and call verify_owner. A new owner (wants us to manage a property): call route_owner_prospect first.",
         });
       }
       return Response.json({ ...takeMessage, say: r.say || takeMessage.say });
@@ -2711,10 +2924,14 @@ http.route({
 });
 
 /**
- * New leasing lead. Capture-and-flag: everything the caller says is stored (partial is fine, call
- * again to add more; answers merge), the lead is classified for staff, and it is assigned to a
- * lead-assignee asset manager (fewest tours this week, then least recently assigned). The
- * caller is never told anything about qualifying; flags stay on the lead.
+ * New leasing lead. Capture-and-flag: everything the caller says is stored (answers merge, so a
+ * later call only adds), the lead is classified for staff, and it stays unassigned (for an admin)
+ * until the caller picks a building: spoken_building, an address from Sarah's own listing results,
+ * sends it to that building's asset manager (leads.captureLead, B41). The caller is never told
+ * anything about qualifying; flags stay on the lead. Sarah calls it twice in a normal leasing call:
+ * once as soon as the area is known (the lead exists if the call drops, and she gets
+ * available_units), then ONE final log with everything before a tour or the close. Logging after
+ * every answer made 7 slow tool turns, nearly each with a filler (conv_0001m7acgw57fpwagbr0ydncsybk).
  */
 http.route({
   path: "/tools/log-lead",
@@ -2775,10 +2992,29 @@ http.route({
     if (optString(body.avoid_communities, 500)) flags.push("avoid_communities");
     const ready = Boolean(bedrooms && moveInDate && budget !== undefined && callerName && callerPhone);
 
+    // The listing the caller picked, if any (an address from her own results): matched exactly like a
+    // tour's building (this team's buildings only, a city never counts), it routes the lead to that
+    // building's asset manager. No match: the lead is saved as usual and simply not routed.
+    const spokenBuilding = optString(body.spoken_building, 300);
+    let pickedPropertyId: Id<"properties"> | undefined;
+    if (spokenBuilding) {
+      try {
+        const picked = await ctx.runQuery(internal.sarahTools.tourApartment, {
+          orgId,
+          spokenAddress: spokenBuilding,
+          spokenUnit: optString(body.spoken_unit, 60),
+        });
+        pickedPropertyId = picked.property?.id;
+      } catch (err) {
+        console.error("[log-lead] could not match the building:", err);
+      }
+    }
+
     let assignedTo: string | null = null;
     try {
       const result = await ctx.runMutation(internal.leads.captureLead, {
         orgId,
+        propertyId: pickedPropertyId,
         elevenLabsConversationId: conversationId,
         callerName,
         callerPhone,
@@ -2818,16 +3054,14 @@ http.route({
       area_status: area.status,
       area_matched: area.matched.length ? sayList(area.matched, "or") : null,
       cities_with_availability: area.citiesWithAvailability,
-      say:
-        area.say ??
-        (typeAvailable === false
-          ? "Thanks, I've noted what you're looking for. I don't see that size open right now, but I can note your interest or look at other sizes."
-          : "Thanks, I've got that noted. Would you like to set up a tour?"),
-      message:
-        "Recorded. Never tell the caller they do or do not qualify, and never give a reason they might " +
-        "not. Call again to add details as you learn them." +
-        (area.message ? ` ${area.message}` : "") +
-        ` ${WAIT_FOR_CALLER}`,
+      // The first log (area known) gets no "would you like a tour?": the flow is not done yet. Only the
+      // final log (final_log true, or every core answer in) offers one. See sarahReplies.leadLogLines.
+      ...leadLogLines({
+        final: optBool(body.final_log) === true || ready,
+        typeAvailable,
+        areaSay: area.say,
+        areaMessage: area.message,
+      }),
     });
   }),
 });
@@ -2873,6 +3107,7 @@ http.route({
     });
 
     let notified = false;
+    let menuLive = false;
     const orgId = await resolveBookingOrg(ctx, conversationId, body.agent_id);
     if (orgId) {
       try {
@@ -2880,11 +3115,32 @@ http.route({
       } catch (err) {
         console.error("[owner-prospect] could not notify:", err);
       }
+      // B46: clears this call for the owner phone menu (no email check for a new owner).
+      try {
+        menuLive = (await ctx.runMutation(internal.ownerRouting.recordNewOwner, { orgId, elevenLabsConversationId: conversationId, name })).menuLive;
+      } catch (err) {
+        console.error("[owner-prospect] could not record the new owner for the menu:", err);
+      }
+    }
+    if (menuLive) {
+      return Response.json({
+        recorded: true,
+        staff_notified: notified,
+        menu_live: true,
+        say: NEW_OWNER_LOGGED_SAY,
+        message:
+          "Say the say line, then in the same turn: if they already asked for someone on the OWNER CALL ROUTING " +
+          "keypad list, say you'll put them through to that person and call check_staff_availability; otherwise " +
+          "read the NEW OWNERS phone menu word for word and wait. Never say a key number. Never call verify_owner " +
+          "or ask for an email for them. Do not discuss fees or terms.",
+      });
     }
     return Response.json({
       recorded: true,
       staff_notified: notified,
-      message: "Recorded. Tell them someone from the team will be in touch. Do not discuss fees or terms.",
+      menu_live: false,
+      say: "Thank you. I've passed this on to Alex, who will call you back.",
+      message: "Say the say line. Do not read any phone menu or offer to put them through. Do not discuss fees or terms.",
     });
   }),
 });
@@ -3052,7 +3308,7 @@ http.route({
           elevenLabsConversationId: conv,
           person: tc.label,
           callerNumber: realPhone(form.get("From") ?? undefined),
-          message: `A verified owner was put through to ${tc.label}, but the call was not answered (${status || "unknown"}). Please call them back.`,
+          message: `${tc.newOwner ? "A new owner (wants us to manage their property)" : "A verified owner"} was put through to ${tc.label}, but the call was not answered (${status || "unknown"}). Please call them back.`,
         });
       }
     } catch (err) {
@@ -3087,7 +3343,7 @@ http.route({
           person: tc.label,
           callerNumber: realPhone(form.get("From") ?? undefined),
           message:
-            `A verified owner was put through to ${tc.label}, but the call was not answered. They left a ${seconds}-second ` +
+            `${tc.newOwner ? "A new owner (wants us to manage their property)" : "A verified owner"} was put through to ${tc.label}, but the call was not answered. They left a ${seconds}-second ` +
             `voicemail: ${recordingUrl.slice(0, 300)}.mp3 (Twilio recording, sign in to Twilio to play it). Please call them back.`,
         });
         await ctx.runMutation(internal.ownerRouting.logOwnerTransfer, {

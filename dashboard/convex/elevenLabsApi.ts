@@ -207,7 +207,8 @@ function conversationConfigBody(input: AgentConfig) {
         reasoning_effort: input.llm.reasoningEffort,
         // Voice replies are one acknowledgement plus ONE question (25 words at most, see the HARD
         // RULES in the prompt); a lower cap backs that up and keeps latency down. Tool-call
-        // arguments still fit: the largest, log_maintenance_request, is well under this.
+        // arguments count too: the largest is the final log_maintenance_request of a maintenance
+        // call (STEP 3), which the prompt keeps small by sending only what the first log did not.
         max_tokens: input.llm.maxTokens,
         knowledge_base: input.knowledgeBase,
         tool_ids: input.toolIds,

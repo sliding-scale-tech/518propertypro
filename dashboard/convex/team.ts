@@ -25,7 +25,6 @@ import {
   tenantOrgId,
 } from "./authz";
 import * as el from "./elevenLabsApi";
-import { backfillUnassignedLeadsForOrg } from "./leads";
 import type { JobRole } from "./jobRoles";
 import type { AppRole } from "./jobRoles";
 import {
@@ -519,17 +518,15 @@ async function setAssigneeFlag(
 }
 
 /**
- * Admin chooses who receives new leasing leads. These are also the only people Sarah books tours
- * for (tours.bookingContext). Turning it on requires the asset_manager job role.
+ * Admin chooses the backup tour staff (memberships.leadAssignee; the field keeps its old name). They
+ * give tours when the caller has not picked a building (tours.bookingContext), and are the second
+ * choice for unmatched-caller callbacks (leads.pickUnmatchedAssignee). Leads no longer go to them
+ * (B41: unassigned until a building is picked). Turning it on requires the asset_manager job role.
  */
 export const setLeadAssignee = mutation({
   args: { userId: v.id("users"), value: v.boolean() },
   handler: async (ctx, args) => {
-    const turnedOn = await setAssigneeFlag(ctx, args.userId, "leadAssignee", args.value);
-    if (turnedOn) {
-      const org = await requireOrgAdmin(ctx);
-      await backfillUnassignedLeadsForOrg(ctx, org.orgId, org.user._id);
-    }
+    await setAssigneeFlag(ctx, args.userId, "leadAssignee", args.value);
   },
 });
 
@@ -1277,6 +1274,8 @@ export const deleteOrgRows = internalMutation({
     await drop("sarahConfigAudit", (await ctx.db.query("sarahConfigAudit").withIndex("by_org_and_item", (q) => q.eq("orgId", args.orgId)).collect()) as never[]);
     await drop("passwordResetRequests", (await ctx.db.query("passwordResetRequests").withIndex("by_org", (q) => q.eq("orgId", args.orgId)).collect()) as never[]);
     await drop("sarahConfigVersions", (await ctx.db.query("sarahConfigVersions").withIndex("by_org_and_version", (q) => q.eq("orgId", args.orgId)).collect()) as never[]);
+    await drop("sarahPushes", (await ctx.db.query("sarahPushes").withIndex("by_org", (q) => q.eq("orgId", args.orgId)).collect()) as never[]);
+    await drop("tourStaff", (await ctx.db.query("tourStaff").withIndex("by_org_and_category", (q) => q.eq("orgId", args.orgId)).collect()) as never[]);
     // Tasks and their attachments (uploaded files are removed from storage too).
     for (const row of await ctx.db.query("taskAttachments").withIndex("by_org", (q) => q.eq("orgId", args.orgId)).collect()) {
       await ctx.storage.delete(row.storageId);

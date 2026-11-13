@@ -12,13 +12,13 @@ import { formatCurrency, formatDate, formatMonth, isMonth } from "@/convex/rosFo
 import {
   Btn,
   Card,
-  Field,
+  FilterSelect,
+  FilterToolbar,
   PageHeader,
   Pagination,
   Pill,
   RowMenu,
   SearchBox,
-  Select,
   cx,
   paginate,
   readPage,
@@ -235,7 +235,7 @@ export function PaymentsView() {
     : null;
 
   const statusLabel: Record<StatusFilter, string> = {
-    "": `Any status (${summary.total})`,
+    "": `All (${summary.total})`,
     unpaid: `Unpaid (${summary.unpaid})`,
     paid: `Paid (${summary.paid})`,
     not_markable: `Not markable (${summary.notMarkable})`,
@@ -252,8 +252,13 @@ export function PaymentsView() {
 
       <Card className="px-4 py-4 sm:px-[22px] sm:py-5">
         {/* Toolbar: search + four compact filters on one row (wraps on narrow screens). */}
-        <div className="flex flex-wrap items-end gap-2.5">
-          <div className="min-w-[220px] flex-[1_1_260px]">
+        <FilterToolbar
+          active={Boolean(rawMonth && month !== thisMonth) || anyFilter || urlQ.trim() !== ""}
+          onClear={() => {
+            search.setInput("");
+            setParams({ month: "", team: "", owner: "", property: "", status: "", q: "" });
+          }}
+          search={
             <SearchBox
               id="pay-search"
               label="Search payments"
@@ -262,46 +267,62 @@ export function PaymentsView() {
               onClear={clearSearch}
               placeholder="Search building, address, unit, tenant or owner"
             />
-          </div>
-          <Field label="Rent month" htmlFor="pay-month" className="w-[calc(50%-5px)] sm:w-[168px]">
-            <Select id="pay-month" value={month} onChange={(e) => setParam("month", e.target.value || "")}>
-              {months.map((m) => (
-                <option key={m.value} value={m.value}>
-                  {m.label}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <Field label="Team" htmlFor="pay-team" className="w-[calc(50%-5px)] sm:w-[132px]">
-            <Select id="pay-team" value={team} onChange={(e) => setParam("team", e.target.value || "")}>
-              <option value="">All teams</option>
-              {TEAMS.map((t) => (
-                <option key={t} value={t}>
-                  {TEAM_LABELS[t]}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <Field label="Owner" htmlFor="pay-owner" className="w-[calc(50%-5px)] sm:w-[210px]">
-            <Select id="pay-owner" value={ownerId} onChange={(e) => setParam("owner", e.target.value || "")}>
-              <option value="">All owners</option>
-              {(data?.filters.owners ?? []).map((o) => (
-                <option key={o.ownerId} value={o.ownerId}>
-                  {o.name}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <Field label="Status" htmlFor="pay-status" className="w-[calc(50%-5px)] sm:w-[176px]">
-            <Select id="pay-status" value={status} onChange={(e) => setParam("status", e.target.value || "")}>
-              {STATUS_OPTIONS.map((s) => (
-                <option key={s || "all"} value={s}>
-                  {statusLabel[s]}
-                </option>
-              ))}
-            </Select>
-          </Field>
-        </div>
+          }
+        >
+          <FilterSelect
+            label="Rent month"
+            active={month !== thisMonth}
+            value={month}
+            onChange={(e) => setParam("month", !e.target.value || e.target.value === thisMonth ? "" : e.target.value)}
+            className="sm:w-52"
+          >
+            {months.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
+          </FilterSelect>
+          <FilterSelect
+            label="Team"
+            active={team !== ""}
+            value={team || "all"}
+            onChange={(e) => setParam("team", !e.target.value || e.target.value === "all" ? "" : e.target.value)}
+          >
+            <option value="all">All</option>
+            {TEAMS.map((t) => (
+              <option key={t} value={t}>
+                {TEAM_LABELS[t]}
+              </option>
+            ))}
+          </FilterSelect>
+          <FilterSelect
+            label="Owner"
+            active={ownerId !== ""}
+            value={ownerId || "all"}
+            onChange={(e) => setParam("owner", !e.target.value || e.target.value === "all" ? "" : e.target.value)}
+            className="sm:w-56"
+          >
+            <option value="all">All</option>
+            {(data?.filters.owners ?? []).map((o) => (
+              <option key={o.ownerId} value={o.ownerId}>
+                {o.name}
+              </option>
+            ))}
+          </FilterSelect>
+          <FilterSelect
+            label="Status"
+            active={status !== ""}
+            value={status || "all"}
+            onChange={(e) => setParam("status", !e.target.value || e.target.value === "all" ? "" : e.target.value)}
+            className="sm:w-56"
+          >
+            {STATUS_OPTIONS.map((s) => (
+              <option key={s || "all"} value={s || "all"}>
+                {statusLabel[s]}
+              </option>
+            ))}
+          </FilterSelect>
+        </FilterToolbar>
 
         {data === undefined ? (
           <Spinner label="Loading rent payments…" />

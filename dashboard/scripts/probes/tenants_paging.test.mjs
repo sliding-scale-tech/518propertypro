@@ -175,6 +175,15 @@ test("countByStatus: per status and overall", () => {
 
 // --- URL params ---------------------------------------------------------------------------------
 
+test("filtersAtDefault: true only when every filter is at its default", () => {
+  const d = { q: "", status: "open", severity: "all", type: "all" };
+  assert.equal(P.filtersAtDefault({ q: "", status: "open", severity: "all", type: "all" }, d), true);
+  assert.equal(P.filtersAtDefault({}, d), true);
+  assert.equal(P.filtersAtDefault({ status: "resolved" }, d), false);
+  assert.equal(P.filtersAtDefault({ q: "leak" }, d), false);
+  assert.equal(P.filtersAtDefault({ severity: "high", status: "open" }, d), false);
+});
+
 test("readChoice: only an allowed value, else the fallback", () => {
   assert.equal(P.readChoice("all", ["active", "inactive", "all"], "active"), "all");
   assert.equal(P.readChoice("bogus", ["active", "all"], "active"), "active");

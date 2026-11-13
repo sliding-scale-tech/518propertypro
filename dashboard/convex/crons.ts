@@ -22,4 +22,14 @@ crons.daily(
   {},
 );
 
+// B44: lease-ended follow-ups. One task per active resident whose lease end has passed (team date)
+// and who has no open follow-up yet, for the unit's asset manager; batched, and a re-run is a
+// no-op. 11:30 UTC = 6:30 / 7:30 am in Albany, before the workday. Never moves anyone out.
+crons.daily(
+  "lease-ended follow-ups",
+  { hourUTC: 11, minuteUTC: 30 },
+  internal.leaseFollowUp.run,
+  {},
+);
+
 export default crons;

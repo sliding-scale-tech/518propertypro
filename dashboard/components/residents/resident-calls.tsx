@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { readChoice } from "@/components/residents/tenant-list-params";
+import { filtersAtDefault, readChoice } from "@/components/residents/tenant-list-params";
 import { useKept, useTenantUrl } from "@/components/residents/use-tenant-url";
 import { errorMessage, useToast } from "@/components/toast";
 import { ConversationTranscript } from "@/components/transcript";
@@ -18,6 +18,8 @@ import {
   DataTable,
   Drawer,
   DrawerSection,
+  FilterSelect,
+  FilterToolbar,
   Input,
   KeyValue,
   Kpi,
@@ -26,7 +28,6 @@ import {
   Pagination,
   Pill,
   SearchBox,
-  Select,
   SortHeader,
   Textarea,
   ariaSortOf,
@@ -131,7 +132,7 @@ export function ResidentCalls() {
   const paging = useUrlPaging();
   const statusFilter = readChoice(url.params.get("status"), STATUS_CHOICES, "open");
   const severityFilter = readChoice(url.params.get("severity"), SEVERITY_CHOICES, "all");
-  const typeFilter = url.params.get("type") ?? "all";
+  const typeFilter = url.params.get("type") || "all";
   const sort = readSort(url.params.get("sort"), url.params.get("dir"), SORT_KEYS, SORT_DEFAULT);
   // The open drawer keeps its own copy of the row, so it stays put if a save moves the row off this page.
   const [selected, setSelected] = useState<IssueRow | null>(null);
@@ -161,8 +162,10 @@ export function ResidentCalls() {
     header: <SortHeader label={label} sortKey={key} sort={sort} onSort={onSort} />,
     sort: ariaSortOf(sort, key),
   });
-  const filtersActive =
-    search.q.trim() !== "" || statusFilter !== "open" || severityFilter !== "all" || typeFilter !== "all";
+  const filtersActive = !filtersAtDefault(
+    { q: search.q.trim(), status: statusFilter, severity: severityFilter, type: typeFilter },
+    { q: "", status: "open", severity: "all", type: "all" },
+  );
   const clearAll = () => {
     search.setInput("");
     url.set({ q: null, status: null, severity: null, type: null });
@@ -221,67 +224,89 @@ export function ResidentCalls() {
   return (
     <div className="space-y-5">
       <p className="text-[12.5px] text-muted-foreground">
-        Every resident call: maintenance requests raised from calls (open them under Work orders) and other resident calls. Names and units are recorded as the caller gave them and are not verified.
-        Severity is Sarah&apos;s judgment; you can change it and the original is kept.
+        Names and units are as the caller gave them. Severity is Sarah&apos;s judgment; you can change it and the original is kept.
       </p>
 
       {stats ? (
         <KpiRow>
-          <Kpi icon={<ClipboardList />} label="Open issues" value={stats.openIssues} />
-          <Kpi icon={<AlertTriangle />} label="High severity" value={stats.highSeverityOpen} />
-          <Kpi icon={<CheckCircle2 />} label="Resolved" value={stats.resolvedIssues} />
+          <Kpi
+            icon={<ClipboardList />}
+            label="Open issues"
+            value={stats.openIssues}
+            active={statusFilter === "open" && severityFilter === "all"}
+            onClick={() => url.set({ status: null, severity: null })}
+          />
+          <Kpi
+            icon={<AlertTriangle />}
+            label="High severity"
+            value={stats.highSeverityOpen}
+            sub="Currently open"
+            active={statusFilter === "open" && severityFilter === "high"}
+            onClick={() => url.set({ status: null, severity: "high" })}
+          />
+          <Kpi
+            icon={<CheckCircle2 />}
+            label="Resolved"
+            value={stats.resolvedIssues}
+            active={statusFilter === "resolved" && severityFilter === "all"}
+            onClick={() => url.set({ status: "resolved", severity: null })}
+          />
         </KpiRow>
       ) : null}
 
       <Card>
-        <div className="mb-3">
-          <SearchBox
-            id="calls-search"
-            label="Search resident calls"
-            value={search.input}
-            onChange={search.setInput}
-            onClear={search.clear}
-            placeholder="Search caller, unit, reason, phone or request number"
-          />
-        </div>
-        <div className="mb-3.5 flex flex-wrap gap-2">
-          <Select
-            aria-label="Filter by severity"
-            className="w-44"
+        <FilterToolbar
+          className="mb-3.5"
+          active={filtersActive}
+          onClear={clearAll}
+          search={
+            <SearchBox
+              id="calls-search"
+              label="Search resident calls"
+              value={search.input}
+              onChange={search.setInput}
+              onClear={search.clear}
+              placeholder="Search caller, unit, reason, phone or request number"
+            />
+          }
+        >
+          <FilterSelect
+            label="Severity"
+            active={severityFilter !== "all"}
             value={severityFilter}
-            onChange={(e) => url.set({ severity: e.target.value === "all" ? null : e.target.value })}
+            onChange={(e) => url.set({ severity: !e.target.value || e.target.value === "all" ? null : e.target.value })}
           >
-            <option value="all">All severities</option>
+            <option value="all">All</option>
             {Object.entries(SEVERITY_LABELS).map(([value, label]) => (
               <option key={value} value={value}>
                 {label}
               </option>
             ))}
-          </Select>
-          <Select
-            aria-label="Filter by call type"
-            className="w-44"
+          </FilterSelect>
+          <FilterSelect
+            label="Call type"
+            active={typeFilter !== "all"}
             value={typeFilter}
-            onChange={(e) => url.set({ type: e.target.value === "all" ? null : e.target.value })}
+            onChange={(e) => url.set({ type: !e.target.value || e.target.value === "all" ? null : e.target.value })}
           >
-            <option value="all">All call types</option>
+            <option value="all">All</option>
             {typeOptions.map((t) => (
               <option key={t} value={t}>
                 {labelize(t)}
               </option>
             ))}
-          </Select>
-          <Select
-            aria-label="Filter by status"
-            className="w-36"
+          </FilterSelect>
+          <FilterSelect
+            label="Status"
+            active={statusFilter !== "open"}
             value={statusFilter}
-            onChange={(e) => url.set({ status: e.target.value === "open" ? null : e.target.value })}
+            onChange={(e) => url.set({ status: !e.target.value || e.target.value === "open" ? null : e.target.value })}
           >
             <option value="open">Open</option>
             <option value="resolved">Resolved</option>
             <option value="all">All</option>
-          </Select>
-        </div>
+          </FilterSelect>
+        </FilterToolbar>
         {data === undefined ? (
           <p className="text-sm text-muted-foreground">Loading resident calls…</p>
         ) : (

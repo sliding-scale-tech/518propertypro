@@ -3,11 +3,16 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { internalQuery, mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { writeAudit } from "./audit";
-import { currentOrg, hasAnyRole, hasRole, requireAdminView } from "./authz";
+import { currentOrg, hasAnyRole, hasRole, isAdminView, requireAdminView, requireOrg } from "./authz";
 import type { OrgContext } from "./authz";
 import { amScope, canSeeUnit } from "./amScope";
 import { requireE164, toE164 } from "./phone";
 import { RESIDENT_SORT_DEFAULT, pageOf, residentsView } from "./tenantViews";
+import { LEASE_FILTERS, leaseTag, matchesLeaseFilter, teamToday } from "./leaseLib";
+import type { LeaseFilter } from "./leaseLib";
+import { closeLeaseFollowUps, openLeaseFollowUps } from "./leaseFollowUp";
+import { unitRolesOf } from "./units";
+import { UNIT_EDIT_MSG, unitEditPermissions } from "./unitEditLib";
 
 /**
  * Residents (F3): the tenant directory behind Sarah's caller-ID match and the Residents page.
@@ -15,8 +20,17 @@ import { RESIDENT_SORT_DEFAULT, pageOf, residentsView } from "./tenantViews";
  * Read scope: the admin view and accountants see everyone, an asset manager only residents of
  * units they are the AM of, a technician none. Single-record reads answer null (not an error)
  * outside that scope so a probing client can't tell "exists, not yours" from "doesn't exist".
- * Writes are admin view only.
+ * Writes: the admin view; create and update also the unit's own asset manager (B45: an asset
+ * manager adds and edits residents of the units they manage, never of a unit they only cover).
+ * Deactivate stays admin view only.
  */
+
+/** B45: the admin view, or this unit's designated asset manager. */
+function canManageResidentsOf(org: OrgContext, unit: Doc<"units">): boolean {
+  return unitEditPermissions(unitRolesOf(org, unit)).newRenter;
+}
+
+export const RESIDENT_EDIT_NOT_YOURS = "You can only edit residents of units you manage.";
 
 const MAX_PHONES = 5;
 
@@ -69,7 +83,8 @@ async function readable(
   return null;
 }
 
-async function syncPhones(ctx: MutationCtx, resident: Doc<"residents">, phones: string[]) {
+/** residentPhones = the resident's phones while active, none once inactive. Also used by leases.ts. */
+export async function syncPhones(ctx: MutationCtx, resident: Doc<"residents">, phones: string[]) {
   const existing = await ctx.db
     .query("residentPhones")
     .withIndex("by_resident", (q) => q.eq("residentId", resident._id))
@@ -181,6 +196,8 @@ export const listPage = query({
     team: v.optional(v.union(v.literal("gold"), v.literal("silver"), v.literal("make_up"))),
     sortKey: v.optional(v.union(v.literal("name"), v.literal("unit"), v.literal("lease"), v.literal("status"))),
     sortDir: v.optional(v.union(v.literal("asc"), v.literal("desc"))),
+    // B44 Lease filter; any unknown value reads as "all".
+    lease: v.optional(v.string()),
     page: v.optional(v.number()),
     pageSize: v.optional(v.number()),
   },
@@ -188,8 +205,10 @@ export const listPage = query({
     const org = await currentOrg(ctx);
     const residents = org ? await readableResidents(ctx, org) : null;
     if (!org || !residents) {
-      return { ...pageOf<ResidentPageRow>([], 1, args.pageSize), showPhones: false, showEmail: false };
+      return { ...pageOf<ResidentPageRowOut>([], 1, args.pageSize), showPhones: false, showEmail: false, today: "" };
     }
+    const today = teamToday(Date.now(), (await ctx.db.get(org.orgId))?.timeZone);
+    const lease = (LEASE_FILTERS as readonly string[]).includes(args.lease ?? "") ? (args.lease as LeaseFilter) : "all";
 
     const units = new Map<string, Doc<"units"> | null>();
     const properties = new Map<string, Doc<"properties"> | null>();
@@ -215,21 +234,46 @@ export const listPage = query({
       });
     }
 
-    const filtered = residentsView(all, {
+    const filtered = residentsView(lease === "all" ? all : all.filter((r) => matchesLeaseFilter(r, lease, today)), {
       q: args.search,
       status: args.status,
       propertyId: args.propertyId,
       team: args.team,
       sort: { key: args.sortKey ?? RESIDENT_SORT_DEFAULT.key, dir: args.sortDir ?? RESIDENT_SORT_DEFAULT.dir },
     });
+    const page = pageOf(filtered, args.page, args.pageSize);
+    // Lease tag, open follow-up and whether the viewer may resolve it: for this page's rows only.
+    const managed = hasRole(org, "asset_manager") ? (await amScope(ctx, org)).managed : new Set<Id<"units">>();
+    const admin = isAdminView(org);
+    const rows: ResidentPageRowOut[] = [];
+    for (const r of page.rows) {
+      const open = r.active ? await openLeaseFollowUps(ctx, r._id) : [];
+      rows.push({
+        ...r,
+        leaseTag: leaseTag(r, today),
+        openFollowUpTaskId: open[0]?._id ?? null,
+        canResolveLease: r.active && (admin || managed.has(r.unitId)),
+        // B45: edit / move out / new renter on this row (admin view, or the unit's own asset manager).
+        canManage: admin || managed.has(r.unitId),
+      });
+    }
     return {
-      ...pageOf(filtered, args.page, args.pageSize),
+      ...page,
+      rows,
       // Whether any resident in the filtered list has these details (columns stay steady across pages).
       showPhones: filtered.some((r) => r.phones.length > 0),
       showEmail: filtered.some((r) => !!r.email),
+      today,
     };
   },
 });
+
+type ResidentPageRowOut = ResidentPageRow & {
+  leaseTag: ReturnType<typeof leaseTag>;
+  openFollowUpTaskId: Id<"tasks"> | null;
+  canResolveLease: boolean;
+  canManage: boolean;
+};
 
 type ResidentPageRow = Doc<"residents"> & {
   unitNumber: string;
@@ -245,7 +289,8 @@ export const get = query({
     if (!org) return null;
     const found = await readable(ctx, org, args.residentId);
     if (!found) return null;
-    return (await present(ctx, [found]))[0];
+    // B45: whether the viewer may edit this resident (admin view, or the unit's own asset manager).
+    return { ...(await present(ctx, [found]))[0], canEdit: canManageResidentsOf(org, found.unit) };
   },
 });
 
@@ -313,9 +358,10 @@ export const create = mutation({
     leaseEnd: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<Id<"residents">> => {
-    const org = await requireAdminView(ctx);
+    const org = await requireOrg(ctx);
     const unit = await ctx.db.get(args.unitId);
     if (!unit || unit.orgId !== org.orgId) throw new ConvexError("Unit not found.");
+    if (!canManageResidentsOf(org, unit)) throw new ConvexError(UNIT_EDIT_MSG.newRenterNotYours);
 
     const phones = cleanPhones(args.phones);
     const id = await ctx.db.insert("residents", {
@@ -355,9 +401,11 @@ export const update = mutation({
     clearLeaseEnd: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const org = await requireAdminView(ctx);
+    const org = await requireOrg(ctx);
     const resident = await ctx.db.get(args.residentId);
     if (!resident || resident.orgId !== org.orgId) throw new ConvexError("Resident not found.");
+    const home = await ctx.db.get(resident.unitId);
+    if (!home || home.orgId !== org.orgId || !canManageResidentsOf(org, home)) throw new ConvexError(RESIDENT_EDIT_NOT_YOURS);
 
     // Fields are copied one by one so nothing else the client sends (an orgId, `active`,
     // `source`) can reach the row.
@@ -365,6 +413,8 @@ export const update = mutation({
     if (args.unitId !== undefined) {
       const unit = await ctx.db.get(args.unitId);
       if (!unit || unit.orgId !== org.orgId) throw new ConvexError("Unit not found.");
+      // Moving a resident to another unit adds them there: same rule as create.
+      if (!canManageResidentsOf(org, unit)) throw new ConvexError(UNIT_EDIT_MSG.newRenterNotYours);
       patch.unitId = unit._id;
     }
     if (args.fullName !== undefined) patch.fullName = cleanName(args.fullName);
@@ -373,9 +423,14 @@ export const update = mutation({
     else if (args.email !== undefined) patch.email = cleanEmail(args.email);
     if (args.clearLeaseEnd) patch.leaseEnd = undefined;
     else if (args.leaseEnd !== undefined) patch.leaseEnd = cleanLeaseEnd(args.leaseEnd);
+    // B44: a changed lease end is a new lease: no longer month-to-month, and an open lease-ended
+    // follow-up is answered (the daily check opens a new one if the new date has passed too).
+    const leaseChanged = "leaseEnd" in patch && patch.leaseEnd !== resident.leaseEnd;
+    if (leaseChanged) patch.leaseStatus = undefined;
 
     await ctx.db.patch(resident._id, patch);
     if (patch.phones) await syncPhones(ctx, { ...resident, ...patch } as Doc<"residents">, patch.phones);
+    if (leaseChanged) await closeLeaseFollowUps(ctx, resident, "Lease end edited", org.user._id);
     await writeAudit(ctx, {
       orgId: org.orgId,
       entity: "resident",
@@ -472,6 +527,7 @@ export const deactivate = mutation({
 
     await ctx.db.patch(resident._id, { active: false, updatedAt: Date.now() });
     await syncPhones(ctx, { ...resident, active: false }, []);
+    await closeLeaseFollowUps(ctx, resident, "Resident deactivated", org.user._id);
     await writeAudit(ctx, {
       orgId: org.orgId,
       entity: "resident",

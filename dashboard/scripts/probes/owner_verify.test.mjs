@@ -239,6 +239,21 @@ test("gate: a verification counts only on its own call, and only for a while", (
   assert.equal(V.hasLiveVerification([{ verified: true }], now), false);
 });
 
+test("gate (B46): a new owner recorded on the call is cleared, but never after a failed email check", () => {
+  const now = 10_000_000;
+  const ok = { verified: true, verifiedAt: now - 1000, failures: 0 };
+  const failed = { verified: false, failures: 1 };
+  const addressOnly = { verified: false, failures: 0 };
+  assert.deepEqual(V.callCleared([], false, now), { cleared: false, newOwner: false });
+  assert.deepEqual(V.callCleared([], true, now), { cleared: true, newOwner: true });
+  assert.deepEqual(V.callCleared([ok], false, now), { cleared: true, newOwner: false });
+  assert.deepEqual(V.callCleared([ok], true, now), { cleared: true, newOwner: false });
+  assert.deepEqual(V.callCleared([addressOnly], true, now), { cleared: true, newOwner: true });
+  // Said they were existing, failed the email, then claimed to be new: still refused.
+  assert.deepEqual(V.callCleared([failed], true, now), { cleared: false, newOwner: false });
+  assert.deepEqual(V.callCleared([failed], false, now), { cleared: false, newOwner: false });
+});
+
 test("gate: everyone on one test number still resolves by person, and each gets the number", () => {
   const menu = R.menuOf({ enabled: true, entries: six(TEST_NUMBER) });
   assert.equal(menu.filter((m) => m.phone === TEST_NUMBER).length, 6);

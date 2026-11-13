@@ -13,9 +13,9 @@ import { Btn, Card, CardHead, KeyValue, ListRow, PageHeader, Pill, SevChip } fro
 function Detail({ id }: { id: Id<"residents"> }) {
   const router = useRouter();
   const access = useQuery(api.team.myAccess);
-  const isAdmin = access?.view === "admin";
+  const isAdmin = access?.isAdmin === true;
   const resident = useQuery(api.residents.get, { residentId: id });
-  const actions = useResidentActions();
+  const actions = useResidentActions(undefined, { onlyMine: !isAdmin });
   const requests = useQuery(
     api.maintenance.list,
     resident ? { tab: "all", unitId: resident.unitId } : "skip",
@@ -49,10 +49,10 @@ function Detail({ id }: { id: Id<"residents"> }) {
           </span>
         }
         actions={
-          isAdmin ? (
+          resident.canEdit || isAdmin ? (
             <>
-              <Btn onClick={() => actions.edit(resident)}>Edit</Btn>
-              {resident.active ? (
+              {resident.canEdit ? <Btn onClick={() => actions.edit(resident)}>Edit</Btn> : null}
+              {isAdmin && resident.active ? (
                 <Btn variant="dng" onClick={() => actions.deactivate(resident)}>
                   Deactivate
                 </Btn>
@@ -97,7 +97,7 @@ function Detail({ id }: { id: Id<"residents"> }) {
         )}
       </Card>
 
-      {isAdmin ? actions.dialogs : null}
+      {actions.dialogs}
     </div>
   );
 }

@@ -43,6 +43,8 @@ type CoreProps = {
   placeholder?: string;
   className?: string;
   highlight?: boolean;
+  /** Shown before the selected label on the closed control, e.g. "Severity" gives "Severity: All". */
+  triggerPrefix?: string;
   "aria-label"?: string;
   "aria-labelledby"?: string;
   "aria-describedby"?: string;
@@ -66,6 +68,7 @@ export function Listbox({
   placeholder,
   className,
   highlight = false,
+  triggerPrefix,
   ...aria
 }: CoreProps) {
   const autoId = useId();
@@ -202,7 +205,8 @@ export function Listbox({
   };
 
   const muted = !selected || (selected.value === "" && (selected.disabled || !!placeholder));
-  const display = selected ? selected.label : (placeholder ?? "");
+  const shown = selected ? selected.label : (placeholder ?? "");
+  const display = triggerPrefix && shown ? `${triggerPrefix}: ${shown}` : shown;
 
   return (
     <>
@@ -225,7 +229,7 @@ export function Listbox({
         className={cx(TRIGGER, highlight && "border-primary text-primary", className)}
       >
         {selected?.icon}
-        <span className={cx("min-w-0 flex-1 truncate", muted && !highlight && "text-faint")}>{display || " "}</span>
+        <span className={cx("min-w-0 flex-1 truncate", muted && !highlight && !triggerPrefix && "text-faint")}>{display || " "}</span>
         <ChevronDown
           aria-hidden
           className={cx("h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform", open && "rotate-180")}
@@ -346,6 +350,7 @@ export function Select({
   children,
   className,
   highlight,
+  triggerPrefix,
   disabled,
   id,
   name,
@@ -361,6 +366,7 @@ export function Select({
   children?: ReactNode;
   className?: string;
   highlight?: boolean;
+  triggerPrefix?: string;
   disabled?: boolean;
   id?: string;
   name?: string;
@@ -384,6 +390,7 @@ export function Select({
       placeholder={placeholder}
       className={className}
       highlight={highlight}
+      triggerPrefix={triggerPrefix}
       aria-label={ariaLabel}
       aria-labelledby={ariaLabelledby}
       aria-describedby={ariaDescribedby}

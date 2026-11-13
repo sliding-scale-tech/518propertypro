@@ -3,14 +3,15 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { internalMutation, mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { writeAudit } from "./audit";
-import { currentOrg, hasAnyRole, isAdminView } from "./authz";
+import { currentOrg, hasAnyRole, isAdminView, requireAdminView } from "./authz";
 import type { OrgContext } from "./authz";
 import { callbacksView, countByStatus, pageOf } from "./tenantViews";
 import { scheduleEmergencyAlert, scheduleNotify, staffRecipientIds } from "./notify";
 import { ensureLeadConversation } from "./conversations";
 import { upsertArgs, upsertQualification } from "./qualifications";
-import { weekBounds } from "./tourSchedule";
 import { STAFF_MESSAGE_PREFIX } from "./ownerRoutingLib";
+import { appRolesOf } from "./roleSet";
+import { buildingAssetManager, decideBuildingRoute, effectiveAssignedBy, leadTextRecipients } from "./leadRoutingLib";
 
 /**
  * Sarah's routing of people to people (lead -> asset manager, unmatched caller -> asset manager,
@@ -19,24 +20,19 @@ import { STAFF_MESSAGE_PREFIX } from "./ownerRoutingLib";
  * Everything callable from Sarah's tools is internal: the org comes from the call's own
  * conversation / agent id (http.ts) and is trusted from there on, never from what the caller said.
  *
- * LEAD ASSIGNMENT RULE (one definition, here):
- *   eligible   = membership.leadAssignee && asset_manager job role && not out of office
- *                && taking tours (tourAvailability.availableForTours, default true)
- *                && a connected, still-valid Google calendar.
- *   chosen     = fewest booked tours this week (Mon-Sun, team time zone), then least recently
- *                assigned a lead (memberships.lastLeadAssignedAt), then earliest to join.
- *   fallback   = if nobody is eligible, the same ordering over lead assignees who are merely not
- *                out of office (so a lead is not orphaned by a calendar problem). Nobody at all:
- *                the lead stays unassigned and only staff are texted.
- * Booking a tour re-assigns the lead to whoever the tour is booked with (assignOnTour).
+ * LEAD ASSIGNMENT RULE (B41; the pure decisions are in leadRoutingLib.ts):
+ *   - A new lead is UNASSIGNED. It waits on the admin Leads page ("Unassigned") until the caller
+ *     picks a building or an admin assigns it by hand (assignLead).
+ *   - The caller picks a building (spoken_building, from Sarah's own listing results, on
+ *     request_tour / reschedule_tour / find_tour_times / log_lead): the lead goes to that building's
+ *     asset manager (most units there), assignedBy "auto_building".
+ *   - A manual assignment (or one made before B41) is never changed by Sarah. A lead assigned by
+ *     building follows the caller to another building.
+ *   - Booking a tour does NOT hand the lead to whoever gives the tour; the tour host is texted about
+ *     the tour, and the lead stays with its owner.
+ *   - The "new lead" text goes once to the admins (plus the owner, if there is one yet) when the lead
+ *     has a name or number; a later owner by building gets the same text on their own.
  */
-
-type Member = {
-  userId: Id<"users">;
-  firstName: string;
-  joinedAt: number;
-  lastAssignedAt: number;
-};
 
 function isAssetManager(m: Doc<"memberships">): boolean {
   return (m.jobRoles ?? []).includes("asset_manager");
@@ -51,85 +47,16 @@ async function firstNameOf(ctx: QueryCtx, userId: Id<"users">): Promise<string> 
   return u?.firstName || u?.email?.split("@")[0] || "a team member";
 }
 
+function fullNameOf(u: Doc<"users"> | null): string {
+  if (!u) return "Team member";
+  return [u.firstName, u.lastName].filter(Boolean).join(" ").trim() || u.email || "Team member";
+}
+
 async function orgMembers(ctx: QueryCtx, orgId: string): Promise<Doc<"memberships">[]> {
   return await ctx.db
     .query("memberships")
     .withIndex("by_org", (q) => q.eq("orgId", orgId as Id<"organizations">))
     .collect();
-}
-
-/** Booked tours per person in the current team-local week. */
-async function toursThisWeek(ctx: QueryCtx, orgId: string, userIds: Id<"users">[]): Promise<Map<Id<"users">, number>> {
-  const organization = await ctx.db.get(orgId as Id<"organizations">);
-  const week = weekBounds(Date.now(), organization?.timeZone ?? "UTC");
-  const out = new Map<Id<"users">, number>();
-  for (const userId of userIds) {
-    const rows = await ctx.db
-      .query("tours")
-      .withIndex("by_assignee_and_start", (q) =>
-        q.eq("assignedUserId", userId).gte("start", week.start).lt("start", week.end),
-      )
-      .collect();
-    out.set(userId, rows.filter((t) => t.status === "booked" && t.orgId === orgId).length);
-  }
-  return out;
-}
-
-async function calendarOk(ctx: QueryCtx, userId: Id<"users">): Promise<boolean> {
-  const connection = await ctx.db
-    .query("googleCalendarConnections")
-    .withIndex("by_user", (q) => q.eq("userId", userId))
-    .unique();
-  return Boolean(connection && !connection.invalidAt);
-}
-
-async function takingTours(ctx: QueryCtx, userId: Id<"users">): Promise<boolean> {
-  const hours = await ctx.db
-    .query("tourAvailability")
-    .withIndex("by_user", (q) => q.eq("userId", userId))
-    .unique();
-  return hours?.availableForTours ?? true;
-}
-
-/** Lead assignees who are asset managers and in the office; `strict` also needs tours + calendar. */
-async function leadCandidates(ctx: QueryCtx, orgId: string, strict: boolean): Promise<Member[]> {
-  const now = Date.now();
-  const out: Member[] = [];
-  for (const m of await orgMembers(ctx, orgId)) {
-    if (!m.leadAssignee || !isAssetManager(m) || isOutOfOffice(m, now)) continue;
-    if (strict && (!(await takingTours(ctx, m.userId)) || !(await calendarOk(ctx, m.userId)))) continue;
-    out.push({
-      userId: m.userId,
-      firstName: await firstNameOf(ctx, m.userId),
-      joinedAt: m.createdAt,
-      lastAssignedAt: m.lastLeadAssignedAt ?? 0,
-    });
-  }
-  return out;
-}
-
-/** The assignee for a new lead (see the rule at the top of this file), or null. */
-async function pickLeadAssignee(
-  ctx: QueryCtx,
-  orgId: string,
-): Promise<{ member: Member; reason: string } | null> {
-  for (const strict of [true, false]) {
-    const pool = await leadCandidates(ctx, orgId, strict);
-    if (pool.length === 0) continue;
-    const counts = await toursThisWeek(ctx, orgId, pool.map((p) => p.userId));
-    pool.sort(
-      (a, b) =>
-        (counts.get(a.userId) ?? 0) - (counts.get(b.userId) ?? 0) ||
-        a.lastAssignedAt - b.lastAssignedAt ||
-        a.joinedAt - b.joinedAt,
-    );
-    const top = pool[0];
-    return {
-      member: top,
-      reason: `${strict ? "fewest tours this week" : "fallback (no calendar-ready lead assignee)"}: ${counts.get(top.userId) ?? 0} tours`,
-    };
-  }
-  return null;
 }
 
 async function membershipOf(ctx: QueryCtx, orgId: string, userId: Id<"users">): Promise<Doc<"memberships"> | null> {
@@ -151,26 +78,132 @@ function firstName(full: string | undefined): string | undefined {
 
 // --- Leasing leads -----------------------------------------------------------------
 
+/** The building's street line, for the assignment reason staff see. */
+function streetOf(property: Doc<"properties">): string {
+  return (property.address?.formatted ?? property.name).split(",")[0].trim() || property.name;
+}
+
 /**
- * log_lead: capture (merged into the call's qualifications row), classify (flags are staff-facing
- * only), assign an asset manager once, and tell them + the admins once contact info exists.
+ * The caller picked this building: hand the lead to its asset manager, unless an admin assigned it
+ * by hand (leadRoutingLib.decideBuildingRoute). The building must be this team's. Never texts; the
+ * caller decides that (notifyLead, or the tour text).
+ */
+async function routeToBuilding(
+  ctx: MutationCtx,
+  orgId: string,
+  qualificationId: Id<"qualifications">,
+  propertyId: Id<"properties">,
+  elId: string,
+): Promise<void> {
+  const property = await ctx.db.get(propertyId);
+  if (!property || property.orgId !== orgId) return;
+  const q = await ctx.db.get(qualificationId);
+  if (!q) return;
+
+  const units = (
+    await ctx.db
+      .query("units")
+      .withIndex("by_property", (x) => x.eq("propertyId", propertyId))
+      .collect()
+  ).filter((u) => u.orgId === orgId);
+  const memberIds = new Set((await orgMembers(ctx, orgId)).map((m) => String(m.userId)));
+  const amId = buildingAssetManager(
+    units.map((u) => String(u.assetManagerUserId)),
+    memberIds,
+  );
+  const decision = decideBuildingRoute(
+    { assignedUserId: q.assignedUserId, assignedBy: q.assignedBy, assignedPropertyId: q.assignedPropertyId },
+    { propertyId: String(propertyId), assetManagerUserId: amId },
+  );
+  if (decision.action === "keep") return;
+
+  const userId = decision.userId as Id<"users">;
+  const now = Date.now();
+  await ctx.db.patch(qualificationId, {
+    assignedUserId: userId,
+    assignedBy: "auto_building",
+    assignedPropertyId: propertyId,
+    assignedAt: decision.ownerChanged ? now : (q.assignedAt ?? now),
+    assignmentReason: `asset manager of ${streetOf(property)}`,
+    updatedAt: now,
+  });
+  if (decision.ownerChanged) {
+    const m = await membershipOf(ctx, orgId, userId);
+    if (m) await ctx.db.patch(m._id, { lastLeadAssignedAt: now });
+    await writeAudit(ctx, {
+      orgId,
+      entity: "conversation",
+      entityId: elId,
+      action: "lead_assigned",
+      from: q.assignedUserId ? String(q.assignedUserId) : undefined,
+      to: String(userId),
+      note: `building picked: ${streetOf(property)}`,
+    });
+  }
+}
+
+/**
+ * The "new lead" text (leadRoutingLib.leadTextRecipients): once the lead has a name or number, the
+ * admins and the owner if there is one; later, a new owner by building on their own. Never anyone else.
+ */
+async function notifyLead(ctx: MutationCtx, orgId: string, qualificationId: Id<"qualifications">): Promise<void> {
+  const q = await ctx.db.get(qualificationId);
+  if (!q) return;
+  const plan = leadTextRecipients({
+    hasContact: Boolean(q.callerName || q.callerPhone),
+    notified: q.leadNotifiedAt !== undefined,
+    notifiedUserId: q.leadNotifiedUserId,
+    assignedUserId: q.assignedUserId,
+    assignedBy: effectiveAssignedBy(q),
+  });
+  if (!plan) return;
+  const assigneeId = (plan.assignee as Id<"users"> | null) ?? null;
+  const staff = plan.kind === "first" ? await staffRecipientIds(ctx, orgId) : [];
+  await scheduleNotify(ctx, {
+    orgId,
+    userIds: dedupe([...(assigneeId ? [assigneeId] : []), ...staff]),
+    template: "lead_assigned",
+    data: {
+      firstName: firstName(q.callerName),
+      phone: q.callerPhone,
+      assignee: assigneeId ? await firstNameOf(ctx, assigneeId) : undefined,
+      path: "/leads",
+    },
+  });
+  await ctx.db.patch(qualificationId, {
+    leadNotifiedAt: q.leadNotifiedAt ?? Date.now(),
+    ...(assigneeId ? { leadNotifiedUserId: assigneeId } : {}),
+  });
+}
+
+async function assigneeFirstName(ctx: QueryCtx, qualificationId: Id<"qualifications">): Promise<string | null> {
+  const q = await ctx.db.get(qualificationId);
+  return q?.assignedUserId ? await firstNameOf(ctx, q.assignedUserId) : null;
+}
+
+/**
+ * log_lead: capture (merged into the call's qualifications row) and classify (flags are staff-facing
+ * only). The lead stays unassigned unless the caller picked a building (`propertyId`, matched from
+ * spoken_building on this team's buildings), which routes it to that building's asset manager. Then
+ * the admins (and the owner, if any) are texted once contact info exists.
  */
 export const captureLead = internalMutation({
-  args: { orgId: v.string(), ...upsertArgs },
+  args: { orgId: v.string(), propertyId: v.optional(v.id("properties")), ...upsertArgs },
   handler: async (
     ctx,
-    { orgId, ...args },
+    { orgId, propertyId, ...args },
   ): Promise<{ qualificationId: Id<"qualifications">; assignedFirstName: string | null }> => {
     // The row the Leads page lists must exist before the qualification links to it (see
     // ensureLeadConversation); never allowed to block capturing the lead.
     await ensureLeadConversation(ctx, orgId, args.elevenLabsConversationId);
     const qualificationId = await upsertQualification(ctx, args);
-    const assigned = await ensureAssigned(ctx, orgId, qualificationId, args.elevenLabsConversationId);
-    return { qualificationId, assignedFirstName: assigned };
+    if (propertyId) await routeToBuilding(ctx, orgId, qualificationId, propertyId, args.elevenLabsConversationId);
+    await notifyLead(ctx, orgId, qualificationId);
+    return { qualificationId, assignedFirstName: await assigneeFirstName(ctx, qualificationId) };
   },
 });
 
-/** Routes an existing qualification (check_qualification's capture path) without changing its fields. */
+/** check_qualification's capture path: links the row and sends the "new lead" text if due. Never assigns. */
 export const routeLead = internalMutation({
   args: { orgId: v.string(), elevenLabsConversationId: v.string() },
   handler: async (ctx, args): Promise<{ assignedFirstName: string | null }> => {
@@ -183,144 +216,46 @@ export const routeLead = internalMutation({
     if (!q) return { assignedFirstName: null };
     const convId = await ensureLeadConversation(ctx, args.orgId, args.elevenLabsConversationId);
     if (convId && !q.conversationId) await ctx.db.patch(q._id, { conversationId: convId });
-    return { assignedFirstName: await ensureAssigned(ctx, args.orgId, q._id, args.elevenLabsConversationId) };
+    await notifyLead(ctx, args.orgId, q._id);
+    return { assignedFirstName: await assigneeFirstName(ctx, q._id) };
   },
 });
 
-/** Assigns if not yet (or the previous assignee is no longer valid), then notifies once. */
-async function ensureAssigned(
-  ctx: MutationCtx,
-  orgId: string,
-  qualificationId: Id<"qualifications">,
-  elId: string,
-  notify = true,
-): Promise<string | null> {
-  const q = await ctx.db.get(qualificationId);
-  if (!q) return null;
-  const now = Date.now();
-
-  let assigneeId = q.assignedUserId;
-  if (assigneeId) {
-    // Keep a valid assignment; replace one whose owner left, lost the role or went out of office.
-    const m = await membershipOf(ctx, orgId, assigneeId);
-    if (!m || !isAssetManager(m) || isOutOfOffice(m, now)) assigneeId = undefined;
-  }
-  if (!assigneeId) {
-    const picked = await pickLeadAssignee(ctx, orgId);
-    if (picked) {
-      assigneeId = picked.member.userId;
-      await ctx.db.patch(qualificationId, {
-        assignedUserId: assigneeId,
-        assignedAt: now,
-        assignmentReason: picked.reason,
-        updatedAt: now,
-      });
-      const m = await membershipOf(ctx, orgId, assigneeId);
-      if (m) await ctx.db.patch(m._id, { lastLeadAssignedAt: now });
-      await writeAudit(ctx, {
-        orgId,
-        entity: "conversation",
-        entityId: elId,
-        action: "lead_assigned",
-        to: String(assigneeId),
-        note: picked.reason,
-      });
-    }
-  }
-
-  const fresh = (await ctx.db.get(qualificationId)) ?? q;
-  const assigneeName = assigneeId ? await firstNameOf(ctx, assigneeId) : null;
-  // Text staff once, as soon as there is somebody to call. A lead logged before the caller gave a
-  // name or number waits; the next log_lead call that adds one sends it.
-  if (notify && !fresh.leadNotifiedAt && (fresh.callerName || fresh.callerPhone)) {
-    const staff = await staffRecipientIds(ctx, orgId);
-    await scheduleNotify(ctx, {
-      orgId,
-      userIds: dedupe([...(assigneeId ? [assigneeId] : []), ...staff]),
-      template: "lead_assigned",
-      data: {
-        firstName: firstName(fresh.callerName),
-        phone: fresh.callerPhone,
-        assignee: assigneeName ?? undefined,
-        path: "/leads",
-      },
-    });
-    await ctx.db.patch(qualificationId, { leadNotifiedAt: now });
-  }
-  return assigneeName;
-}
-
-const BACKFILL_MAX_LEADS = 200;
-const BACKFILL_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
-const BACKFILL_SCAN_LIMIT = 600;
-
 /**
- * Assigns this team's currently unassigned leads (last 30 days) with the normal rule. Never texts
- * anyone (notify off; leadNotifiedAt stays unset). Skips rows that already have an assignee, so
- * running it twice cannot double-assign. At most BACKFILL_MAX_LEADS per run. Writes one summary
- * audit row. orgId must come from a trusted caller (session or internal).
+ * find_tour_times with a building the caller picked: the lead goes to that building's asset manager
+ * now, even if no tour is booked in the end. Same rules as captureLead.
  */
-export async function backfillUnassignedLeadsForOrg(
-  ctx: MutationCtx,
-  orgId: string,
-  actorUserId?: Id<"users">,
-): Promise<{ assigned: number; scanned: number }> {
-  const since = Date.now() - BACKFILL_WINDOW_MS;
-  const convs = await ctx.db
-    .query("conversations")
-    .withIndex("by_org_and_started", (q) => q.eq("orgId", orgId).gte("startedAt", since))
-    .order("desc")
-    .take(BACKFILL_SCAN_LIMIT);
-  let assigned = 0;
-  let scanned = 0;
-  for (const c of convs) {
-    if (assigned >= BACKFILL_MAX_LEADS) break;
-    if (!c.elevenLabsConversationId) continue;
-    const elId = c.elevenLabsConversationId;
-    const q = await ctx.db
-      .query("qualifications")
-      .withIndex("by_elevenlabs_conversation_id", (x) => x.eq("elevenLabsConversationId", elId))
-      .first();
-    if (!q || q.assignedUserId) continue;
-    scanned += 1;
-    const name = await ensureAssigned(ctx, orgId, q._id, elId, false);
-    if (name !== null) assigned += 1;
-  }
-  await writeAudit(ctx, {
-    orgId,
-    entity: "config",
-    entityId: "lead_backfill",
-    action: "leads_backfill_assigned",
-    actorUserId,
-    note: `Assigned ${assigned} of ${scanned} unassigned lead(s) from the last 30 days (max ${BACKFILL_MAX_LEADS} per run). No texts sent.`,
-  });
-  return { assigned, scanned };
-}
-
-/** Trigger later with:  npx convex run leads:backfillUnassignedLeads '{"orgId":"<org id>"}' */
-export const backfillUnassignedLeads = internalMutation({
-  args: { orgId: v.id("organizations") },
-  handler: async (ctx, args) => await backfillUnassignedLeadsForOrg(ctx, args.orgId),
+export const routeLeadToBuilding = internalMutation({
+  args: { orgId: v.string(), elevenLabsConversationId: v.string(), propertyId: v.id("properties") },
+  handler: async (ctx, args): Promise<void> => {
+    await ensureLeadConversation(ctx, args.orgId, args.elevenLabsConversationId);
+    const qualificationId = await upsertQualification(ctx, { elevenLabsConversationId: args.elevenLabsConversationId });
+    await routeToBuilding(ctx, args.orgId, qualificationId, args.propertyId, args.elevenLabsConversationId);
+    await notifyLead(ctx, args.orgId, qualificationId);
+  },
 });
 
 /**
- * A tour was booked (or moved to another person): the lead belongs to whoever the tour is with.
- * Texts that person and the admins "tour booked" (first name + phone + time only).
+ * A tour was booked (or moved): the lead goes to the asset manager of the tour's building
+ * (`propertyId`, if one was chosen) under the usual rules; it is NOT handed to whoever gives the tour.
+ * With `notify`, the tour host, the lead's owner and the admins get "tour booked" (first name + phone +
+ * time only), which also counts as the "new lead" text. Without it, only a due "new lead" text goes.
  */
-export const assignOnTour = internalMutation({
+export const leadTourBooked = internalMutation({
   args: {
     orgId: v.string(),
     elevenLabsConversationId: v.string(),
     userId: v.id("users"),
+    propertyId: v.optional(v.id("properties")),
     callerName: v.optional(v.string()),
     callerPhone: v.optional(v.string()),
     when: v.string(),
     notify: v.boolean(),
   },
   handler: async (ctx, args): Promise<void> => {
-    const m = await membershipOf(ctx, args.orgId, args.userId);
-    if (!m || !isAssetManager(m)) return;
-    const now = Date.now();
+    // Anyone on a team's tour list may host (tourStaffLib), so only team membership is checked here.
+    const host = await membershipOf(ctx, args.orgId, args.userId);
+    if (!host) return;
 
     await ensureLeadConversation(ctx, args.orgId, args.elevenLabsConversationId);
     const qualificationId = await upsertQualification(ctx, {
@@ -328,34 +263,21 @@ export const assignOnTour = internalMutation({
       callerName: args.callerName,
       callerPhone: args.callerPhone,
     });
+    if (args.propertyId) {
+      await routeToBuilding(ctx, args.orgId, qualificationId, args.propertyId, args.elevenLabsConversationId);
+    }
+    if (!args.notify) {
+      await notifyLead(ctx, args.orgId, qualificationId);
+      return;
+    }
+
     const q = await ctx.db.get(qualificationId);
     if (!q) return;
-
-    const changed = q.assignedUserId !== args.userId;
-    if (changed) {
-      await ctx.db.patch(qualificationId, {
-        assignedUserId: args.userId,
-        assignedAt: now,
-        assignmentReason: "tour booked with this asset manager",
-        updatedAt: now,
-      });
-      await ctx.db.patch(m._id, { lastLeadAssignedAt: now });
-      await writeAudit(ctx, {
-        orgId: args.orgId,
-        entity: "conversation",
-        entityId: args.elevenLabsConversationId,
-        action: "lead_assigned",
-        from: q.assignedUserId ? String(q.assignedUserId) : undefined,
-        to: String(args.userId),
-        note: "tour booked",
-      });
-    }
-    if (!args.notify) return;
-
     const staff = await staffRecipientIds(ctx, args.orgId);
+    const owner = q.assignedUserId ?? null;
     await scheduleNotify(ctx, {
       orgId: args.orgId,
-      userIds: dedupe([args.userId, ...staff]),
+      userIds: dedupe([args.userId, ...(owner ? [owner] : []), ...staff]),
       template: "tour_booked",
       data: {
         firstName: firstName(q.callerName ?? args.callerName),
@@ -365,7 +287,104 @@ export const assignOnTour = internalMutation({
         path: "/leads",
       },
     });
-    await ctx.db.patch(qualificationId, { leadNotifiedAt: q.leadNotifiedAt ?? now });
+    await ctx.db.patch(qualificationId, {
+      leadNotifiedAt: q.leadNotifiedAt ?? Date.now(),
+      ...(owner ? { leadNotifiedUserId: owner } : {}),
+    });
+  },
+});
+
+// --- Manual assignment (Leads page, admins only) --------------------------------------
+
+/** Who an admin may assign a lead to: this team's asset managers and admins, by name. */
+export const assignableMembers = query({
+  args: {},
+  handler: async (ctx): Promise<Array<{ userId: Id<"users">; name: string }>> => {
+    const org = await currentOrg(ctx);
+    if (!org || !isAdminView(org)) return [];
+    const out: Array<{ userId: Id<"users">; name: string }> = [];
+    for (const m of await orgMembers(ctx, org.orgId)) {
+      const roles = appRolesOf(m.role, m.jobRoles);
+      if (!roles.includes("asset_manager") && !roles.includes("admin")) continue;
+      out.push({ userId: m.userId, name: fullNameOf(await ctx.db.get(m.userId)) });
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  },
+});
+
+/**
+ * An admin assigns a lead by hand (assignedBy "manual": Sarah never changes it), or sets it back to
+ * unassigned (`userId` empty), after which picking a building routes it again. Admin view only,
+ * checked here; the lead must be one of this team's calls. assignedPropertyId is never touched: a
+ * hand-assigned lead keeps the building it was routed to, so a bulk asset-manager change
+ * (bulkReassign) still finds it; decideBuildingRoute keeps a manual lead with Sarah regardless.
+ */
+export const assignLead = mutation({
+  args: { conversationId: v.optional(v.string()), userId: v.optional(v.union(v.string(), v.null())) },
+  handler: async (ctx, args): Promise<{ assigneeName: string | null }> => {
+    const org = await requireAdminView(ctx);
+    const convId = args.conversationId ? ctx.db.normalizeId("conversations", args.conversationId) : null;
+    const conv = convId ? await ctx.db.get(convId) : null;
+    if (!conv || conv.orgId !== org.orgId) throw new ConvexError("That lead was not found. Refresh the page and try again.");
+
+    const rawUser = typeof args.userId === "string" ? args.userId.trim() : "";
+    let userId: Id<"users"> | null = null;
+    if (rawUser && rawUser !== "unassigned") {
+      userId = ctx.db.normalizeId("users", rawUser);
+      const m = userId ? await membershipOf(ctx, org.orgId, userId) : null;
+      if (!userId || !m) throw new ConvexError("Choose someone on this team to assign the lead to.");
+      const roles = appRolesOf(m.role, m.jobRoles);
+      if (!roles.includes("asset_manager") && !roles.includes("admin")) {
+        throw new ConvexError("Only an asset manager or an admin can be assigned a lead.");
+      }
+    }
+
+    const elId = conv.elevenLabsConversationId;
+    let q = elId
+      ? await ctx.db
+          .query("qualifications")
+          .withIndex("by_elevenlabs_conversation_id", (x) => x.eq("elevenLabsConversationId", elId))
+          .first()
+      : null;
+    if (!q && elId) {
+      const id = await upsertQualification(ctx, { elevenLabsConversationId: elId });
+      q = await ctx.db.get(id);
+    }
+    if (!q) throw new ConvexError("This lead has no call record yet, so it can't be assigned.");
+    if (!q.conversationId) await ctx.db.patch(q._id, { conversationId: conv._id });
+
+    const now = Date.now();
+    if (userId === null) {
+      if (!q.assignedUserId) return { assigneeName: null };
+      await ctx.db.patch(q._id, {
+        assignedUserId: undefined,
+        assignedBy: undefined,
+        assignedAt: undefined,
+        assignmentReason: undefined,
+        updatedAt: now,
+      });
+    } else {
+      if (q.assignedUserId === userId && effectiveAssignedBy(q) === "manual") {
+        return { assigneeName: fullNameOf(await ctx.db.get(userId)) };
+      }
+      await ctx.db.patch(q._id, {
+        assignedUserId: userId,
+        assignedBy: "manual",
+        assignedAt: now,
+        assignmentReason: "assigned by an admin",
+        updatedAt: now,
+      });
+    }
+    await writeAudit(ctx, {
+      orgId: org.orgId,
+      entity: "conversation",
+      entityId: elId ?? String(conv._id),
+      action: userId ? "lead_assigned_manual" : "lead_unassigned",
+      actorUserId: org.user._id,
+      from: q.assignedUserId ? String(q.assignedUserId) : undefined,
+      to: userId ? String(userId) : "unassigned",
+    });
+    return { assigneeName: userId ? fullNameOf(await ctx.db.get(userId)) : null };
   },
 });
 

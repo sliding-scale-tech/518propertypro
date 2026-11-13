@@ -509,15 +509,95 @@ export function reachableList(menu: MenuEntry[]): string {
 }
 
 /**
- * The phone menu Sarah reads to an existing owner, in the client's wording (Sarah Configuration
- * section 13), in directory order and only for people with a number. Keys stay the directory
- * position, so a gap is possible ("Press 1 for Pat Fiore. Press 4 for Nina. Or you can just say the name.").
- * One short sentence per option, so the voice pauses between them. "" when nobody can be reached.
+ * How a person is named inside a spoken list: the role only where the directory has one, in lower
+ * case mid-sentence ("Delia (Accounting)" -> "Delia in accounting"). Acronyms ("HR") stay as written.
+ */
+function listName(m: MenuEntry): string {
+  const name = nameOf(m.label);
+  if (!m.role) return name;
+  const role = m.role
+    .split(" ")
+    .map((w) => (/^[A-Z][a-z]/.test(w) ? w.toLowerCase() : w))
+    .join(" ");
+  return `${name} in ${role}`;
+}
+
+/** "A", "A or B", "A, B, or C". */
+function joinNames(names: string[]): string {
+  if (names.length <= 1) return names.join("");
+  if (names.length === 2) return `${names[0]} or ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, or ${names[names.length - 1]}`;
+}
+
+/** The keypad keys, for the prompt only (never read out): "1 Pat Fiore, 2 Alex Buell, 4 Nina". */
+export function menuKeyList(menu: MenuEntry[]): string {
+  return menu
+    .filter((m) => m.phone)
+    .map((m) => `${m.key} ${m.spoken}`)
+    .join(", ");
+}
+
+/**
+ * The phone menu Sarah reads to an existing owner after verify_owner returned verified: the people
+ * Pat listed (Sarah Configuration section 13), in directory order and only for people with a number,
+ * said conversationally with no "press N" (user decision 2026-11-13). The keypad still works
+ * silently: a single digit is that person's directory position (findMenuEntry).
+ * "Who would you like to speak with? I can connect you with Pat Fiore, Nina, or Delia in accounting."
+ * "" when nobody can be reached.
  */
 export function spokenMenu(menu: MenuEntry[]): string {
-  const items = menu.filter((m) => m.phone).map((m) => `Press ${m.key} for ${m.spoken}.`);
-  if (items.length === 0) return "";
-  return `${items.join(" ")} Or you can just say the name.`;
+  const names = menu.filter((m) => m.phone).map(listName);
+  if (names.length === 0) return "";
+  if (names.length === 1) return `Would you like me to put you through to ${names[0]}?`;
+  return `Who would you like to speak with? I can connect you with ${joinNames(names)}.`;
+}
+
+/**
+ * Who a NEW owner (wants the company to manage a property) is pointed to (B46): the directory entry
+ * for Alex (client doc: "Route property owners interested in hiring 518 Property Pro to Alex"),
+ * matched by first name, else one whose role names owners or new business. Only someone who can be
+ * put through; null when there is no such entry, and then the menu recommends nobody.
+ */
+const isAlex = (m: MenuEntry) => /^alex(ander)?$/i.test(firstName(m.label));
+
+export function newOwnerContact(menu: MenuEntry[]): MenuEntry | null {
+  const reachable = menu.filter((m) => m.phone);
+  const byName = reachable.find(isAlex);
+  if (byName) return byName;
+  return reachable.find((m) => !!m.role && /\b(owners?|new business|business development)\b/i.test(m.role)) ?? null;
+}
+
+/**
+ * The say line route_owner_prospect returns when the menu is live. It and spokenNewOwnerMenu are one
+ * turn, so the menu itself carries no second thank-you.
+ */
+export const NEW_OWNER_LOGGED_SAY = "Thanks, I've passed your details along.";
+
+/**
+ * The phone menu Sarah reads to a NEW owner after route_owner_prospect (B46), right after
+ * NEW_OWNER_LOGGED_SAY in the same turn. Built from the directory like spokenMenu (only people with
+ * a number, no "press N"; the keypad still works silently), recommending newOwnerContact:
+ * "Alex Buell looks after new properties, so he's the best person to speak with. Shall I put you
+ * through to him? Or I can connect you with Pat Fiore, Nikki, Nina, Delia in accounting, or Alyssa."
+ * Without a recommended contact it is spokenMenu ("Who would you like to speak with? ...").
+ * "" when nobody can be reached.
+ */
+export function spokenNewOwnerMenu(menu: MenuEntry[]): string {
+  const reachable = menu.filter((m) => m.phone);
+  if (reachable.length === 0) return "";
+  const rec = newOwnerContact(menu);
+  if (!rec) return spokenMenu(menu);
+  // "he" only for Alex (Alex Buell); a contact found by role gets no guessed pronoun.
+  const head = isAlex(rec)
+    ? `${listName(rec)} looks after new properties, so he's the best person to speak with. Shall I put you through to him?`
+    : `${listName(rec)} looks after new properties and is the best person to speak with. Shall I put you through?`;
+  const others = reachable.filter((m) => m !== rec).map(listName);
+  return others.length ? `${head} Or I can connect you with ${joinNames(others)}.` : head;
+}
+
+/** What Sarah says when a new owner already asked for someone in the directory (B46): no menu. */
+export function namedPersonLine(entry: MenuEntry): string {
+  return `Sure, let me put you through to ${listName(entry)}.`;
 }
 
 /**
@@ -803,18 +883,31 @@ export const OWNER_ADDRESS_RULE =
   "spoken_property_address is ONLY the address the caller said in this call. Never fill it from an " +
   "example, a previous call, or a guess. If they haven't said one, ask first.";
 
+/** The question that tells an existing owner from a new one (B46). Asked once, only if they have not said. */
+export const OWNER_KIND_QUESTION = "Do you already have a property with us, or are you looking for us to manage one?";
+
 /** The OWNER CALL ROUTING section. Only composed while the menu is live and someone can be reached. */
 export function composeOwnerRoutingBlock(menu: MenuEntry[], company: string): string {
   const other = menu.filter((m) => !m.phone && m.label);
-  return `OWNER CALL ROUTING (existing property owners only; the one exception to "do not connect anyone"):
-Use this only once the caller has said they own a property that ${company} manages. Tenants,
-prospects, vendors and everyone else never hear about it and are never put through: follow their
-usual flow, and if they ask for a staff member, take a message the usual way. An owner who wants
-${company} to manage a property is a prospect: route_owner_prospect, as before.
+  const contact = newOwnerContact(menu);
+  // The named-person example: someone reachable who is not the recommended contact, else anyone reachable.
+  const reachable = menu.filter((m) => m.phone);
+  const example = reachable.find((m) => m !== contact) ?? reachable[0] ?? null;
+  return `OWNER CALL ROUTING (property owners only; the one exception to "do not connect anyone"):
+Use this only for a property owner: an EXISTING owner (owns a property that ${company} manages) or a
+NEW owner (wants ${company} to manage a property). Tenants, renters, vendors and everyone else never
+hear about it and are never put through: follow their usual flow, and if they ask for a staff
+member, take a message the usual way.
+EXISTING OR NEW: if an owner has not said which, ask once: "${OWNER_KIND_QUESTION}"
+Skip it if they already said. Take the answer as which path to follow; only verify_owner decides
+whether an existing owner is put through.
+
+EXISTING OWNERS:
 The phone menu, word for word, ONLY after verify_owner returned verified: "${spokenMenu(menu)}"${
     other.length ? `\nNot reachable by phone (take a message): ${other.map((m) => `${m.key}: ${m.spoken}`).join(", ")}.` : ""
   }
-Read the menu at a calm pace, one option at a time; don't rush it.
+Keypad keys, for you only: ${menuKeyList(menu)}. Never say a key number or "press" to the caller.
+Read the menu at a calm pace; don't rush it.
 Order, one step per turn: property, name, email, verify, menu, availability, transfer. If they name
 who they want early, remember it.
 1. Ask which property they own with ${company}. Call verify_owner with that address only, ask its
@@ -847,8 +940,32 @@ ${
 8. Otherwise say its say line, then take a message: their name, the best callback number (rule 8),
    and what it is about, one question each, skipping what they already said. Call
    take_staff_message (person: who they wanted, else "the team"), then say its say line.
-If verify_owner, check_staff_availability or the transfer fails, errors or gives no answer, never end
-the call: say you can take a message instead, then step 8.
-Never transfer anyone verify_owner did not verify in this call. Never give a staff member's number,
-never promise they will pick up, and never offer "press 0".`;
+A caller who said they are an existing owner stays on this path: if verify_owner does not verify
+them, never switch them to the new-owner path.
+
+NEW OWNERS (want ${company} to manage a property), one step per turn:
+A. Never call verify_owner and never ask for an email on file. A new owner gets nothing about any
+   existing owner, property, statement, payment or account: if they ask, say the team will follow up.
+B. Ask their name, then the best callback number (rule 8), then the property's address or city, one
+   question each, skipping what they already said. Call route_owner_prospect with them.
+C. If it returns menu_live true, say its say line, then in the same turn:
+   - If they already asked for someone on the keypad list above (by first or full name), skip the
+     menu: say "Sure, let me put you through to <their name as the keypad list has it>."${
+       example ? ` (for "${firstName(example.label)}": "${namedPersonLine(example)}")` : ""
+     },
+     then call check_staff_availability with that person straight away, then step 7. Someone on
+     the not-reachable list: call check_staff_availability, then step 8.
+   - Otherwise (nobody named, or a name not in the directory), read the new-owner menu, word for
+     word, then stop and wait: "${spokenNewOwnerMenu(menu)}"
+   If it returns menu_live false, or does not return recorded true after one retry, say its say line
+   or that Alex will call them back, and read no menu.
+D. Then steps 6 to 8 above, as for an existing owner: a single keypad digit after the menu is that
+   key; check_staff_availability; transfer_owner_call; otherwise a message with take_staff_message
+   (person: who they wanted, else ${contact ? `"${contact.label}"` : `"the team"`}).
+
+If verify_owner, route_owner_prospect, check_staff_availability or the transfer
+fails, errors or gives no answer, never end the call: say you can take a message instead, then step 8.
+Never transfer anyone except an existing owner verify_owner verified in this call or a new owner
+route_owner_prospect recorded in this call. Never give a staff member's number, never promise they
+will pick up, and never offer "press 0".`;
 }

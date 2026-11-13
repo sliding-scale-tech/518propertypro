@@ -27,6 +27,7 @@ import { Card, FlowStrip, IconTile, ListRow, Pill, SevChip, cx } from "@/compone
 import type { Tone } from "@/components/ui";
 import { AdminLeadsCard } from "@/components/dashboard/lead-cards";
 import { FollowUpCard } from "@/components/dashboard/follow-up-card";
+import { LeasesCard } from "@/components/dashboard/leases-card";
 import { AssetManagersCard, TechniciansCard } from "@/components/dashboard/people-cards";
 import { browserTimeZone, greetingIn, longDateIn, shortDateIn } from "@/components/dashboard/format";
 
@@ -373,6 +374,8 @@ export function AdminDashboard() {
           </Card>
           <FollowUpCard />
         </div>
+
+        <LeasesCard />
 
         <Card>
           <div className="mb-3 flex items-center justify-between gap-3">

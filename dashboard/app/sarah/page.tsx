@@ -2,6 +2,8 @@
 
 import { useAction, useMutation, useQuery } from "convex/react";
 import { ArrowDown, ArrowUp, CheckCircle2, Loader2, Plus, Trash2 } from "lucide-react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { api } from "@/convex/_generated/api";
 import {
@@ -13,7 +15,6 @@ import {
   flowsOf,
   isApprovalRequired,
   isFlowKey,
-  ownerRoutingStatus,
   tenantMessagesOf,
   type FlowKey,
   type MissingItem,
@@ -27,31 +28,31 @@ import { Btn, Card, CardHead, ConfirmDialog, Field, PageHeader, Pill, Seg } from
 import { errorMessage, useToast } from "@/components/toast";
 import { ItemModal } from "@/components/sarah/item-modal";
 import { PilotPanel } from "@/components/sarah/pilot-panel";
+import { SarahPushStatus } from "@/components/sarah/push-status";
 import { QuestionFlowEditor } from "@/components/sarah/question-flow";
-import { PhoneLine } from "@/components/sarah/phone-line";
-import { RoutingEditor, fromRoutingDraft, routingDraftProblems, toRoutingDraft } from "@/components/sarah/routing-editor";
+import { routingDraftProblems, toRoutingDraft } from "@/components/sarah/routing-editor";
+import {
+  PHONE_ROUTING_HREF,
+  initialSarahView,
+  isBasicTab,
+  readStoredAdvanced,
+  storeAdvanced,
+  visibleSarahTabs,
+  type SarahTabId,
+} from "@/components/sarah/sarah-tabs";
 
 /**
- * Sarah configuration (build plan P17). Everything here edits a DRAFT; nothing changes on live
- * calls until Publish. The server enforces every rule the buttons show (who may edit, phone formats).
- * Admins have full power: switching a call type on or saving an edit approves the wording in the same
- * step (audited). Only a non-admin view keeps the approval gates.
+ * Sarah configuration (build plan P17). One Save (B43): an admin's save goes live for new calls on its
+ * own (new version + automatic push; the status line under Save shows how it went). There is no Publish
+ * step. The server enforces every rule the buttons show (who may edit, phone formats). Admins have full
+ * power: switching a call type on or saving an edit approves the wording in the same step (audited).
+ * Only a non-admin view keeps the approval gates: their edit goes live when an admin approves it.
+ * Version history, the setup checklist and "Approve all drafts" are behind the Advanced switch.
  */
 
-const TABS = [
-  { id: "call-types", label: "Call types" },
-  { id: "maintenance", label: "Maintenance questions" },
-  { id: "other-calls", label: "Other call types" },
-  { id: "severity", label: "Severity" },
-  { id: "emergency", label: "Emergency scripts" },
-  { id: "escalation", label: "Escalation contacts" },
-  { id: "routing", label: "Routing directory" },
-  { id: "leasing", label: "Leasing" },
-  { id: "tenant-messages", label: "Tenant messages" },
-  { id: "identity", label: "Identity" },
-  { id: "phone-line", label: "Phone line" },
-] as const;
-type TabId = (typeof TABS)[number]["id"];
+// The tabs and the default "basic" set (BASIC_TABS) live in components/sarah/sarah-tabs.ts. Phone line and
+// Routing directory are on the Team page (/team?tab=phone).
+type TabId = SarahTabId;
 
 const INCIDENT_LABEL: Record<SarahConfig["emergencyScripts"][number]["incident"], string> = {
   fire: "Fire or smoke",
@@ -71,7 +72,7 @@ const TENANT_MESSAGE_FIELDS: ReadonlyArray<{ key: TenantMessageKey; label: strin
   { key: "received", label: "Received confirmation", hint: "Sent to confirm we received the maintenance request." },
 ];
 
-const AREA_TAB: Record<MissingItem["area"], TabId> = {
+const AREA_TAB: Record<MissingItem["area"], TabId | "routing"> = {
   "call-types": "call-types",
   maintenance: "maintenance",
   emergency: "emergency",
@@ -223,23 +224,38 @@ function SarahPageInner() {
   const approve = useMutation(api.sarahConfig.approve);
   const approveAllDrafts = useMutation(api.sarahConfig.approveAllDrafts);
   const previewAction = useAction(api.sarahConfig.preview);
-  const publishAction = useAction(api.sarahConfig.publish);
-  const rollbackAction = useAction(api.sarahConfig.rollback);
+  const rollbackMutation = useMutation(api.sarahConfig.rollback);
   const regenerateKb = useAction(api.sarahKb.regenerateNow);
   const toast = useToast();
+  const router = useRouter();
 
   // ?tab=leasing deep link (the old /screening redirects here). Read from window, like the
-  // calendar page does, to avoid a Suspense boundary around the whole page.
-  const [tab, setTab] = useState<TabId>(() => {
-    if (typeof window === "undefined") return "call-types";
-    const t = new URLSearchParams(window.location.search).get("tab");
-    return TABS.find((x) => x.id === t)?.id ?? "call-types";
-  });
+  // calendar page does, to avoid a Suspense boundary around the whole page. A deep link to a hidden
+  // tab switches Advanced on; an old ?tab=routing / ?tab=phone-line goes to the Team page.
+  const [initial] = useState(() =>
+    typeof window === "undefined"
+      ? { tab: "emergency" as TabId, advanced: false, redirectTo: null as string | null }
+      : initialSarahView(new URLSearchParams(window.location.search).get("tab"), readStoredAdvanced()),
+  );
+  const [tab, setTab] = useState<TabId>(initial.tab);
+  // "Advanced (Simplr only)": shows every tab, not just BASIC_TABS. Remembered per browser.
+  const [advanced, setAdvanced] = useState(initial.advanced);
+  const goToTab = (next: TabId) => {
+    if (!isBasicTab(next)) setAdvanced(true);
+    setTab(next);
+  };
+  const toggleAdvanced = (on: boolean) => {
+    setAdvanced(on);
+    storeAdvanced(on);
+    if (!on && !isBasicTab(tab)) setTab(visibleSarahTabs(false)[0].id);
+  };
+  useEffect(() => {
+    if (initial.redirectTo) router.replace(initial.redirectTo);
+  }, [initial.redirectTo, router]);
   // null = no local edits: the page shows the server's draft directly.
   const [edits, setEdits] = useState<SarahConfig | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [previewText, setPreviewText] = useState<string | null>(null);
-  const [confirmPublish, setConfirmPublish] = useState(false);
   const [confirmRollback, setConfirmRollback] = useState<number | null>(null);
   const [openItem, setOpenItem] = useState<string | null>(null);
   const [confirmApproveAll, setConfirmApproveAll] = useState(false);
@@ -285,11 +301,11 @@ function SarahPageInner() {
         toast("Fill in every number on the Leasing tab.", "error");
         return;
       }
-      // Same rules as the server; the field itself is marked on the Routing directory tab.
+      // Same rules as the server; the field itself is marked on the Team page's Phone & routing tab.
       const routingProblem = routingDraftProblems(toRoutingDraft(local.routingDirectory), data.ownLine)[0];
       if (routingProblem) {
-        setTab("routing");
-        toast(routingProblem.message, "error");
+        toast(`${routingProblem.message} Fix it on the Team page, Phone & routing tab.`, "error");
+        router.push(PHONE_ROUTING_HREF);
         return;
       }
       // JSON round-trip drops undefined fields, which Convex arguments do not accept.
@@ -297,20 +313,20 @@ function SarahPageInner() {
       await saveDraft({ config: clean });
       // Not unsaved any more; the server's copy (approvals may have been stripped) syncs in.
       setEdits(null);
-      toast("Draft saved", "success");
+      toast("Saved. Sarah updates for new calls in a few seconds.", "success");
     });
 
   const onApprove = (kind: "callType" | "emergencyScript" | "tenantResponsibility" | "tenantMessage" | "flow", key: string) =>
     run("approve", async () => {
       await approve({ kind, key });
-      toast("Approved", "success");
+      toast("Approved. Sarah updates for new calls in a few seconds.", "success");
     });
 
   const onApproveAll = () =>
     run("approveAll", async () => {
       const r = await approveAllDrafts({});
       setConfirmApproveAll(false);
-      toast(r.approved > 0 ? `Approved ${r.approved} draft${r.approved === 1 ? "" : "s"}. Publish to make it live.` : "Nothing to approve. Everything is already approved.", "success");
+      toast(r.approved > 0 ? `Approved ${r.approved} draft${r.approved === 1 ? "" : "s"}. Sarah updates for new calls in a few seconds.` : "Nothing to approve. Everything is already approved.", "success");
     });
 
   const onRegenerateKb = () =>
@@ -324,28 +340,12 @@ function SarahPageInner() {
       setPreviewText(await previewAction({}));
     });
 
-  const onPublish = () =>
-    run("publish", async () => {
-      const { version, kbResynced } = await publishAction({});
-      setConfirmPublish(false);
-      toast(
-        kbResynced
-          ? `Published version ${version}. Knowledge base was out of date and was re-synced; it will be back in a few seconds.`
-          : `Published version ${version}. Sarah is updated.`,
-        "success",
-      );
-    });
-
   const onRollback = (version: number) =>
     run("rollback", async () => {
-      const { version: v, kbResynced } = await rollbackAction({ version });
+      const { version: v } = await rollbackMutation({ version });
       setConfirmRollback(null);
-      toast(
-        kbResynced
-          ? `Rolled back. Published as version ${v}. Knowledge base was out of date and was re-synced.`
-          : `Rolled back. Published as version ${v}.`,
-        "success",
-      );
+      setEdits(null);
+      toast(`Rolled back. Live as version ${v}; Sarah updates for new calls in a few seconds.`, "success");
     });
 
   const canEdit = data.canEdit;
@@ -358,11 +358,11 @@ function SarahPageInner() {
         title="Sarah config"
         subtitle={
           <>
-            Change what Sarah asks and says without a developer. You edit a draft; nothing changes on live calls
-            until you publish.{" "}
+            Change what Sarah asks and says without a developer. Saving updates Sarah for new calls within a few
+            seconds; a call already in progress keeps its setup.{" "}
             {data.version > 0
-              ? `Live: version ${data.version}, published ${when(data.publishedAt ?? undefined)}.`
-              : "Nothing has been published from here yet, so Sarah is still running her built-in setup."}
+              ? `Live: version ${data.version}, saved ${when(data.publishedAt ?? undefined)}.`
+              : "Nothing has been saved from here yet, so Sarah is still running her built-in setup."}
             {!canEdit ? " You can view this page but not change it." : ""}
             <span className="mt-1 block">
               Texting: texts are sent only for emergencies, to admins. Technician texts are coming later.
@@ -371,9 +371,10 @@ function SarahPageInner() {
         }
       />
 
-      <PilotPanel items={data.items} progress={data.progress} onOpen={setOpenItem} />
+      {advanced ? <PilotPanel items={data.items} progress={data.progress} onOpen={setOpenItem} /> : null}
 
-      {canApprove ? (
+      {/* With Save going live, this only matters for edits still waiting for an admin's approval. */}
+      {advanced && canApprove ? (
         <div className="flex justify-end">
           <button className={btnOutline} disabled={busy !== null} onClick={() => setConfirmApproveAll(true)}>
             Approve all drafts
@@ -381,9 +382,22 @@ function SarahPageInner() {
         </div>
       ) : null}
 
-      <div className="max-w-full overflow-x-auto pb-1">
-        <Seg label="Sarah config sections" value={tab} onChange={setTab} options={TABS.map((t) => ({ value: t.id, label: t.label }))} />
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="max-w-full overflow-x-auto pb-1">
+          <Seg label="Sarah config sections" value={tab} onChange={setTab} options={visibleSarahTabs(advanced).map((t) => ({ value: t.id, label: t.label }))} />
+        </div>
+        <label className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Toggle checked={advanced} onChange={toggleAdvanced} label="Advanced (Simplr only)" />
+          Advanced (Simplr only)
+        </label>
       </div>
+      <p className="text-[13px] text-muted-foreground">
+        The phone line and the routing directory are on the{" "}
+        <Link href={PHONE_ROUTING_HREF} className="font-medium text-primary hover:underline">
+          Team page, Phone &amp; routing tab
+        </Link>
+        .
+      </p>
 
       {/* Disabled for anyone who cannot edit: the server rejects their writes anyway. */}
       <fieldset disabled={!canEdit || busy === "save"} className="space-y-4 border-0 p-0">
@@ -430,7 +444,7 @@ function SarahPageInner() {
                         <button
                           type="button"
                           className="text-xs text-muted-foreground underline"
-                          onClick={() => setTab("other-calls")}
+                          onClick={() => goToTab("other-calls")}
                         >
                           Wording waiting for an admin to approve
                         </button>
@@ -459,7 +473,7 @@ function SarahPageInner() {
           <>
             <Section
               title="Maintenance question flow"
-              hint="The questions Sarah asks on a maintenance call, in order, with follow-ups that only appear when they apply. This is a draft until you publish. Reword freely: nothing here needs approval."
+              hint="The questions Sarah asks on a maintenance call, in order, with follow-ups that only appear when they apply. Saving updates Sarah. Reword freely: nothing here needs approval."
             >
               <QuestionFlowEditor
                 group="maintenance"
@@ -689,31 +703,6 @@ function SarahPageInner() {
           </Section>
         ) : null}
 
-        {tab === "routing" ? (
-          <Section
-            title="Routing directory"
-            hint="The owner call routing menu: who an existing property owner can be put through to, by name, role or keypad key. Sarah never gives these numbers out."
-          >
-            {(() => {
-              const st = ownerRoutingStatus(local);
-              return (
-                <p className={`rounded-xl px-3 py-2 text-[13px] ${st.live ? "bg-success-soft text-success-ink" : "bg-muted"}`}>
-                  <span className="font-medium">{st.live ? "Menu on in this draft." : "Menu off."}</span> {st.reason}
-                </p>
-              );
-            })()}
-            <RoutingEditor
-              value={toRoutingDraft(local.routingDirectory)}
-              onChange={(d) => set((c) => ({ ...c, routingDirectory: fromRoutingDraft(d) }))}
-              readOnly={!canEdit}
-              members={data.members}
-              ownLine={data.ownLine}
-              ownerEmailProperties={data.ownerEmailProperties}
-              showEnable
-            />
-          </Section>
-        ) : null}
-
         {tab === "leasing" ? (
           <Section
             title="Leasing question flow"
@@ -728,7 +717,7 @@ function SarahPageInner() {
         ) : null}
 
         {tab === "leasing" ? (
-          <Section title="Tours and capture" hint="Used when Sarah offers and books tour times. Takes effect when you publish.">
+          <Section title="Tours and capture" hint="Used when Sarah offers and books tour times. Takes effect on new calls after you save.">
             <div className="grid gap-3 sm:grid-cols-2">
               {(
                 [
@@ -848,14 +837,11 @@ function SarahPageInner() {
         ) : null}
       </fieldset>
 
-      {/* Saves immediately and is not part of the draft/publish flow (not prompt behaviour). */}
-      {tab === "phone-line" ? <PhoneLine /> : null}
-
-      {/* The leasing screening questions save on their own, outside the draft/publish flow. */}
+      {/* The leasing screening questions save on their own, separately from the Save button. */}
       {tab === "leasing" ? (
         <div className="space-y-5">
           <p className="text-sm text-muted-foreground">
-            The questions below save immediately and update Sarah on their own; they do not wait for Publish.
+            The questions below save immediately and update Sarah on their own; they do not wait for the Save button.
           </p>
           <BuiltInQuestions />
           <ScreeningQuestions />
@@ -865,7 +851,7 @@ function SarahPageInner() {
       {tab === "identity" ? (
         <Section
           title="Knowledge base: policies document"
-          hint="The document Sarah can search for policy facts. It is rebuilt automatically on every publish from approved, switched-on wording only. Use this to rebuild it from the currently published setup."
+          hint="The document Sarah can search for policy facts. It is rebuilt automatically after every save that updates Sarah, from approved, switched-on wording only. Use this to rebuild it from the live setup."
         >
           <div>
             <button className={btnOutline} disabled={!canEdit || busy !== null} onClick={onRegenerateKb}>
@@ -875,10 +861,11 @@ function SarahPageInner() {
         </Section>
       ) : null}
 
-      {tab === "identity" ? (
-        <Section title="Version history" hint="Every publish is kept. Rolling back publishes that older setup again as a new version.">
+      {/* Behind Advanced: every save that changes Sarah is a version; rolling back also updates Sarah. */}
+      {advanced && tab === "identity" ? (
+        <Section title="Version history" hint="Every save that changes Sarah is kept. Rolling back makes that older setup live again as a new version and updates Sarah.">
           {data.versions.length === 0 ? (
-            <p className="text-sm text-muted-foreground">Nothing published yet.</p>
+            <p className="text-sm text-muted-foreground">Nothing saved yet.</p>
           ) : (
             <ul className="divide-y divide-border">
               {data.versions.map((ver) => (
@@ -903,26 +890,23 @@ function SarahPageInner() {
       <div className="fixed inset-x-0 bottom-[4.25rem] z-30 border-t border-border bg-card/95 px-4 py-3 backdrop-blur lg:bottom-0 lg:left-64">
         <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-2">
           <span className="mr-auto text-sm text-muted-foreground">
-            {unsaved ? "Unsaved changes" : data.dirty ? "Draft saved, not published" : "Draft matches what is live"}
+            {unsaved ? "Unsaved changes" : <SarahPushStatus />}
           </span>
-          <button className={btnOutline} disabled={!canEdit || !unsaved || busy !== null} onClick={onSave}>
-            {busy === "save" ? "Saving…" : "Save draft"}
-          </button>
           <button
             className={btnOutline}
             disabled={unsaved || busy !== null}
-            title={unsaved ? "Save the draft first" : undefined}
+            title={unsaved ? "Save first" : undefined}
             onClick={onPreview}
           >
             {busy === "preview" ? "Building…" : "Preview prompt"}
           </button>
           <button
             className={btnPrimary}
-            disabled={!canEdit || unsaved || busy !== null}
-            title={unsaved ? "Save the draft first" : !canEdit ? "You do not have permission to publish" : undefined}
-            onClick={() => setConfirmPublish(true)}
+            disabled={!canEdit || !unsaved || busy !== null}
+            title={!canEdit ? "You do not have permission to change Sarah" : undefined}
+            onClick={onSave}
           >
-            Publish
+            {busy === "save" ? "Saving…" : "Save"}
           </button>
         </div>
       </div>
@@ -932,7 +916,11 @@ function SarahPageInner() {
           key={openItem}
           itemId={openItem}
           onClose={() => setOpenItem(null)}
-          onGoToTab={(area) => setTab(AREA_TAB[area])}
+          onGoToTab={(area) => {
+            const target = AREA_TAB[area];
+            if (target === "routing") router.push(PHONE_ROUTING_HREF);
+            else goToTab(target);
+          }}
           onOpenItem={setOpenItem}
         />
       ) : null}
@@ -940,7 +928,7 @@ function SarahPageInner() {
       <ConfirmDialog
         open={confirmApproveAll}
         title="Approve all drafts?"
-        message="This approves the emergency scripts, severity levels, tenant-responsibility wording and the resident call-type wording as they stand. Nothing is switched on or published."
+        message="This approves the emergency scripts, severity levels, tenant-responsibility wording and the resident call-type wording as they stand, and updates Sarah with them. Nothing is switched on."
         confirmLabel="Approve all"
         busy={busy === "approveAll"}
         onCancel={() => setConfirmApproveAll(false)}
@@ -948,28 +936,14 @@ function SarahPageInner() {
       />
 
       {previewText !== null ? (
-        <Modal title="Prompt preview (from the saved draft)" onClose={() => setPreviewText(null)}>
+        <Modal title="Prompt preview (from the saved setup)" onClose={() => setPreviewText(null)}>
           <pre className="max-h-[60dvh] overflow-auto whitespace-pre-wrap rounded-lg bg-muted p-3 text-xs leading-5">{previewText}</pre>
-        </Modal>
-      ) : null}
-
-      {confirmPublish ? (
-        <Modal title="Publish to Sarah?" onClose={() => setConfirmPublish(false)}>
-          <p className="text-sm">This changes what Sarah says on live calls.</p>
-          <div className="mt-4 flex justify-end gap-2">
-            <button className={btnOutline} onClick={() => setConfirmPublish(false)} disabled={busy === "publish"}>
-              Cancel
-            </button>
-            <button className={btnPrimary} onClick={onPublish} disabled={busy === "publish"}>
-              {busy === "publish" ? "Publishing…" : "Publish"}
-            </button>
-          </div>
         </Modal>
       ) : null}
 
       {confirmRollback !== null ? (
         <Modal title={`Roll back to version ${confirmRollback}?`} onClose={() => setConfirmRollback(null)}>
-          <p className="text-sm">This changes what Sarah says on live calls, and replaces your current draft.</p>
+          <p className="text-sm">This makes that older setup live again for new calls, and replaces the current setup here.</p>
           <div className="mt-4 flex justify-end gap-2">
             <button className={btnOutline} onClick={() => setConfirmRollback(null)} disabled={busy === "rollback"}>
               Cancel

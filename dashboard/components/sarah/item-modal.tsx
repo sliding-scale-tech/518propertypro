@@ -8,11 +8,13 @@ import { ITEM_STATUS_LABEL, type ItemStatus } from "@/convex/sarahConfigLib";
 import { Btn, ConfirmDialog, Modal, Pill, Seg, type Tone } from "@/components/ui";
 import { errorMessage, useToast } from "@/components/ui/toast";
 import { ContentEditor, toPayload, validateContent, type Content, type Detail } from "./item-forms";
+import { SarahPushStatus } from "./push-status";
 
 /**
  * The Sarah item modal: a proposed script or form, the approval action and the history. The server
  * enforces who may edit and approve (any admin-view user). For an admin, saving an edit approves it
- * in the same step; the history keeps who did what and when.
+ * in the same step and updates Sarah for new calls (B43: no Publish step; the status line shows the
+ * push). The history keeps who did what and when.
  */
 
 const STATUS_TONE: Record<ItemStatus, Tone> = {
@@ -92,6 +94,8 @@ export function ItemModal({
   const [buf, setBuf] = useState<Content | null>(null);
   const [busy, setBusy] = useState(false);
   const [dialog, setDialog] = useState<Dialog>(null);
+  // The "Sarah updated" line shows once this modal saved, approved or reset something.
+  const [acted, setActed] = useState(false);
 
   if (detail === undefined) {
     return (
@@ -121,6 +125,7 @@ export function ItemModal({
     try {
       const msg = await fn();
       if (msg) toast(msg, "success");
+      setActed(true);
     } catch (e) {
       toast(errorMessage(e), "error");
     } finally {
@@ -139,7 +144,7 @@ export function ItemModal({
       const r = await saveItem({ itemId, payload: toPayload(buf) });
       setBuf(null);
       if (!r.changed) return "No changes to save.";
-      return isContact ? "Details saved." : d.canApprove ? "Saved and approved. Publish to make it live." : "Saved. The item is back to draft and needs approval again.";
+      return isContact ? "Details saved." : d.canApprove ? "Saved and approved. Sarah updates for new calls in a few seconds." : "Saved. The item is back to draft and needs approval again.";
     });
   };
 
@@ -165,6 +170,7 @@ export function ItemModal({
       >
         Go to tab
       </button>
+      {acted && d.canApprove ? <SarahPushStatus className="mr-auto" /> : null}
       {editing ? (
         <>
           <Btn onClick={() => setBuf(null)} disabled={busy}>
@@ -204,7 +210,7 @@ export function ItemModal({
               onClick={() =>
                 void run(async () => {
                   await approveItem({ itemId, fingerprint: d.fingerprint });
-                  return "Approved. Publish to make it live.";
+                  return "Approved. Sarah updates for new calls in a few seconds.";
                 })
               }
               disabled={busy || status === "approved" || !!d.approveBlocked}

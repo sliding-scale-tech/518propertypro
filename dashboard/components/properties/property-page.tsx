@@ -8,6 +8,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { TEAM_LABELS, type Team } from "@/convex/rentPaymentsPolicy";
+import { BulkChangeDialog } from "@/components/asset-managers/bulk-change-dialog";
 import { Dialog } from "@/components/properties/dialog";
 import { PropertyForm, type PropertyFormValue } from "@/components/properties/property-form";
 import { PropertyList } from "@/components/properties/property-list";
@@ -414,6 +415,7 @@ function AssetManagerCard({
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<Id<"users"> | null>(null);
   const [applyTo, setApplyTo] = useState<ApplyTo>("units_without_override");
+  const [bulkOpen, setBulkOpen] = useState(false);
 
   // AMs may not read the team list; fall back to the name carried on their visible units.
   const amUnits = useQuery(api.units.list, isAm ? { propertyId: property._id } : "skip");
@@ -469,7 +471,27 @@ function AssetManagerCard({
             </Link>
           ) : null}
         </div>
+        {isAdmin ? (
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
+            <div className="text-[13px] text-muted-foreground">
+              Move all {property.unitCount} unit{property.unitCount === 1 ? "" : "s"} in this building, their open
+              maintenance requests and the open leads this building routed, to one asset manager, with a reason and a
+              preview first. Changing one unit or the default moves open maintenance requests only, not leads.
+            </div>
+            <Btn sm onClick={() => setBulkOpen(true)} disabled={property.unitCount === 0 || managers.length === 0}>
+              Change asset manager
+            </Btn>
+          </div>
+        ) : null}
       </Card>
+
+      {bulkOpen ? (
+        <BulkChangeDialog
+          scope={{ kind: "building", propertyId: property._id, name: property.name }}
+          managers={managers}
+          onClose={() => setBulkOpen(false)}
+        />
+      ) : null}
 
       {pending ? (
         <Dialog title="Change the default asset manager" onClose={() => setPending(null)}>

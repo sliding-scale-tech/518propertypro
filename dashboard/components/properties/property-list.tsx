@@ -5,11 +5,11 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   Card,
   DataTable,
-  Field,
+  FilterSelect,
+  FilterToolbar,
   Pagination,
   Pill,
   SearchBox,
-  Select,
   SortHeader,
   ariaSortOf,
   paginate,
@@ -102,28 +102,38 @@ export function PropertyList<T extends PropertyFinderRow & { _id: string; yourUn
 
   return (
     <Card>
-      <div className="mb-3">
-        <SearchBox
-          id="properties-search"
-          label="Search properties"
-          value={search.input}
-          onChange={search.setInput}
-          onClear={search.clear}
-          placeholder={isAm ? "Search property or address" : "Search property, address or owner"}
-        />
-      </div>
-      <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Field label="Team" htmlFor="properties-team">
-          <Select id="properties-team" value={team} onChange={(e) => setParams({ team: e.target.value || "" })}>
-            <option value="">All teams</option>
-            {TEAMS.map((t) => (
-              <option key={t} value={t}>
-                {TEAM_LABELS[t]}
-              </option>
-            ))}
-          </Select>
-        </Field>
-      </div>
+      <FilterToolbar
+        className="mb-3.5"
+        active={filtered}
+        onClear={() => {
+          search.setInput("");
+          setParams({ team: "", q: "" });
+        }}
+        search={
+          <SearchBox
+            id="properties-search"
+            label="Search properties"
+            value={search.input}
+            onChange={search.setInput}
+            onClear={search.clear}
+            placeholder={isAm ? "Search property or address" : "Search property, address or owner"}
+          />
+        }
+      >
+        <FilterSelect
+          label="Team"
+          active={team !== ""}
+          value={team || "all"}
+          onChange={(e) => setParams({ team: !e.target.value || e.target.value === "all" ? "" : e.target.value })}
+        >
+          <option value="all">All</option>
+          {TEAMS.map((t) => (
+            <option key={t} value={t}>
+              {TEAM_LABELS[t]}
+            </option>
+          ))}
+        </FilterSelect>
+      </FilterToolbar>
       <DataTable
         caption="Properties"
         columns={columns}

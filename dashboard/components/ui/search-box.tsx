@@ -16,6 +16,7 @@ export function SearchBox({
   onChange,
   onClear,
   placeholder,
+  maxLength,
 }: {
   id: string;
   /** Screen-reader label, e.g. "Search payments". */
@@ -24,6 +25,7 @@ export function SearchBox({
   onChange: (v: string) => void;
   onClear: () => void;
   placeholder?: string;
+  maxLength?: number;
 }) {
   return (
     <div>
@@ -37,6 +39,7 @@ export function SearchBox({
           type="search"
           value={value}
           autoComplete="off"
+          maxLength={maxLength}
           placeholder={placeholder}
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={(e) => {

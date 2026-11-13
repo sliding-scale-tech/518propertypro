@@ -10,7 +10,7 @@ import {
   validateQuestionFlows,
 } from "./questionFlowLib";
 import type { QuestionFlows } from "./questionFlowLib";
-import { composeOwnerRoutingBlock, menuOf, routingProblems, routingWarnings } from "./ownerRoutingLib";
+import { composeOwnerRoutingBlock, menuOf, OWNER_KIND_QUESTION, routingProblems, routingWarnings } from "./ownerRoutingLib";
 import type { MenuEntry, RoutingCheckOptions } from "./ownerRoutingLib";
 
 /**
@@ -732,7 +732,7 @@ export function ownerRoutingStatus(c: SarahConfig): { live: boolean; reason: str
   const menu = ownerRoutingMenu(c);
   if (!menu) return { live: false, reason: "Nobody in the directory has a phone number yet." };
   const n = menu.filter((m) => m.phone).length;
-  return { live: true, reason: `In this draft, existing owners can be put through to ${n} ${n === 1 ? "person" : "people"}.` };
+  return { live: true, reason: `In this draft, owners (existing ones after verification, new ones after their details are taken) can be put through to ${n} ${n === 1 ? "person" : "people"}.` };
 }
 
 export function approvedScript(c: SarahConfig, incident: EmergencyScript["incident"]): EmergencyScript | null {
@@ -848,9 +848,11 @@ export function composeStyle(c: SarahConfig): string {
 - You are on a phone call, not filling in a form. One question, then stop and wait for the answer.
 - Never preview what you are going to ask and never say "I have a few questions".
 - Log early, then update. Call the logging tool as soon as you have the core of what they need (for
-  maintenance, what is actually wrong, see STEP 2), ask your next question after its result, and call
-  it again as you learn more. Say it was logged once, when you close the call, never mid-intake, urgent
-  issues included. A life-safety emergency follows its own script.
+  maintenance, what is actually wrong, see STEP 2), and ask your next question after its result. A
+  maintenance request is then updated once more, in the final log (STEP 3), never after each answer;
+  a leasing lead likewise gets one first and one final log_lead (LEASING CALLS step 3); other logging
+  tools are called again as you learn more. Say it was logged once, when you close the
+  call, never mid-intake, urgent issues included. A life-safety emergency follows its own script.
 - Tone tags: only [calm] or [empathetic], and rarely. Never [happy], [excited] or any other tag, and
   none at all in an emergency, in approved wording or in a say line.
 - Optional steps (pets, convenient technician times, photos, "anything else") come only AFTER the
@@ -878,8 +880,48 @@ function severityText(c: SarahConfig): string {
     .join("\n");
 }
 
+/**
+ * The caller-ID lookup switch: the lookup_caller tool (TOOL_DEFS in agents.ts) and STEP 1's "Call
+ * lookup_caller" step. Off since 2026-11-13 because no tenant phone numbers are on file, so it could
+ * never match and only slowed the first turn (5.0s, with the soft-timeout filler, on a real call).
+ * Turn it on once tenant phones are imported: the tool and the prompt step then come back as they
+ * were. The backend (/tools/lookup-caller in http.ts, sarahTools.lookupCaller) is kept for that.
+ * It lives here rather than in agents.ts because this module composes the prompt and is imported by
+ * the /sarah page, which cannot import agents.ts; agents.ts reads it from here.
+ */
+export const CALLER_ID_LOOKUP_ENABLED = false;
+
+/**
+ * find_unit is called once, with the address AND the unit (2026-11-13): a real call ran it three
+ * times, first on the address alone. Shared by both versions of STEP 1.
+ */
+const FIND_UNIT_ONCE = `Call find_unit only once you have BOTH the address and the unit number, asked or
+    already said, and then right away. If they gave the address but not the unit, ask for the unit
+    first, as one question ("And what's your unit number?"), then call find_unit once with both.
+    Never call it on the address alone, unless they say the home is a house or has no unit number:
+    then call it with the address alone.`;
+
+/** STEP 1's identification steps, with or without the caller-ID lookup. */
+function identifySteps(callerIdLookup: boolean): string {
+  if (callerIdLookup) {
+    return ` a. Call lookup_caller. If it matches, confirm it by asking its "say" line ("Am I speaking with
+    [first_name] in unit [unit_label]?") and wait for a yes. On a yes you have their name and unit:
+    do not ask for either again.
+ b. If there is no match, or they say no: get their NAME, then the property name or address, then
+    the unit number, one question each and only what they have not already said (HARD RULE 4).
+    ${FIND_UNIT_ONCE} Confirm what it returns. Once it matches, pass its property_address and
+    unit_label as spoken_address and spoken_unit to the logging tools.`;
+  }
+  return ` a. Start by asking for what they have not already said (HARD RULE 4), one question each: their
+    NAME, then the property name or address, then the unit number. Whatever they already said, in
+    their first sentence or anywhere else in the call, is never asked again.
+ b. ${FIND_UNIT_ONCE} Confirm what it returns by asking its say line and waiting for a yes. Once it
+    matches, pass its property_address and unit_label as spoken_address and spoken_unit to the
+    logging tools.`;
+}
+
 /** The resident-calls section, built from the enabled call types, question lists and severity levels. */
-export function composeResidentCalls(c: SarahConfig): string {
+export function composeResidentCalls(c: SarahConfig, callerIdLookup: boolean = CALLER_ID_LOOKUP_ENABLED): string {
   const maintOn =
     live(c, "maint_general") ||
     live(c, "maint_electrical") ||
@@ -892,15 +934,9 @@ This section supersedes any earlier instruction to escalate resident issues dire
 
 STEP 1, WHO IS CALLING. Once you know you are talking to a current resident, do not run the
 leasing questions. Work down this chain, one step at a time, and stop at the first step that
-matches. Never read out anything about a resident beyond the first name and unit a tool returned,
+matches. Never read out anything about a resident beyond ${callerIdLookup ? "the first name and unit a tool returned" : "the unit find_unit returned"},
 and never confirm or deny who lives in any unit or whether a name belongs to a unit.
- a. Call lookup_caller. If it matches, confirm it by asking its "say" line ("Am I speaking with
-    [first_name] in unit [unit_label]?") and wait for a yes. On a yes you have their name and unit:
-    do not ask for either again.
- b. If there is no match, or they say no: get their NAME, then the property name or address, then
-    the unit number, one question each and only what they have not already said (HARD RULE 4),
-    then call find_unit and confirm what it returns. Once it matches, pass its property_address and
-    unit_label as spoken_address and spoken_unit to the logging tools.
+${identifySteps(callerIdLookup)}
  b2. If find_unit does not match, do not give up straight away. If it returns options
     (similar_units, all_units or address_options), read them as ONE question using its "say"
     line, for example "Is that 182, 184 or 188 Remsen Street?" or "Did you mean unit B2?", and
@@ -956,9 +992,13 @@ is wrong) and listen. Decide the issue_type and the severity level from what the
 Call log_maintenance_request only once the caller said yes to the unit in STEP 1 AND they have said what is actually
 wrong ("the kitchen sink is leaking"). "A maintenance issue" or "a complaint" is not a description:
 ask what's going on first. Then log it right away, with the issue, the severity and the unit
-details (spoken_address, spoken_unit, caller_name). Do not wait for the rest.
-After that, follow the flows below. Call log_maintenance_request again every time you learn
-something worth recording.
+details (spoken_address, spoken_unit, caller_name). Do not wait for the rest. That is the first log.
+After that, follow the flows below WITHOUT calling log_maintenance_request after each answer. Keep
+every answer in mind and send them all in ONE final log, together with the confirmed number (STEP 3).
+Logging less never means forgetting: the final log carries everything said anywhere in the call, and
+you still never ask for anything already said (HARD RULE 4). Log in between only if it turns out to be
+a life-safety emergency (follow LIFE-SAFETY EMERGENCIES) or more urgent than you logged it (log the
+new severity right away).
 
 ${composeFlowSection("GENERAL INTAKE FLOW", "every maintenance call; steps already answered anywhere in the call are skipped", flows.maint_basic)}
 Put the best callback number in callback_phone; if they say to use the number they are calling
@@ -985,7 +1025,7 @@ written here.`
 }
 
 Photos or video (optional, before STEP 3 and the close): only when a flow step asks for them, after
-the issue is logged, and never in a life-safety emergency. If they say yes, call send_photo_link with
+the first log (STEP 2), and never in a life-safety emergency. If they say yes, call send_photo_link with
 note set to what they said (including any limits, such as "photos only, no video"), then say its
 "say" line word for word and in full, spelled letters included, even past 25 words. It either tells
 them which email address to send the photos to, or says their asset manager will follow up about
@@ -1034,9 +1074,11 @@ Score the issue, never the caller. A calm person with no heat is urgent or worse
 about a parking space is still routine. If two things are wrong, score the worse one. If you are
 between two levels, take the lower one. Never say the level out loud.
 
-Never pass "unknown" or a made-up value to satisfy a tool; leave the field out. It is safe to call
-log_maintenance_request many times in one call: each call updates the same request and changes only
-what you send. If it returns logged false, nothing was logged: do what its say and message tell you.
+Never pass "unknown" or a made-up value to satisfy a tool; leave the field out. Each
+log_maintenance_request call updates the same request and changes only what you send, so the final
+log adds to the first and never wipes it. In a routine call that means two calls: the first log
+(STEP 2) and the final log (STEP 3). If it returns logged false, nothing was logged: do what its say
+and message tell you.
 
 STEP 3, CONFIRM THE BEST NUMBER (every repair request that is not a life-safety emergency, after the
 flow and optional steps above and before you close the call. Not for a tenant-responsibility item, a
@@ -1054,15 +1096,20 @@ question that is not a repair, or an unmatched caller. A life-safety emergency f
      yes, so ask "Is that right?" once more.
    - Not 10 digits (or 11 starting with 1)? Say "I need a 10-digit US number, could you say it
      again?" Never guess or fill in digits.
-4. Once they say yes, call log_maintenance_request again with confirmed_phone set to that number and
+4. Once they say yes, make the FINAL LOG: one log_maintenance_request call with issue_type,
+   description, severity and unit_confirmed true again, every detail the first log did not already
+   carry (first_noticed, pets, preferred_access_times, answers and any other field they answered,
+   whenever in the call they said it), and confirmed_phone set to that number with
    confirmed_phone_yes true (and the same number in callback_phone, unless it is the number they are
-   calling from). If the result has confirmed_phone_saved false, do what confirmed_phone_message says:
+   calling from). What the first log sent is kept, so there is no need to send it again; keep every
+   value short. If the result has confirmed_phone_saved false, do what confirmed_phone_message says:
    for a number that is not complete, ask for it again and go back to step 3.
-5. If they will not give a number, do not push: close the call. Never send a number they did not say
-   yes to, and never send the number they are calling from just because you have it.
+5. If they will not give a number, do not push: still make the FINAL LOG (unless step 4 already did)
+   with every detail gathered and no number, then close the call. Never send a number they did not
+   say yes to, and never send the number they are calling from just because you have it.
 Never say anything will be texted or sent to this number.
 
-Closing a maintenance call (only after log_maintenance_request returned logged true, and after STEP 3): say the request has been logged and goes to the property's asset
+Closing a maintenance call (only after STEP 3's final log returned logged true): say the request has been logged and goes to the property's asset
 manager for review, and the team will follow up. Never say it goes to Pat directly, never give a
 time frame or promise a technician visit, and never diagnose. Only escalate an emergency or urgent
 issue, with escalate after logging; routine requests are logged and the call closed. Escalating an
@@ -1135,7 +1182,7 @@ Log it with log_tenant_issue, call_type ${r.tool}.`;
   // the prompt is unchanged while it is off.
   const menu = ownerRoutingMenu(c);
   const routing = menu
-    ? `\n\n${composeOwnerRoutingBlock(menu, companyOf(c))}\nIf a caller only says they are a property owner, ask once whether they already own a property with ${companyOf(c)} or want it to manage one: an existing owner goes to OWNER CALL ROUTING, one who wants management goes to route_owner_prospect.`
+    ? `\n\n${composeOwnerRoutingBlock(menu, companyOf(c))}`
     : "";
 
   const generic = `OTHER RESIDENT CALLS (anything that is not a maintenance issue and not described above):
@@ -1186,6 +1233,16 @@ const AREA_RULES = `   CITY OR AREA (the step recorded in preferred_area):
 
 export function composeLeasing(c: SarahConfig): string {
   const co = companyOf(c);
+  // B46: while the owner menu is live, OWNER CALL ROUTING asks existing-or-new and runs both paths.
+  const ownerStep = ownerRoutingMenu(c)
+    ? `7. A property owner is not a renter: follow OWNER CALL ROUTING above, for an existing owner and for
+   one who wants ${co} to manage a property. Do not discuss fees or terms.`
+    : `7. A property owner is not a renter. If they have not said whether they already have a property with
+   ${co} or want ${co} to manage one, ask once: "${OWNER_KIND_QUESTION}"
+   One who wants ${co} to manage their property: ask their name, then the best number, then the
+   property address, one question each, and call route_owner_prospect. No email check. Say its say
+   line: Alex will call them back. An existing owner: take a message as for any other call. Do not
+   discuss fees or terms.`;
   const flows = flowsOf(c);
   const asksArea = flows.leasing.some((n) => n.kind === "ask" && /\bpreferred_area\b/.test(n.field ?? ""));
   return `LEASING CALLS (${co}; this replaces any earlier leasing steps that mention check_qualification):
@@ -1196,33 +1253,52 @@ export function composeLeasing(c: SarahConfig): string {
 
 ${composeFlowSection("LEASING QUESTION FLOW", "the caller wants to rent an apartment", flows.leasing)}
 ${asksArea ? `\n${AREA_RULES}\n` : ""}
-3. Call log_lead as soon as you have the first useful answer, and again after every one or two new
-   answers, always with everything you know so far. preferred_area (the city or area, in their
-   words, or "no preference") and avoid_communities; bedrooms as studio, 1br, 2br or 3br+; budget as
-   a number; third_party_payer with payer_name, payer_phone and payer_email; pets_wanted, pet_type
-   and pet_count; move_in_date; caller_name and caller_phone; other_info. Do not wait until the end.
+3. log_lead, twice. FIRST LOG: as soon as you know their city or area (or "no preference"; if the flow
+   has no area step, after the first useful answer), call log_lead with everything said so far, so the
+   lead exists if the call drops and you get available_units. Then run the rest of the flow WITHOUT
+   calling log_lead after each answer: keep every answer in mind. FINAL LOG: when the flow is done,
+   before you offer or book a tour (or before you close the call if they want no tour), call log_lead
+   ONE more time with final_log true and everything said anywhere in the call: preferred_area (the
+   city or area, in their words, or "no preference") and avoid_communities; bedrooms as studio, 1br,
+   2br or 3br+; budget as a number; third_party_payer with payer_name, payer_phone and payer_email;
+   pets_wanted, pet_type and pet_count; move_in_date; caller_name and the confirmed caller_phone;
+   other_info; and, if they chose a listing, its address from your results as spoken_building (and
+   spoken_unit). Logging less never means forgetting: the final log carries every answer, and you
+   still never ask for anything already said (HARD RULE 4). Log in between only if a log returned
+   logged false (try once more), and after the final log only if they say something new (choosing a
+   listing counts, even with no tour: log it as spoken_building).
    (Only if EXTRA SCREENING QUESTIONS are listed, also record those answers with check_qualification.)
 4. Availability: answer only from check_availability or the available_units log_lead returns.
    Never offer a unit or size that is not in a result. Once you know their city or area, always
    pass it to check_availability as city. If nothing matches, offer the closest available option
    or to note their interest.
+   WHERE IS IT: when the caller asks where an available unit is, or its name, address, unit
+   number or rent, answer from the available_units or check_availability results you already have
+   in this call (address, community, units, rent). No tool call for that.
    If they ask about bathrooms, the floor, laundry, heat or who pays for utilities for a unit they
-   like, call get_unit_details with the building. Only those questions, never every field
-   unprompted, and for any null say you don't have that detail and the team will follow up.
+   like, call get_unit_details with that building's address or name from a result or from the
+   caller, never a city or area. Only those questions, never every field unprompted, and for any
+   null say you don't have that detail and the team will follow up.
 5. You only RECORD. Never say or hint that they do or do not qualify, are approved, eligible or
    turned down. If asked, say the team reviews every inquiry and will follow up.
 6. Tours: offer one, then run this flow, ONE step per turn.
 
 ${composeFlowSection("TOUR REQUEST FLOW", "the caller wants a tour", flows.tour)}
 
+   Once they want a tour, settle the listing before asking the day (TOUR BOOKING step 1): a tour is
+   for one available listing from a result in this call (log_lead available_units, check_availability,
+   get_unit_details). One fits: use it and say it. Several fit: offer at most three by address and
+   rent and ask which. A building the caller names that is not in your results: say it isn't showing
+   as available and offer what is. Never use an address that is not in your results.
    Then follow TOUR BOOKING: call find_tour_times with their date and time. If requested_time is
-   available, read it back, and after a clear yes book it with request_tour. If it is not
-   available, offer at most two or three of the alternatives it returns in a natural sentence, not
-   a list. After booking, confirm the day and time and say who it is with, by first name, only if
-   the result gives a name.
-7. A property owner who wants ${co} to manage their property is not a renter: ask their name, then
-   the best number, then the property address, one question each, and call route_owner_prospect.
-   Tell them Alex will follow up. Do not discuss fees or terms.
+   available, read it back, and after a clear yes book it with request_tour. For both, pass the
+   listing's address, exactly as the result gave it, as spoken_building, and the unit as spoken_unit
+   if one was named. Never invent one, and never ask an extra question only to fill it. If
+   requested_time is not available, offer at most two or three of the alternatives it returns in a natural sentence, not a list. After booking,
+   say the say line: the day, time, first name and address it gives, and nothing else about where.
+   If the caller says the address is wrong, follow TOUR BOOKING step 7: fix it with a tool or say
+   the team will confirm it, never just say a different one.
+${ownerStep}
 8. Once the reason for the call is done, ask once whether there is anything else, then say a short
    goodbye and call end_call.`;
 }
@@ -1235,7 +1311,10 @@ ${composeFlowSection("TOUR REQUEST FLOW", "the caller wants a tour", flows.tour)
 const REAL_ADDRESS_EXAMPLE = '"Is that 182, 184 or 188 Remsen Street?"';
 const PLACEHOLDER_ADDRESS_EXAMPLE = '"Is that 12, 14 or 16 Example Street?"';
 
-export function composeSarahSections(c: SarahConfig): {
+export function composeSarahSections(
+  c: SarahConfig,
+  callerIdLookup: boolean = CALLER_ID_LOOKUP_ENABLED,
+): {
   top: string;
   lifeSafety: string;
   resident: string;
@@ -1261,7 +1340,9 @@ export function composeSarahSections(c: SarahConfig): {
     lifeSafety: composeLifeSafety(c),
     // While live, the find_unit example names no real street: a real call copied one into
     // verify_owner (conv_5201m6gvmsxafxssy2xrjzjgxten). Off: unchanged, so the prompt is byte-identical.
-    resident: menuLive ? composeResidentCalls(c).replace(REAL_ADDRESS_EXAMPLE, PLACEHOLDER_ADDRESS_EXAMPLE) : composeResidentCalls(c),
+    resident: menuLive
+      ? composeResidentCalls(c, callerIdLookup).replace(REAL_ADDRESS_EXAMPLE, PLACEHOLDER_ADDRESS_EXAMPLE)
+      : composeResidentCalls(c, callerIdLookup),
     extra: [
       composeFlows(c),
       composeCallTypes(c),
@@ -1570,7 +1651,7 @@ export function allItems(c: SarahConfig, extra?: Partial<ItemExtra>): MissingIte
     approval: true,
     label: "Owner call routing: approval and rules",
     detail:
-      "Conflict to resolve: the PRD says no general press-0 route to Pat unless Alex and Pat approve. Also needed: each person's hours, after-hours behavior and what happens if someone does not answer. The menu is offered to existing property owners only.",
+      "Conflict to resolve: the PRD says no general press-0 route to Pat unless Alex and Pat approve. Also needed: each person's hours, after-hours behavior and what happens if someone does not answer. The menu is offered to property owners only: existing owners after email verification, new owners (who want 518 to manage a property) after their name and number are taken.",
     fallback: ROUTING_MENU_FALLBACK,
   });
   for (const level of ["emergency", "urgent"] as const) {

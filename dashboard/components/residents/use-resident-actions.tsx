@@ -20,9 +20,13 @@ export type ResidentRow = {
 
 /**
  * Edit + deactivate flows shared by the list and the detail page. Render `dialogs` once and
- * call `edit` / `deactivate` from buttons. Only mount for the admin view; the server enforces it.
+ * call `edit` / `deactivate` from buttons. Edit (and Add resident's unit list) is for the admin
+ * view and, on the units they manage, an asset manager (B45): with `onlyMine` the unit picker lists
+ * only the viewer's own units (not ones they only cover). Deactivate is admin view only. The
+ * server enforces all of it.
  */
-export function useResidentActions(onDeactivated?: () => void) {
+export function useResidentActions(onDeactivated?: () => void, opts: { onlyMine?: boolean } = {}) {
+  const onlyMine = opts.onlyMine === true;
   const toast = useToast();
   const units = useQuery(api.units.list, {});
   const properties = useQuery(api.properties.list);
@@ -34,11 +38,11 @@ export function useResidentActions(onDeactivated?: () => void) {
 
   const unitOptions: UnitOption[] = useMemo(() => {
     const names = new Map((properties ?? []).map((p) => [p._id as string, p.name]));
-    return (units ?? []).map((u) => ({
+    return (units ?? []).filter((u) => !onlyMine || (u.isMine && !u.covering)).map((u) => ({
       id: u._id,
       label: `${names.get(u.propertyId) ?? "Property"} · Unit ${u.unitNumber}`,
     }));
-  }, [units, properties]);
+  }, [units, properties, onlyMine]);
 
   const dialogs = (
     <>

@@ -12,14 +12,13 @@ import { TEAM_LABELS, type Team } from "@/convex/rentPaymentsPolicy";
 import {
   Btn,
   Card,
-  Chips,
+  FilterSelect,
+  FilterToolbar,
   DataTable,
-  Field,
   PageHeader,
   Pagination,
   Pill,
   SearchBox,
-  Select,
   SortHeader,
   ariaSortOf,
   paginate,
@@ -216,6 +215,7 @@ export function StatementsList() {
   ];
 
   const filtered = Boolean(q || team || status);
+  const defaultMonth = defaultStatementMonth(now);
 
   return (
     <div className="pb-10">
@@ -230,53 +230,68 @@ export function StatementsList() {
       />
       <FinanceNav active="statements" />
       <Card>
-        <div className="mb-3">
-          <SearchBox
-            id="ros-search"
-            label="Search statements"
-            value={search.input}
-            onChange={search.setInput}
-            onClear={search.clear}
-            placeholder="Search owner, owner email, property or address"
-          />
-        </div>
-        <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <Field label="Month" htmlFor="ros-month">
-            <Select id="ros-month" value={month} onChange={(e) => e.target.value && setParams({ month: e.target.value })}>
-              {months.map((m) => (
-                <option key={m.value} value={m.value}>
-                  {m.label}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <Field label="Team" htmlFor="ros-team">
-            <Select id="ros-team" value={team} onChange={(e) => setParams({ team: e.target.value || "" })}>
-              <option value="">All teams</option>
-              {TEAMS.map((t) => (
-                <option key={t} value={t}>
-                  {TEAM_LABELS[t]}
-                </option>
-              ))}
-            </Select>
-          </Field>
-        </div>
+        <FilterToolbar
+          className="mb-3.5"
+          active={filtered || month !== defaultMonth}
+          onClear={() => {
+            search.setInput("");
+            setParams({ month: "", team: "", status: "", q: "" });
+          }}
+          search={
+            <SearchBox
+              id="ros-search"
+              label="Search statements"
+              value={search.input}
+              onChange={search.setInput}
+              onClear={search.clear}
+              placeholder="Search owner, owner email, property or address"
+            />
+          }
+        >
+          <FilterSelect
+            label="Month"
+            active={month !== defaultMonth}
+            value={month}
+            onChange={(e) => e.target.value && setParams({ month: e.target.value === defaultMonth ? "" : e.target.value })}
+            className="sm:w-52"
+          >
+            {months.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
+          </FilterSelect>
+          <FilterSelect
+            label="Team"
+            active={team !== ""}
+            value={team || "all"}
+            onChange={(e) => setParams({ team: !e.target.value || e.target.value === "all" ? "" : e.target.value })}
+          >
+            <option value="all">All</option>
+            {TEAMS.map((t) => (
+              <option key={t} value={t}>
+                {TEAM_LABELS[t]}
+              </option>
+            ))}
+          </FilterSelect>
+          <FilterSelect
+            label="Status"
+            active={status !== ""}
+            value={status || "all"}
+            onChange={(e) => setParams({ status: !e.target.value || e.target.value === "all" ? "" : e.target.value })}
+            className="sm:w-56"
+          >
+            <option value="all">All ({view.counts.all})</option>
+            <option value="not_started">Not started ({view.counts.not_started})</option>
+            <option value="draft">Draft ({view.counts.draft})</option>
+            <option value="final">Final ({view.counts.final})</option>
+          </FilterSelect>
+        </FilterToolbar>
         {data === undefined ? (
           <Spinner label="Loading statements…" />
         ) : (
           <>
-            <Chips<StatusFilter>
-              label="Status"
-              value={status}
-              onChange={(v) => setParams({ status: v })}
-              options={[
-                { value: "", label: `All (${view.counts.all})` },
-                { value: "not_started", label: `Not started (${view.counts.not_started})` },
-                { value: "draft", label: `Draft (${view.counts.draft})` },
-                { value: "final", label: `Final (${view.counts.final})` },
-              ]}
-            />
-            <div className="mt-3">
+            <div>
               <DataTable
                 caption={`Owner statements for ${month}`}
                 columns={columns}

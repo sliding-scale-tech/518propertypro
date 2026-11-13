@@ -4,6 +4,7 @@
 
 import { normalizeSearch } from "../finance/payments-search";
 import { sortRows, type SortState } from "../ui/table-sort";
+import { isExactUnit } from "../../convex/tourDisplay";
 
 // --- Properties list -----------------------------------------------------------------------------
 
@@ -85,13 +86,19 @@ export function unitInFilter(u: UnitFinderRow, tenants: readonly string[], filte
   return filter === "available" ? u.available : !u.available;
 }
 
-/** Search AND filter, then sorted (unit number is the tie-break, compared naturally: 2 before 10). */
+/**
+ * Search AND filter AND (from a tour's Apartment link) exactly one unit label, then sorted (unit number
+ * is the tie-break, compared naturally: 2 before 10). `unit` is an exact match: "1" never shows "10".
+ */
 export function unitsView<T extends UnitFinderRow & { _id: string }>(
   rows: readonly T[],
   tenantsOf: (u: T) => readonly string[],
-  f: { q?: string | null; filter?: UnitAvailabilityFilter; sort?: SortState<UnitSortKey> },
+  f: { q?: string | null; filter?: UnitAvailabilityFilter; sort?: SortState<UnitSortKey>; unit?: string | null },
 ): T[] {
-  const matched = rows.filter((u) => unitMatches(u, tenantsOf(u), f.q) && unitInFilter(u, tenantsOf(u), f.filter ?? ""));
+  const matched = rows.filter(
+    (u) =>
+      isExactUnit(u.unitNumber, f.unit) && unitMatches(u, tenantsOf(u), f.q) && unitInFilter(u, tenantsOf(u), f.filter ?? ""),
+  );
   const sort = f.sort ?? UNIT_SORT_DEFAULT;
   const byUnit = sortRows(matched, (u) => u.unitNumber, sort.key === "unit" ? sort.dir : "asc");
   if (sort.key === "unit") return byUnit;

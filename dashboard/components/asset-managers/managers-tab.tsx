@@ -12,7 +12,6 @@ import {
   Mail,
   Pencil,
   Phone,
-  Search,
   Send,
   Users,
   Wrench,
@@ -22,7 +21,7 @@ import { useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { Btn, Card, ConfirmDialog, Drawer, DrawerSection, Input, Select, Textarea, cx } from "@/components/ui";
+import { Btn, Card, ConfirmDialog, Drawer, DrawerSection, FilterSelect, FilterToolbar, Input, SearchBox, Textarea, cx } from "@/components/ui";
 import { toast } from "@/components/toast";
 import { Pagination } from "@/components/ui";
 import { ActionMenu, PersonAvatar, StatusBadge, useDebounced } from "./shared";
@@ -130,15 +129,6 @@ function InviteCard() {
   );
 }
 
-function LabeledSelect({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="relative">
-      <span className="pointer-events-none absolute -top-2 left-3 z-[1] bg-card px-1 text-[11px] font-semibold text-foreground">{label}</span>
-      {children}
-    </div>
-  );
-}
-
 export function ManagersTab() {
   const router = useRouter();
   const base = useOverview({ pageSize: 1 });
@@ -202,55 +192,64 @@ export function ManagersTab() {
       <InviteCard />
 
       <Card className="!px-5">
-        <div className="grid gap-3 md:grid-cols-[1fr_220px_220px]">
-          <div className="relative">
-            <Search aria-hidden className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              aria-label="Search asset managers"
+        <FilterToolbar
+          active={search.trim() !== "" || propertyId !== "" || status !== "all"}
+          onClear={() => {
+            setSearch("");
+            setPropertyId("");
+            setStatus("all");
+            setPage(1);
+          }}
+          search={
+            <SearchBox
+              id="asset-managers-search"
+              label="Search asset managers"
               value={search}
               maxLength={100}
-              onChange={(e) => {
-                setSearch(e.target.value);
+              onChange={(v) => {
+                setSearch(v);
+                setPage(1);
+              }}
+              onClear={() => {
+                setSearch("");
                 setPage(1);
               }}
               placeholder="Search by name, email or property…"
-              className="h-11 pl-9"
             />
-          </div>
-          <LabeledSelect label="All Properties">
-            <Select
-              aria-label="Filter by property"
-              value={propertyId}
-              onChange={(e) => {
-                setPropertyId(e.target.value);
-                setPage(1);
-              }}
-              className="h-11"
-            >
-              <option value="">All</option>
-              {(base?.propertyOptions ?? []).map((p) => (
-                <option key={p.propertyId} value={p.propertyId}>
-                  {p.name}
-                </option>
-              ))}
-            </Select>
-          </LabeledSelect>
-          <LabeledSelect label="All Statuses">
-            <Select
-              aria-label="Filter by status"
-              value={status}
-              onChange={(e) => {
-                setStatus(e.target.value as "all" | "active" | "on_leave");
-                setPage(1);
-              }}
-              className="h-11"
-            >
-              <option value="all">All</option>
-              <option value="active">Active</option>
-              <option value="on_leave">On Leave</option>
-            </Select>
-          </LabeledSelect>
-        </div>
+          }
+        >
+          <FilterSelect
+            label="Property"
+            active={propertyId !== ""}
+            value={propertyId || "all"}
+            onChange={(e) => {
+              setPropertyId(!e.target.value || e.target.value === "all" ? "" : e.target.value);
+              setPage(1);
+            }}
+            className="sm:w-56"
+          >
+            <option value="all">All</option>
+            {(base?.propertyOptions ?? []).map((p) => (
+              <option key={p.propertyId} value={p.propertyId}>
+                {p.name}
+              </option>
+            ))}
+          </FilterSelect>
+          <FilterSelect
+            label="Status"
+            active={status !== "all"}
+            value={status}
+            onChange={(e) => {
+              const v = e.target.value;
+              setStatus(v === "active" || v === "on_leave" ? v : "all");
+              setPage(1);
+            }}
+          >
+            <option value="all">All</option>
+            <option value="active">Active</option>
+            <option value="on_leave">On Leave</option>
+          </FilterSelect>
+        </FilterToolbar>
 
         <div className="-mx-5 mt-4 overflow-x-auto">
           <table className="w-full min-w-[820px] border-collapse text-[13px]">

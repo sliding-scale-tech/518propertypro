@@ -394,7 +394,7 @@ export function ContentEditor({
       <div className="space-y-3">
         <p className="text-sm text-muted-foreground">
           Phone menu options, in key order. Leave a number blank until Pat provides it: Sarah then says that person isn&apos;t
-          available by phone and takes a message. The on/off switch is on the Routing directory tab.
+          available by phone and takes a message. The on/off switch is on the Team page, Phone & routing tab.
         </p>
         <RoutingEditor
           value={routingDraftOf(c)}

@@ -2,11 +2,12 @@
 // This only decides what the page SHOWS; every query and mutation behind a tab re-checks access
 // on the server.
 
-export type TeamTab = "members" | "routing" | "settings" | "audit";
+export type TeamTab = "members" | "routing" | "phone" | "settings" | "audit";
 
 export const TEAM_TABS: ReadonlyArray<{ value: TeamTab; label: string; adminOnly: boolean }> = [
   { value: "members", label: "Members", adminOnly: false },
   { value: "routing", label: "Lead routing", adminOnly: true },
+  { value: "phone", label: "Phone & routing", adminOnly: true },
   { value: "settings", label: "Settings", adminOnly: false },
   { value: "audit", label: "Audit log", adminOnly: true },
 ];

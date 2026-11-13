@@ -34,6 +34,9 @@ import type { AppView } from "@/convex/authz";
 import type { AppRole } from "@/convex/roleSet";
 import { holdsAnyOf, useMyRoles } from "@/components/require-view";
 
+// Hidden from the sidebar for now (2026-11-13, user decision). Pages still work by direct URL.
+const HIDDEN_NAV_HREFS = new Set(["/sarah", "/docs"]);
+
 type NavLeaf = {
   href: string;
   label: string;
@@ -177,7 +180,8 @@ const BOTTOM_NAV_SLOTS = 3;
  */
 function entriesFor(roles: AppRole[] | null | undefined): NavEntry[] {
   if (!roles || roles.length === 0) return [];
-  const allowed = (link: NavLeaf) => !link.views || holdsAnyOf(roles, link.views);
+  const allowed = (link: NavLeaf) =>
+    !HIDDEN_NAV_HREFS.has(link.href) && (!link.views || holdsAnyOf(roles, link.views));
   return NAV.flatMap((entry): NavEntry[] => {
     if (!isGroup(entry)) return allowed(entry) ? [entry] : [];
     const items = entry.items.filter(allowed);

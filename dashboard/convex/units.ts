@@ -12,6 +12,7 @@ import { unitKey } from "./unitMatch";
 import { businessToday, monthOf } from "./rosFormat";
 import { bathroomsProblem, floorProblem, rosterRentProblem } from "./unitFieldsPolicy";
 import { RENT_CHANGE_MSG, rentInEffect, upcomingRentChange } from "./unitRentPolicy";
+import type { UnitRoles } from "./unitEditLib";
 
 /**
  * Units: the ONLY module that writes the `units` table.
@@ -83,8 +84,21 @@ export async function countOwnedBy(
   return owned.length;
 }
 
+/**
+ * B45: who the viewer is for ONE unit (unitEditLib.unitEditPermissions turns it into the matrix).
+ * ownAm = holds the asset_manager role and is this unit's designated asset manager; covering a
+ * colleague's unit does not count (covering is read-only).
+ */
+export function unitRolesOf(org: OrgContext, unit: Pick<Doc<"units">, "assetManagerUserId">): UnitRoles {
+  return {
+    admin: isAdminView(org),
+    accountant: hasRole(org, "accountant"),
+    ownAm: hasRole(org, "asset_manager") && unit.assetManagerUserId === org.user._id,
+  };
+}
+
 /** Unit in this team, or the same "not found" whether it is missing or someone else's. */
-async function ownUnit(ctx: QueryCtx | MutationCtx, org: OrgContext, unitId: Id<"units">) {
+export async function ownUnit(ctx: QueryCtx | MutationCtx, org: OrgContext, unitId: Id<"units">) {
   const unit = await ctx.db.get(unitId);
   if (!unit || unit.orgId !== org.orgId) throw new ConvexError("Unit not found.");
   return unit;
@@ -111,16 +125,19 @@ function checkNumbers(args: { floor?: number; bathrooms?: number; rent?: number 
   }
 }
 
-function cleanText(value: string, label: string, max = MAX_TEXT): string {
+function cleanText(value: string, label: string, max = MAX_TEXT, field?: string): string {
   const out = value.trim();
-  if (out.length > max) throw new ConvexError(`${label} is too long.`);
+  if (out.length > max) {
+    const message = `${label} is too long (max ${max} characters).`;
+    throw field ? fieldError(field, message) : new ConvexError(message);
+  }
   return out;
 }
 
 function requireUnitNumber(raw: string): { unitNumber: string; unitNumberKey: string } {
   const unitNumber = cleanText(raw, "Unit number", 40);
   const unitNumberKey = normalizeUnitKey(unitNumber);
-  if (!unitNumber || !unitNumberKey) throw new ConvexError("Enter a unit number.");
+  if (!unitNumber || !unitNumberKey) throw fieldError("unitNumber", "Enter a unit number.");
   return { unitNumber, unitNumberKey };
 }
 
@@ -136,7 +153,7 @@ async function assertNoDuplicate(
       q.eq("propertyId", propertyId).eq("unitNumberKey", unitNumberKey),
     )
     .first();
-  if (dup && dup._id !== exceptId) throw new ConvexError("That unit already exists on this property.");
+  if (dup && dup._id !== exceptId) throw fieldError("unitNumber", "That unit already exists on this property.");
 }
 
 // --- Reads ----------------------------------------------------------------
@@ -145,7 +162,7 @@ async function assertNoDuplicate(
  * Units are visible to an admin, an asset manager or an accountant (any mix of them). A pure
  * technician, who only needs the jobs assigned to them, and a member with no role are refused.
  */
-function canViewUnits(org: OrgContext): boolean {
+export function canViewUnits(org: OrgContext): boolean {
   return hasAnyRole(org, "admin", "asset_manager", "accountant");
 }
 
@@ -368,47 +385,140 @@ export const update = mutation({
     if (args.rent !== undefined) throw fieldError("rent", RENT_CHANGE_MSG.useChangeRent);
     // Only a value the user CHANGED is checked: an old stored value (a roster 1.25 baths) must not
     // block saving the other fields.
-    checkNumbers({
-      floor: args.floor !== unit.floor ? args.floor : undefined,
-      bathrooms: args.bathrooms !== unit.bathrooms ? args.bathrooms : undefined,
-    });
-
-    // Fields are copied one by one rather than spreading args, so nothing the client adds
-    // (an assetManagerUserId, an orgId) can reach the row.
-    const patch: Partial<Doc<"units">> = { updatedAt: Date.now() };
-    if (args.unitNumber !== undefined) {
-      const { unitNumber, unitNumberKey } = requireUnitNumber(args.unitNumber);
-      await assertNoDuplicate(ctx, unit.propertyId, unitNumberKey, unit._id);
-      patch.unitNumber = unitNumber;
-      patch.unitNumberKey = unitNumberKey;
-    }
-    if (args.bedrooms !== undefined) {
-      const bedrooms = cleanText(args.bedrooms, "Bedrooms", 20);
-      if (!bedrooms) throw new ConvexError("Enter the number of bedrooms.");
-      patch.bedrooms = bedrooms;
-    }
-    if (args.floor !== undefined) {
-      patch.floor = args.floor;
-      // A roster text label ("Basement") describes the old number; a new number replaces it.
-      if (args.floor !== unit.floor && unit.floorRaw !== undefined) patch.floorRaw = undefined;
-    }
-    if (args.isTopFloor !== undefined) patch.isTopFloor = args.isTopFloor;
-    if (args.bathrooms !== undefined) patch.bathrooms = args.bathrooms;
-    if (args.parking !== undefined) patch.parking = cleanText(args.parking, "Parking", 200);
-    if (args.availableFrom !== undefined) patch.availableFrom = args.availableFrom;
-    if (args.leasingFacts !== undefined) {
-      patch.leasingFacts = cleanText(args.leasingFacts, "Leasing facts");
-    }
-    await ctx.db.patch(unit._id, patch);
-    await writeAudit(ctx, {
-      orgId: org.orgId,
-      entity: "unit",
-      entityId: unit._id,
-      action: "unit_updated",
-      actorUserId: org.user._id,
+    await applyDetails(ctx, org, unit, {
+      unitNumber: args.unitNumber,
+      bedrooms: args.bedrooms,
+      floor: args.floor,
+      isTopFloor: args.isTopFloor,
+      bathrooms: args.bathrooms,
+      parking: args.parking,
+      availableFrom: args.availableFrom,
+      leasingFacts: args.leasingFacts,
     });
   },
 });
+
+/**
+ * The unit's own fields (number, type, floor, top floor, baths, parking, available-from, leasing
+ * notes). undefined = not touched; null = cleared (floor, baths, parking, available-from, leasing
+ * notes). Shared by `update` and B45 unitEdit.saveAll; the caller checks permissions. Only a value
+ * that differs from the stored one is checked, so an odd legacy value never blocks a save. One
+ * "unit_updated" audit row naming the changed fields; nothing is written when nothing changed.
+ * Fields are copied one by one, so nothing else (an assetManagerUserId, an orgId) can reach the row.
+ */
+export type UnitDetailsPatch = {
+  unitNumber?: string;
+  bedrooms?: string;
+  floor?: number | null;
+  isTopFloor?: boolean;
+  bathrooms?: number | null;
+  parking?: string | null;
+  availableFrom?: string | null;
+  leasingFacts?: string | null;
+};
+
+export async function applyDetails(
+  ctx: MutationCtx,
+  org: OrgContext,
+  unit: Doc<"units">,
+  d: UnitDetailsPatch,
+): Promise<string[]> {
+  checkNumbers({
+    floor: d.floor != null && d.floor !== unit.floor ? d.floor : undefined,
+    bathrooms: d.bathrooms != null && d.bathrooms !== unit.bathrooms ? d.bathrooms : undefined,
+  });
+  const patch: Partial<Doc<"units">> = {};
+  const changed: string[] = [];
+  const set = <K extends keyof Doc<"units">>(key: K, value: Doc<"units">[K]) => {
+    if (unit[key] === value) return;
+    patch[key] = value;
+    changed.push(key);
+  };
+  if (d.unitNumber !== undefined) {
+    const { unitNumber, unitNumberKey } = requireUnitNumber(d.unitNumber);
+    if (unitNumberKey !== unit.unitNumberKey) await assertNoDuplicate(ctx, unit.propertyId, unitNumberKey, unit._id);
+    set("unitNumber", unitNumber);
+    if (unit.unitNumberKey !== unitNumberKey) patch.unitNumberKey = unitNumberKey;
+  }
+  if (d.bedrooms !== undefined) {
+    const bedrooms = cleanText(d.bedrooms, "Unit type", 20, "bedrooms");
+    if (!bedrooms) throw fieldError("bedrooms", "Select the unit type.");
+    set("bedrooms", bedrooms);
+  }
+  if (d.floor !== undefined) {
+    const floor = d.floor ?? undefined;
+    if (floor !== unit.floor) {
+      set("floor", floor);
+      // A roster text label ("Basement") describes the old number; a new number replaces it.
+      if (unit.floorRaw !== undefined) patch.floorRaw = undefined;
+    }
+  }
+  if (d.isTopFloor !== undefined) set("isTopFloor", d.isTopFloor);
+  if (d.bathrooms !== undefined) set("bathrooms", d.bathrooms ?? undefined);
+  if (d.parking !== undefined) set("parking", d.parking === null ? undefined : cleanText(d.parking, "Parking", 200, "parking") || undefined);
+  if (d.availableFrom !== undefined) set("availableFrom", d.availableFrom === null ? undefined : d.availableFrom.trim() || undefined);
+  if (d.leasingFacts !== undefined) {
+    set("leasingFacts", d.leasingFacts === null ? undefined : cleanText(d.leasingFacts, "Leasing notes", MAX_TEXT, "leasingFacts") || undefined);
+  }
+  if (changed.length === 0) return changed;
+  await ctx.db.patch(unit._id, { ...patch, updatedAt: Date.now() });
+  await writeAudit(ctx, {
+    orgId: org.orgId,
+    entity: "unit",
+    entityId: unit._id,
+    action: "unit_updated",
+    actorUserId: org.user._id,
+    note: `Changed: ${changed.join(", ")}`,
+  });
+  return changed;
+}
+
+/**
+ * B45: the roster fields staff can now edit (occupancy, lease type, rent paid to). Owner
+ * statements read them (vacancy, who collects the rent). undefined = not touched, null = cleared
+ * ("not stated"). The caller has validated the values and checked permissions. One "roster_set"
+ * audit row with before/after; nothing written when nothing changed. Also used by the tenancy
+ * roster sync (leases.applyTenancy).
+ */
+export type RosterFieldsPatch = {
+  occupancy?: Doc<"units">["occupancy"] | null;
+  leaseType?: Doc<"units">["leaseType"] | null;
+  rentPaidTo?: Doc<"units">["rentPaidTo"] | null;
+};
+
+export async function writeRosterFields(
+  ctx: MutationCtx,
+  org: OrgContext,
+  unit: Doc<"units">,
+  r: RosterFieldsPatch,
+  note?: string,
+): Promise<string[]> {
+  const patch: Partial<Doc<"units">> = {};
+  const from: Record<string, string | null> = {};
+  const to: Record<string, string | null> = {};
+  for (const key of ["occupancy", "leaseType", "rentPaidTo"] as const) {
+    if (r[key] === undefined) continue;
+    const next = r[key] ?? undefined;
+    if (unit[key] === next) continue;
+    (patch as Record<string, unknown>)[key] = next;
+    from[key] = unit[key] ?? null;
+    to[key] = next ?? null;
+  }
+  const changed = Object.keys(to);
+  if (changed.length === 0) return changed;
+  await ctx.db.patch(unit._id, { ...patch, updatedAt: Date.now() });
+  await writeAudit(ctx, {
+    orgId: org.orgId,
+    entity: "unit",
+    entityId: unit._id,
+    action: "roster_set",
+    actorUserId: org.user._id,
+    from: JSON.stringify(from),
+    to: JSON.stringify(to),
+    note,
+  });
+  return changed;
+}
 
 /** Managers can flip any unit; an asset manager only the ones they are the AM of. */
 export const setAvailability = mutation({
@@ -425,22 +535,63 @@ export const setAvailability = mutation({
     const ownAm = org.jobRoles.includes("asset_manager") && unit.assetManagerUserId === org.user._id;
     if (!manager && !ownAm) throw new ConvexError("You don't have access to that.");
 
-    await ctx.db.patch(unit._id, {
-      available: args.available,
-      availableFrom: args.available ? args.availableFrom : undefined,
-      updatedAt: Date.now(),
-    });
-    await writeAudit(ctx, {
-      orgId: org.orgId,
-      entity: "unit",
-      entityId: unit._id,
-      action: "availability_set",
-      actorUserId: org.user._id,
-      from: String(unit.available),
-      to: String(args.available),
-    });
+    await writeAvailability(ctx, org, unit, args.available, args.availableFrom);
   },
 });
+
+/**
+ * The one availability write (setAvailability, and B44's New renter / Move out, which call it
+ * after their own permission check). Sarah offers a unit only while `available` is true.
+ */
+export async function writeAvailability(
+  ctx: MutationCtx,
+  org: OrgContext,
+  unit: Doc<"units">,
+  available: boolean,
+  availableFrom?: string,
+  note?: string,
+): Promise<void> {
+  await ctx.db.patch(unit._id, {
+    available,
+    availableFrom: available ? availableFrom : undefined,
+    updatedAt: Date.now(),
+  });
+  await writeAudit(ctx, {
+    orgId: org.orgId,
+    entity: "unit",
+    entityId: unit._id,
+    action: "availability_set",
+    actorUserId: org.user._id,
+    from: String(unit.available),
+    to: String(available),
+    note,
+  });
+}
+
+/**
+ * B44: the unit's lease end (the roster field) follows its current renter's lease: set by New
+ * renter and Renewed, cleared when the unit's last resident moves out. Audited; no-op when equal.
+ */
+export async function writeUnitLeaseEnd(
+  ctx: MutationCtx,
+  org: OrgContext,
+  unit: Doc<"units">,
+  leaseEnd: string | undefined,
+  note: string,
+): Promise<void> {
+  if (unit.leaseEnd === leaseEnd) return;
+  await ctx.db.patch(unit._id, { leaseEnd, updatedAt: Date.now() });
+  await writeAudit(ctx, {
+    orgId: org.orgId,
+    entity: "unit",
+    entityId: unit._id,
+    action: "lease_end_set",
+    actorUserId: org.user._id,
+    from: unit.leaseEnd,
+    to: leaseEnd,
+    note,
+  });
+}
 
 export const assignAssetManager = mutation({
   args: { unitId: v.id("units"), assetManagerUserId: v.id("users") },
@@ -537,6 +688,7 @@ async function reassignDetailed(
   unit: Doc<"units">,
   to: Id<"users">,
   reason?: string,
+  opts: { notify?: boolean } = {},
 ): Promise<{ requestsMoved: Array<{ requestId: Id<"maintenanceRequests">; number: number }> } | null> {
   if (unit.assetManagerUserId === to) return null;
   await ctx.db.patch(unit._id, { assetManagerUserId: to, updatedAt: Date.now() });
@@ -574,7 +726,8 @@ async function reassignDetailed(
       note: `Unit ${unit.unitNumber} reassigned`,
     });
   }
-  if (open.length > 0 && to !== org.user._id) {
+  // The bulk change sends one summary notification itself instead of one per unit.
+  if (open.length > 0 && to !== org.user._id && opts.notify !== false) {
     await scheduleNotify(ctx, {
       orgId: org.orgId,
       userIds: [to],
@@ -610,6 +763,25 @@ export async function reassignUnitWithReason(
   const moved = await reassignDetailed(ctx, org, unit, to, reason);
   if (!moved) throw new ConvexError("That unit already belongs to this asset manager.");
   return { previousManagerUserId: unit.assetManagerUserId, unit, requestsMoved: moved.requestsMoved };
+}
+
+/**
+ * Bulk "Change asset manager" (bulkReassign.ts): the SAME per-unit core as reassignUnitWithReason
+ * (reassignDetailed: unit patch + its "am_changed" audit row with the reason, and every open
+ * request on the unit repointed with its own audit row), minus the per-unit notification: the bulk
+ * apply sends one summary instead. Returns null when the unit already has `to` (a no-op, so a
+ * re-run batch never double-writes).
+ */
+export async function reassignUnitInBulk(
+  ctx: MutationCtx,
+  org: OrgContext,
+  unit: Doc<"units">,
+  to: Id<"users">,
+  reason: string,
+): Promise<{ previousManagerUserId: Id<"users">; requestsMoved: Array<{ requestId: Id<"maintenanceRequests">; number: number }> } | null> {
+  if (unit.orgId !== org.orgId) throw new ConvexError("Unit not found.");
+  const moved = await reassignDetailed(ctx, org, unit, to, reason, { notify: false });
+  return moved ? { previousManagerUserId: unit.assetManagerUserId, requestsMoved: moved.requestsMoved } : null;
 }
 
 export const remove = mutation({

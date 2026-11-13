@@ -5,18 +5,20 @@ import { Suspense } from "react";
 import { RequireView } from "@/components/require-view";
 import { ManagersTab } from "@/components/asset-managers/managers-tab";
 import { PropertyAssignmentsTab } from "@/components/asset-managers/property-assignments-tab";
+import { TeamsTab } from "@/components/asset-managers/teams-tab";
 import { PageHeader, Seg } from "@/components/ui";
 
-type Tab = "managers" | "assignments";
+type Tab = "managers" | "teams" | "assignments";
 
 function AssetManagersInner() {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
-  const tab: Tab = params.get("tab") === "assignments" ? "assignments" : "managers";
+  const raw = params.get("tab");
+  const tab: Tab = raw === "assignments" || raw === "teams" ? raw : "managers";
 
   function setTab(next: Tab) {
-    router.replace(next === "assignments" ? `${pathname}?tab=assignments` : pathname, { scroll: false });
+    router.replace(next === "managers" ? pathname : `${pathname}?tab=${next}`, { scroll: false });
   }
 
   return (
@@ -28,10 +30,11 @@ function AssetManagersInner() {
         onChange={setTab}
         options={[
           { value: "managers", label: "Asset managers" },
+          { value: "teams", label: "Teams" },
           { value: "assignments", label: "Property assignments" },
         ]}
       />
-      {tab === "managers" ? <ManagersTab /> : <PropertyAssignmentsTab />}
+      {tab === "managers" ? <ManagersTab /> : tab === "teams" ? <TeamsTab /> : <PropertyAssignmentsTab />}
     </div>
   );
 }

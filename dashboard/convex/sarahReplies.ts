@@ -43,22 +43,82 @@ const speakNow = (say: string): MaintenanceLogLines => ({
   message: `Say the say line once. ${WAIT_FOR_CALLER}`,
 });
 
-const atClose = (closingLine: string): MaintenanceLogLines => ({
+/**
+ * Also tells her not to log again after every answer: with only "Logged. Keep going with the next
+ * step." and the old "log again as you learn more" prompt lines, she called log_maintenance_request
+ * after almost every answer (4-5 slow tool turns per routine call, 2026-11-13).
+ */
+export const LOG_AT_FINAL =
+  "Until the final log (STEP 3), do not log again after each answer: remember what they say and send it then.";
+
+/** repair: a routine or urgent request, which gets STEP 3's final log (informational ones do not). */
+const atClose = (closingLine: string, repair: boolean): MaintenanceLogLines => ({
   closing_line: closingLine,
-  message: `Logged. Keep going with the next step. Say closing_line once, only when you close the call. ${WAIT_FOR_CALLER}`,
+  message: `Logged. Keep going with the next step. Say closing_line once, only when you close the call. ${
+    repair ? `${LOG_AT_FINAL} ` : ""
+  }${WAIT_FOR_CALLER}`,
 });
 
 /** The spoken part of a logged:true log_maintenance_request result. */
 export function maintenanceLogLines({ severity, emergencyAlerted, saved }: MaintenanceLogOutcome): MaintenanceLogLines {
   if (saved?.closedOutOfScope) return speakNow(OUT_OF_SCOPE_SAY);
   if (severity === "emergency") return speakNow(emergencyAlerted ? EMERGENCY_ALERTED_SAY : FOLLOW_UP_SOON);
-  if (!saved) return atClose("I've logged that and the team will follow up with you.");
-  if (severity === "urgent") return atClose(FOLLOW_UP_SOON);
+  const repair = severity === "routine" || severity === "urgent";
+  if (!saved) return atClose("I've logged that and the team will follow up with you.", repair);
+  if (severity === "urgent") return atClose(FOLLOW_UP_SOON, repair);
   return atClose(
     saved.routedToAm
       ? "I've logged that and sent it to the asset manager for your building to review. They'll follow up with you about next steps."
       : "I've logged that and the team will match it to your unit and follow up with you.",
+    repair,
   );
+}
+
+// --- log_lead ------------------------------------------------------------------------------------
+
+/**
+ * The leasing version of LOG_AT_FINAL. log_lead's result used to say "Call again to add details as you
+ * learn them", and Sarah logged after every answer: 7 log_lead calls in one leasing call, nearly every
+ * turn with a soft-timeout filler (conv_0001m7acgw57fpwagbr0ydncsybk, 2026-11-13).
+ */
+export const LEAD_LOG_AT_FINAL =
+  "Do not call log_lead again after each answer: remember every answer and send them all, with final_log " +
+  "true, in ONE final log_lead before you offer or book a tour, or before you close the call if there is no tour.";
+
+export const LEAD_NO_SIZE_SAY =
+  "Thanks, I've noted what you're looking for. I don't see that size open right now, but I can note your interest or look at other sizes.";
+export const LEAD_TOUR_OFFER_SAY = "Thanks, I've got that noted. Would you like to set up a tour?";
+
+const NEVER_JUDGE =
+  "Never tell the caller they do or do not qualify, and never give a reason they might not.";
+
+export type LeadLogInput = {
+  /** The final log: final_log true, or every core answer (bedrooms, move-in, budget, name, phone) is in. */
+  final: boolean;
+  /** Whether the bedroom type they asked for is open in their area; null when no bedrooms yet. */
+  typeAvailable: boolean | null;
+  /** check_availability-style area lines (nothing open there / not served), when they apply. */
+  areaSay: string | null;
+  areaMessage: string | null;
+};
+
+/**
+ * The spoken part of a logged:true log_lead result.
+ *  - The first log (area known, flow not done): no say line unless the area or size has nothing open,
+ *    so Sarah just asks the next question in the flow, and is told not to log after every answer.
+ *  - The final log: the tour offer (or the no-size line), and no more logging unless something new is said.
+ */
+export function leadLogLines(i: LeadLogInput): { say?: string; message: string } {
+  const say = i.areaSay ?? (i.typeAvailable === false ? LEAD_NO_SIZE_SAY : i.final ? LEAD_TOUR_OFFER_SAY : null);
+  const next = i.final
+    ? "This was the final log: call log_lead again only if the caller says something new or changes an answer."
+    : `Logged. Do not say so; carry on with the next question in the flow. ${LEAD_LOG_AT_FINAL}`;
+  return {
+    ...(say ? { say } : {}),
+    message: [say ? "Say the say line once." : null, `Recorded. ${NEVER_JUDGE}`, next, i.areaMessage, WAIT_FOR_CALLER]
+      .filter(Boolean)
+      .join(" "),
+  };
 }
 
 /**

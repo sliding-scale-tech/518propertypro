@@ -8,6 +8,9 @@ import * as google from "./googleApi";
 import { accessTokenFor } from "./googleCalendar";
 import * as sched from "./tourSchedule";
 import { tourRulesFor } from "./sarahConfigRead";
+import { tourEventText } from "./tourDisplay";
+import { tourStaffFor } from "./tourStaff";
+import { bookable, calendarState, noOneBookableReason, poolCandidates, type TourTeam } from "./tourStaffLib";
 
 /**
  * Tour availability and booking.
@@ -295,6 +298,16 @@ export const tourDetails = query({
       timeZone: tour.timeZone,
       callerName: tour.callerName ?? qualification?.callerName,
       callerPhone: tour.callerPhone ?? qualification?.callerPhone,
+      // The apartment the caller chose, as recorded at booking. Null for a tour booked without one.
+      apartment: tour.propertyAddress
+        ? {
+            propertyId: tour.propertyId ?? null,
+            propertyAddress: tour.propertyAddress,
+            unitLabel: tour.unitLabel ?? null,
+            // A house has a unit with no label: still a specific apartment.
+            unitChosen: tour.unitId !== undefined,
+          }
+        : null,
       memberName:
         [member?.firstName, member?.lastName].filter(Boolean).join(" ") || member?.email || "Team member",
       // Present only when the tour came from a call Sarah handled — a manually recorded lead
@@ -421,45 +434,56 @@ export const cancelBookedTour = action({
 // --- Booking data -------------------------------------------------------------
 
 /**
- * Everyone who can be booked right now: an admin-chosen lead assignee (memberships.leadAssignee)
- * with the asset_manager job role, not out of office, taking tours, with a calendar connected
- * that Google still accepts. NOT the whole team. Someone who needs to reconnect is left out rather than booked
- * blind — we cannot see their calendar, so we cannot know they are free.
+ * Everyone who can be booked right now for one call.
+ *
+ * Who is considered (tourStaffLib.poolCandidates):
+ *  - a building was chosen (`propertyId`) and it is on a team (Gold, Silver, Make Up): that team's tour
+ *    list (tourStaff.tourStaffFor: the saved list, or the team's asset managers). Anyone an admin put on
+ *    the list counts, with no lead-assignee or job-role requirement.
+ *  - otherwise (no building yet, or a building with no team): today's pool, the admin-chosen lead
+ *    assignees (memberships.leadAssignee, "Backup tour staff" on Team → Lead routing) with the
+ *    asset_manager job role. NOT the whole team.
+ * Then, for each of them (tourStaffLib.bookable): not out of office, taking tours, with a calendar
+ * connected that Google still accepts. Someone who needs to reconnect is left out rather than booked
+ * blind — we cannot see their calendar, so we cannot know they are free. Tour hours and days off are
+ * checked per slot. An empty result means Sarah takes the caller's preferred time instead.
  */
 export const bookingContext = internalQuery({
-  args: { orgId: v.string() },
+  args: { orgId: v.string(), propertyId: v.optional(v.id("properties")) },
   handler: async (ctx, args) => {
     const orgId = ctx.db.normalizeId("organizations", args.orgId);
     const org = orgId ? await ctx.db.get(orgId) : null;
     if (!orgId || !org) return null;
 
-    const property = await ctx.db
-      .query("properties")
-      .withIndex("by_org", (q) => q.eq("orgId", args.orgId))
-      .first();
     const memberships = await ctx.db
       .query("memberships")
       .withIndex("by_org", (q) => q.eq("orgId", orgId))
       .collect();
 
+    // The chosen building's team, checked against this org; none means today's pool.
+    let team: TourTeam | null = null;
+    if (args.propertyId) {
+      const property = await ctx.db.get(args.propertyId);
+      if (property && property.orgId === args.orgId && property.category) team = property.category;
+    }
+    const staff = team ? (await tourStaffFor(ctx, args.orgId, team, memberships)).userIds : null;
+
     const now = Date.now();
     const members = [];
-    for (const m of memberships) {
-      // Only the admin-chosen lead assignees are bookable: asset managers who are not out of
-      // office. (Taking tours + a valid calendar are checked just below.)
-      if (!m.leadAssignee || !(m.jobRoles ?? []).includes("asset_manager")) continue;
-      if (m.unavailableUntil !== undefined && m.unavailableUntil > now) continue;
+    for (const m of poolCandidates(memberships, staff)) {
       const hours = await ctx.db
         .query("tourAvailability")
         .withIndex("by_user", (q) => q.eq("userId", m.userId))
         .unique();
-      if (hours && !hours.availableForTours) continue;
-
       const connection = await ctx.db
         .query("googleCalendarConnections")
         .withIndex("by_user", (q) => q.eq("userId", m.userId))
         .unique();
-      if (!connection || connection.invalidAt) continue;
+      const canBook = bookable(
+        { unavailableUntil: m.unavailableUntil, availableForTours: hours?.availableForTours, calendar: calendarState(connection) },
+        now,
+      );
+      if (!canBook) continue;
 
       const user = await ctx.db.get(m.userId);
       if (!user) continue;
@@ -475,9 +499,12 @@ export const bookingContext = internalQuery({
 
     return {
       timeZone: org.timeZone ?? null,
-      propertyName: property?.name ?? org.name,
-      propertyAddress: property?.address?.formatted ?? null,
+      // No building here on purpose: a tour is only ever at the apartment the caller chose. The team's
+      // first property used to stand in for it and put a tour at the wrong address
+      // (conv_0001m7acgw57fpwagbr0ydncsybk).
       members,
+      // Whose pool this is: the chosen building's team, or null for today's lead-assignee pool.
+      team,
       // Published Sarah configuration (P17), or the code defaults.
       rules: await tourRulesFor(ctx, args.orgId),
     };
@@ -517,6 +544,10 @@ export const reserve = internalMutation({
     callerName: v.optional(v.string()),
     callerPhone: v.optional(v.string()),
     elevenLabsConversationId: v.optional(v.string()),
+    propertyId: v.optional(v.id("properties")),
+    unitId: v.optional(v.id("units")),
+    propertyAddress: v.optional(v.string()),
+    unitLabel: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<Id<"tours"> | null> => {
     const rules = await tourRulesFor(ctx, args.orgId);
@@ -537,6 +568,19 @@ export const reserve = internalMutation({
         t.end > args.start - bufferMs,
     );
     if (clash) return null;
+
+    // The apartment was matched on this team's own buildings already; checked again here so a
+    // tour can never point at another team's property or unit.
+    if (args.propertyId) {
+      const property = await ctx.db.get(args.propertyId);
+      if (!property || property.orgId !== args.orgId) throw new ConvexError("That property is not on this team.");
+    }
+    if (args.unitId) {
+      const unit = await ctx.db.get(args.unitId);
+      if (!unit || unit.orgId !== args.orgId || unit.propertyId !== args.propertyId) {
+        throw new ConvexError("That unit is not in this team's property.");
+      }
+    }
 
     const now = Date.now();
     return ctx.db.insert("tours", { ...args, status: "booked", createdAt: now, updatedAt: now });
@@ -594,6 +638,12 @@ export const upcomingForCaller = internalQuery({
           callerPhone: t.callerPhone,
           elevenLabsConversationId: t.elevenLabsConversationId,
           memberFirstName: member?.firstName || member?.email?.split("@")[0] || "a member of our team",
+          // The apartment it is for, so a moved tour's new calendar event still says where, and its
+          // team's tour list gives the moved tour.
+          propertyId: t.propertyId,
+          propertyName: t.propertyId ? ((await ctx.db.get(t.propertyId))?.name ?? undefined) : undefined,
+          propertyAddress: t.propertyAddress,
+          unitLabel: t.unitLabel,
         };
       }),
     );
@@ -681,6 +731,57 @@ export const byId = internalQuery({
   handler: (ctx, args) => ctx.db.get(args.tourId),
 });
 
+const apartmentFields = {
+  propertyId: v.optional(v.id("properties")),
+  unitId: v.optional(v.id("units")),
+  propertyAddress: v.optional(v.string()),
+  unitLabel: v.optional(v.string()),
+};
+
+/**
+ * Sets the apartment of a booked tour on this team (changeTourApartment). The building and unit are
+ * checked against the team again, as in reserve. Returns what it replaced, so a failed calendar update
+ * can put it back, or null when the tour is not a booked tour of this team.
+ */
+export const setApartment = internalMutation({
+  args: { orgId: v.string(), tourId: v.id("tours"), ...apartmentFields },
+  handler: async (ctx, { orgId, tourId, ...next }) => {
+    const tour = await ctx.db.get(tourId);
+    if (!tour || tour.orgId !== orgId || tour.status !== "booked") return null;
+    if (next.propertyId) {
+      const property = await ctx.db.get(next.propertyId);
+      if (!property || property.orgId !== orgId) throw new ConvexError("That property is not on this team.");
+    }
+    if (next.unitId) {
+      const unit = await ctx.db.get(next.unitId);
+      if (!unit || unit.orgId !== orgId || unit.propertyId !== next.propertyId) {
+        throw new ConvexError("That unit is not in this team's property.");
+      }
+    }
+    await ctx.db.patch(tourId, { ...next, updatedAt: Date.now() });
+    return {
+      assignedUserId: tour.assignedUserId,
+      googleEventId: tour.googleEventId,
+      callerName: tour.callerName,
+      callerPhone: tour.callerPhone,
+      apartment: {
+        propertyId: tour.propertyId,
+        unitId: tour.unitId,
+        propertyAddress: tour.propertyAddress,
+        unitLabel: tour.unitLabel,
+      },
+    };
+  },
+});
+
+/** Puts a tour's apartment back when its calendar event could not be updated. */
+export const restoreApartment = internalMutation({
+  args: { tourId: v.id("tours"), ...apartmentFields },
+  handler: async (ctx, { tourId, ...previous }) => {
+    await ctx.db.patch(tourId, { ...previous, updatedAt: Date.now() });
+  },
+});
+
 export const markCancelled = internalMutation({
   args: { tourId: v.id("tours") },
   handler: (ctx, args) => ctx.db.patch(args.tourId, { status: "cancelled", updatedAt: Date.now() }),
@@ -732,29 +833,33 @@ type Context =
   | {
       ok: true;
       timeZone: string;
-      propertyName: string;
-      propertyAddress: string | null;
       members: Member[];
       rules: sched.TourRules;
     }
   | { ok: false; reason: string };
 
-async function loadContext(ctx: ActionCtx, orgId: string | undefined): Promise<Context> {
+/**
+ * Who can be booked for this call. `propertyId` is the building the caller chose (when there is one):
+ * its team's tour list is the pool (bookingContext). Nobody bookable there means the caller's preferred
+ * time is taken instead; it never widens to anyone else.
+ */
+async function loadContext(
+  ctx: ActionCtx,
+  orgId: string | undefined,
+  propertyId?: Id<"properties">,
+): Promise<Context> {
   if (!orgId) return { ok: false, reason: "This call could not be matched to a team." };
-  const context = await ctx.runQuery(internal.tours.bookingContext, { orgId });
+  const context = await ctx.runQuery(internal.tours.bookingContext, { orgId, propertyId });
   if (!context) return { ok: false, reason: "This call could not be matched to a team." };
   if (!context.timeZone) return { ok: false, reason: "The team has not set a time zone yet." };
   if (context.members.length === 0) {
-    return {
-      ok: false,
-      reason: "No lead-assignee asset manager has a calendar connected and is taking tours.",
-    };
+    const reason = noOneBookableReason(context.team);
+    console.info(`[tours] no calendar to book: ${reason}`);
+    return { ok: false, reason };
   }
   return {
     ok: true,
     timeZone: context.timeZone,
-    propertyName: context.propertyName,
-    propertyAddress: context.propertyAddress,
     members: context.members,
     rules: context.rules,
   };
@@ -829,11 +934,13 @@ export async function findTourTimes(
   date: string,
   requestedTime?: string,
   ignoreTour?: IgnoredTour,
+  // The building the caller chose: times come from its team's tour list only (bookingContext).
+  propertyId?: Id<"properties">,
 ): Promise<
   | { available: true; timeZone: string; requested: RequestedTime | null; times: TourTime[]; sameDay: boolean }
   | { available: false; reason: string }
 > {
-  const context = await loadContext(ctx, orgId);
+  const context = await loadContext(ctx, orgId, propertyId);
   if (!context.ok) return { available: false, reason: context.reason };
   const { timeZone, members, rules } = context;
 
@@ -958,15 +1065,26 @@ export const lastTimeCheck = internalQuery({
 export type BookingResult =
   | {
       status: "booked";
+      tourId: Id<"tours">;
       label: string;
       memberFirstName: string;
       memberUserId: Id<"users">;
-      propertyName: string;
+      /** The chosen apartment's building; both null when none was chosen (never a default building). */
+      propertyName: string | null;
       propertyAddress: string | null;
     }
   | { status: "taken"; otherTimes: TourTime[] }
   | { status: "invalid"; reason: string }
   | { status: "unavailable"; reason: string };
+
+/** The apartment a new tour is for, already matched to this team's building (sarahTools.tourApartment). */
+export type TourApartmentInput = {
+  propertyId: Id<"properties">;
+  propertyName: string;
+  propertyAddress: string;
+  unitId?: Id<"units">;
+  unitLabel?: string;
+};
 
 export async function bookTour(
   ctx: ActionCtx,
@@ -976,11 +1094,18 @@ export async function bookTour(
     callerName?: string;
     callerPhone?: string;
     elevenLabsConversationId?: string;
+    apartment?: TourApartmentInput;
   },
 ): Promise<BookingResult> {
-  const context = await loadContext(ctx, orgId);
+  // The chosen building's team gives the tour (the same pool find_tour_times offered from).
+  const context = await loadContext(ctx, orgId, args.apartment?.propertyId);
   if (!context.ok) return { status: "unavailable", reason: context.reason };
-  const { timeZone, members, propertyName, propertyAddress, rules } = context;
+  const { timeZone, members, rules } = context;
+  // The building the caller chose, when there is one. Otherwise none at all: the tour, its event and
+  // what Sarah says carry no address, and the team confirms it with the caller.
+  const { apartment } = args;
+  const propertyName = apartment?.propertyName ?? null;
+  const propertyAddress = apartment?.propertyAddress ?? null;
 
   const parts = sched.parseLocalDateTime(args.slotStart);
   if (!parts) {
@@ -996,6 +1121,8 @@ export async function bookTour(
       orgId,
       sched.localDateKey(start, timeZone),
       sched.formatLocalDateTime(start, timeZone).slice(11),
+      undefined,
+      args.apartment?.propertyId,
     );
     return {
       status: "taken",
@@ -1042,17 +1169,32 @@ export async function bookTour(
       callerName: args.callerName,
       callerPhone: args.callerPhone,
       elevenLabsConversationId: args.elevenLabsConversationId,
+      propertyId: apartment?.propertyId,
+      unitId: apartment?.unitId,
+      propertyAddress: apartment?.propertyAddress,
+      unitLabel: apartment?.unitLabel,
     });
     if (!tourId) continue; // someone else booked them a moment ago; try the next person
 
     try {
       const { id } = await google.insertEvent(
         await accessTokenFor(ctx, member.userId),
-        tourEvent({ ...args, propertyName, propertyAddress, start, end, timeZone }),
+        tourEvent({
+          callerName: args.callerName,
+          callerPhone: args.callerPhone,
+          propertyName,
+          propertyAddress,
+          unitLabel: apartment?.unitLabel,
+          apartmentChosen: apartment !== undefined,
+          start,
+          end,
+          timeZone,
+        }),
       );
       await ctx.runMutation(internal.tours.attachEvent, { tourId, googleEventId: id });
       return {
         status: "booked",
+        tourId,
         label,
         memberFirstName: member.firstName,
         memberUserId: member.userId,
@@ -1070,9 +1212,12 @@ export async function bookTour(
   return alternatives();
 }
 
+/** Title, description and location come from tourDisplay.tourEventText (tested on its own). */
 function tourEvent(t: {
-  propertyName: string;
+  propertyName: string | null;
   propertyAddress: string | null;
+  unitLabel?: string;
+  apartmentChosen: boolean;
   callerName?: string;
   callerPhone?: string;
   start: number;
@@ -1080,17 +1225,7 @@ function tourEvent(t: {
   timeZone: string;
 }): google.EventInput {
   return {
-    summary: `Property tour: ${t.callerName || "Prospective renter"}`,
-    description: [
-      `Tour of ${t.propertyName}, booked by Sarah (Simplr).`,
-      t.callerName ? `Renter: ${t.callerName}` : null,
-      t.callerPhone ? `Phone: ${t.callerPhone}` : null,
-    ]
-      .filter(Boolean)
-      .join("\n"),
-    // The street address turns the event's location into a tappable map link in Google
-    // Calendar. The name is only a fallback for a property with no address saved yet.
-    location: t.propertyAddress ?? t.propertyName,
+    ...tourEventText(t),
     start: new Date(t.start).toISOString(),
     end: new Date(t.end).toISOString(),
     timeZone: t.timeZone,
@@ -1105,6 +1240,11 @@ export type CallerTour = {
   googleEventId?: string;
   callerName?: string;
   callerPhone?: string;
+  // The apartment it was booked for (tours.upcomingForCaller), if any.
+  propertyId?: Id<"properties">;
+  propertyName?: string;
+  propertyAddress?: string;
+  unitLabel?: string;
 };
 
 /**
@@ -1118,12 +1258,19 @@ export type CallerTour = {
 export async function rescheduleTour(
   ctx: ActionCtx,
   orgId: string | undefined,
-  args: { tour: CallerTour; slotStart: string },
+  // propertyId: the building whose team gives the tour; the tour's own building when not given.
+  args: { tour: CallerTour; slotStart: string; propertyId?: Id<"properties"> },
 ): Promise<BookingResult> {
-  const context = await loadContext(ctx, orgId);
+  const poolProperty = args.propertyId ?? args.tour.propertyId;
+  const context = await loadContext(ctx, orgId, poolProperty);
   if (!context.ok) return { status: "unavailable", reason: context.reason };
-  const { timeZone, members, propertyName, propertyAddress, rules } = context;
+  const { timeZone, members, rules } = context;
   const { tour } = args;
+  // A tour booked for a chosen apartment keeps that building's address on its new event; one without
+  // stays without (never the team's first building).
+  const apartmentChosen = tour.propertyAddress !== undefined;
+  const propertyName = apartmentChosen ? (tour.propertyName ?? null) : null;
+  const propertyAddress = tour.propertyAddress ?? null;
 
   const parts = sched.parseLocalDateTime(args.slotStart);
   if (!parts) {
@@ -1143,6 +1290,7 @@ export async function rescheduleTour(
       sched.localDateKey(start, timeZone),
       sched.formatLocalDateTime(start, timeZone).slice(11),
       ignore,
+      poolProperty,
     );
     return {
       status: "taken",
@@ -1204,6 +1352,8 @@ export async function rescheduleTour(
           tourEvent({
             propertyName,
             propertyAddress,
+            unitLabel: tour.unitLabel,
+            apartmentChosen,
             callerName: tour.callerName,
             callerPhone: tour.callerPhone,
             start,
@@ -1224,6 +1374,7 @@ export async function rescheduleTour(
       }
       return {
         status: "booked",
+        tourId: tour.id,
         label,
         memberFirstName: member.firstName,
         memberUserId: member.userId,
@@ -1237,6 +1388,49 @@ export async function rescheduleTour(
   }
 
   return alternatives();
+}
+
+/**
+ * Corrects which apartment a booked tour is for, at the same day and time (reschedule_tour with the
+ * tour's own slot and a building). The tour row first (org and unit checked again in setApartment),
+ * then its Google event's title, description and location; if Google refuses, the row is put back,
+ * so the calendar and the dashboard never disagree. The caller is told it changed only on "changed".
+ */
+export async function changeTourApartment(
+  ctx: ActionCtx,
+  orgId: string,
+  tourId: Id<"tours">,
+  apartment: TourApartmentInput,
+): Promise<{ status: "changed" } | { status: "failed" }> {
+  const previous = await ctx.runMutation(internal.tours.setApartment, {
+    orgId,
+    tourId,
+    propertyId: apartment.propertyId,
+    unitId: apartment.unitId,
+    propertyAddress: apartment.propertyAddress,
+    unitLabel: apartment.unitLabel,
+  });
+  if (!previous) return { status: "failed" };
+  if (!previous.googleEventId) return { status: "changed" };
+  try {
+    await google.patchEvent(
+      await accessTokenFor(ctx, previous.assignedUserId),
+      previous.googleEventId,
+      tourEventText({
+        propertyName: apartment.propertyName,
+        propertyAddress: apartment.propertyAddress,
+        unitLabel: apartment.unitLabel,
+        apartmentChosen: true,
+        callerName: previous.callerName,
+        callerPhone: previous.callerPhone,
+      }),
+    );
+    return { status: "changed" };
+  } catch (err) {
+    console.error(`[tours] could not update the event of ${tourId} to the corrected apartment:`, err);
+    await ctx.runMutation(internal.tours.restoreApartment, { tourId, ...previous.apartment });
+    return { status: "failed" };
+  }
 }
 
 /** Up to `n` items spread across the list (first, middle, last) rather than the first `n`. */

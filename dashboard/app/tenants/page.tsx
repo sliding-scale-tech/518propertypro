@@ -28,7 +28,7 @@ function TenantsInner() {
         title="Tenants"
         subtitle={
           tab === "calls"
-            ? "Every resident call, including maintenance requests raised from calls."
+            ? "Every resident call, including maintenance requests raised from calls (open those under Work orders)."
             : tab === "callbacks"
               ? "Callers Sarah could not match to a unit, waiting for a callback."
               : "Tenant directory used to recognise callers."

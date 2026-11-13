@@ -2,48 +2,26 @@
 
 import { useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
-import { Banknote, History, Pencil, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { History, Pencil } from "lucide-react";
 import { api } from "@/convex/_generated/api";
 import { formatCurrency, formatMonth } from "@/convex/rosFormat";
+import { LEASE_TYPE_LABEL, OCCUPANCY_LABEL, RENT_PAID_TO_LABEL } from "@/convex/unitEditLib";
 import { Btn, Drawer, DrawerSection, KeyValue, Pill } from "@/components/ui";
 import { formatStamp } from "@/components/finance/months";
-import { ChangeRentForm } from "./change-rent";
-import { UnitEditForm, type UnitPatch } from "./edit-unit-modal";
 import type { Manager, UnitRow } from "./types";
 import { UnitHistory } from "./unit-history";
 
 /** One row of units.rentSummary: the unit's rent THIS month (rent history, else roster) and its next change. */
 export type UnitRentNow = FunctionReturnType<typeof api.units.rentSummary>[number];
 
-export type UnitDrawerMode = "view" | "edit" | "rent";
-
-const PAID_TO: Record<string, string> = {
-  company: "Paid to the company",
-  owner_direct: "Owner collects rent directly",
-  included_in_other_unit: "Included in another unit's rent",
-};
-const OCCUPANCY: Record<string, string> = {
-  occupied: "Occupied",
-  occupied_leaving: "Occupied (leaving)",
-  vacant: "Vacant",
-  vacant_not_ready: "Vacant, not rent ready",
-};
-const LEASE: Record<string, string> = { fixed: "Fixed term", month_to_month: "Month to month", vacant: "Vacant", unknown: "Unknown" };
-
-/** "Rent $1,250.00/month (from November 2026)" for the Edit unit form and the drawer. */
-export function rentLine(rent: UnitRentNow | undefined): string {
-  if (!rent) return "Rent —";
-  if (rent.cents === null) return "No rent set";
-  return `Rent ${formatCurrency(rent.cents)}/month (${rent.fromMonth ? `from ${formatMonth(rent.fromMonth)}` : "from the roster"})`;
-}
+const label = (map: Record<string, string>, v: string) => map[v] ?? v;
 
 /**
- * The unit drawer (whole-row click on the property's unit table): details, the rent now and its
- * history, and the unit's actions. Edit unit and Change rent open inline (a dialog over a drawer
- * would fight it for Escape and focus). Who sees what follows the server: Edit / Remove for the admin
- * view, Change rent and the rent history for admin + accountant, the asset manager history for the
- * admin view.
+ * The unit drawer (whole-row click on the property's unit table): a read-only summary (rent now,
+ * details, rent history, asset manager history) and ONE action, Edit unit, which opens the B45
+ * Edit unit dialog (every change, one Save). Who sees what follows the server: Edit unit for anyone
+ * who may change some part of the unit (`canEdit`), the rent history for admin + accountant, the
+ * asset manager history for the admin view.
  */
 export function UnitDrawer({
   unit,
@@ -51,12 +29,10 @@ export function UnitDrawer({
   tenants,
   rent,
   managers,
-  initialMode = "view",
   canEdit,
-  canChangeRent,
+  canRentHistory,
   canHistory,
-  onSave,
-  onRemove,
+  onEdit,
   onClose,
 }: {
   unit: UnitRow;
@@ -64,29 +40,13 @@ export function UnitDrawer({
   tenants: string[];
   rent: UnitRentNow | undefined;
   managers: Manager[];
-  initialMode?: UnitDrawerMode;
   canEdit: boolean;
-  canChangeRent: boolean;
+  canRentHistory: boolean;
   canHistory: boolean;
-  onSave: (patch: UnitPatch) => Promise<unknown>;
-  onRemove: () => void;
+  onEdit: () => void;
   onClose: () => void;
 }) {
-  const [mode, setMode] = useState<UnitDrawerMode>(initialMode);
   const occupied = tenants.length > 0;
-  const label = `Unit ${unit.unitNumber} · ${propertyName}`;
-  const rentAction =
-    canChangeRent && mode === "edit" ? (
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-[13.5px] font-medium tabular-nums">{rentLine(rent)}</span>
-        <Btn sm onClick={() => setMode("rent")}>
-          <Banknote aria-hidden className="h-3.5 w-3.5" />
-          Change rent
-        </Btn>
-      </div>
-    ) : mode === "edit" ? (
-      <span className="text-[13.5px] tabular-nums">{rentLine(rent)}</span>
-    ) : null;
 
   return (
     <Drawer
@@ -100,40 +60,15 @@ export function UnitDrawer({
           {unit.covering ? <Pill tone="acc">Covering</Pill> : null}
         </>
       }
-      title={
-        mode === "edit" ? `Edit unit ${unit.unitNumber}` : mode === "rent" ? `Change rent · Unit ${unit.unitNumber}` : `Unit ${unit.unitNumber}`
-      }
+      title={`Unit ${unit.unitNumber}`}
     >
-      {mode === "edit" && canEdit ? (
-        <UnitEditForm unit={unit} rent={rentAction} onSave={onSave} onDone={() => setMode("view")} onCancel={() => setMode("view")} />
-      ) : mode === "rent" && canChangeRent ? (
-        <ChangeRentForm
-          target={{ unitId: unit._id, label }}
-          onDone={() => setMode("view")}
-          onCancel={() => setMode("view")}
-        />
-      ) : (
-        <>
-          {canEdit || canChangeRent ? (
+      <>
+          {canEdit ? (
             <div className="flex flex-wrap gap-2">
-              {canEdit ? (
-                <Btn sm onClick={() => setMode("edit")}>
-                  <Pencil aria-hidden className="h-3.5 w-3.5" />
-                  Edit unit
-                </Btn>
-              ) : null}
-              {canChangeRent ? (
-                <Btn sm onClick={() => setMode("rent")}>
-                  <Banknote aria-hidden className="h-3.5 w-3.5" />
-                  Change rent
-                </Btn>
-              ) : null}
-              {canEdit ? (
-                <Btn sm variant="dng" className="ml-auto" onClick={onRemove}>
-                  <Trash2 aria-hidden className="h-3.5 w-3.5" />
-                  Remove unit
-                </Btn>
-              ) : null}
+              <Btn sm onClick={onEdit}>
+                <Pencil aria-hidden className="h-3.5 w-3.5" />
+                Edit unit
+              </Btn>
             </div>
           ) : null}
 
@@ -164,14 +99,14 @@ export function UnitDrawer({
                 ...(unit.parking ? [{ label: "Parking", value: unit.parking }] : []),
                 { label: "Asset manager", value: unit.assetManagerName },
                 { label: "Available", value: unit.available ? `Yes${unit.availableFrom ? `, from ${unit.availableFrom}` : ""}` : "No" },
-                ...(unit.occupancy ? [{ label: "Roster", value: OCCUPANCY[unit.occupancy] ?? unit.occupancy }] : []),
-                ...(unit.leaseType ? [{ label: "Lease", value: `${LEASE[unit.leaseType] ?? unit.leaseType}${unit.leaseEnd ? `, ends ${unit.leaseEnd}` : ""}` }] : []),
-                ...(unit.rentPaidTo ? [{ label: "Rent paid", value: PAID_TO[unit.rentPaidTo] ?? unit.rentPaidTo }] : []),
+                ...(unit.occupancy ? [{ label: "Roster", value: label(OCCUPANCY_LABEL, unit.occupancy) }] : []),
+                ...(unit.leaseType ? [{ label: "Lease", value: `${label(LEASE_TYPE_LABEL, unit.leaseType)}${unit.leaseEnd ? `, ends ${unit.leaseEnd}` : ""}` }] : []),
+                ...(unit.rentPaidTo ? [{ label: "Rent paid", value: label(RENT_PAID_TO_LABEL, unit.rentPaidTo) }] : []),
               ]}
             />
           </DrawerSection>
 
-          {canChangeRent ? (
+          {canRentHistory ? (
             <DrawerSection title="Rent history">
               <RentHistoryList unitId={unit._id} />
             </DrawerSection>
@@ -189,8 +124,7 @@ export function UnitDrawer({
               <UnitHistory unitId={unit._id} managers={managers} />
             </DrawerSection>
           ) : null}
-        </>
-      )}
+      </>
     </Drawer>
   );
 }

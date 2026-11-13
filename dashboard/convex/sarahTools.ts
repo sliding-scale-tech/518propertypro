@@ -74,6 +74,9 @@ export async function availableUnitsFor(ctx: QueryCtx, orgId: string) {
           community: p?.name ?? null,
           address: p?.address?.formatted ?? null,
           city: p ? cityOfProperty(p) : null,
+          // The unit's own label ("2B"), so Sarah can name the unit a caller picks. Null for a house
+          // (no label). A label only, nothing about who lived there.
+          unitLabel: spokenLabel(u),
           bedrooms: u.bedrooms,
           rentedAs: u.rentedAs ?? null,
           rent: u.rent ?? null,
@@ -81,6 +84,92 @@ export async function availableUnitsFor(ctx: QueryCtx, orgId: string) {
           leasingFacts: u.leasingFacts ?? null,
         };
       }),
+  };
+}
+
+/** One unit type Sarah may offer, summed over the available units of that type. */
+export type OfferedUnitType = {
+  community: string | null;
+  /** The building's address and city, so Sarah can say where it is (roster import, B3). */
+  address: string | null;
+  city: string | null;
+  bedrooms: string;
+  rentMin: number | null;
+  rentMax: number | null;
+  /** Null when we only have the property's per-type summary, which carries no count. */
+  count: number | null;
+  availableFrom: string | null;
+  /** How the unit must be described (e.g. a room in a shared apartment). Null when none. */
+  leasingFacts: string | null;
+  /** "room" for one room of a shared apartment, null for a whole unit. */
+  rentedAs: "room" | null;
+  /** Labels of the AVAILABLE units in this group ("1", "2B"), naturally sorted. Labels only, never who lives anywhere. */
+  units: string[];
+};
+
+/** At most this many unit labels per building and type in a tool result, to keep results small. */
+export const MAX_UNIT_LABELS = 4;
+
+/** availableUnitsFor's rows (available units only). */
+type AvailableUnitRow = Awaited<ReturnType<typeof availableUnitsFor>>["available"][number];
+
+/**
+ * The available units grouped into what Sarah may offer: one group per building and unit type.
+ * Units with their own leasing facts, or rented as a room, are never merged into a plain bedroom
+ * group, so the facts always reach Sarah with the right rent. The address is in the key, so two
+ * buildings with one community name never share a group (and their unit labels never get mixed up).
+ */
+export function groupOfferedUnits(rows: readonly AvailableUnitRow[]): OfferedUnitType[] {
+  const groups = new Map<string, OfferedUnitType>();
+  for (const u of rows) {
+    const key = `${u.community ?? ""}|${u.address ?? ""}|${u.bedrooms}|${u.leasingFacts ?? ""}|${u.rentedAs ?? ""}`;
+    const g: OfferedUnitType = groups.get(key) ?? {
+      community: u.community,
+      address: u.address,
+      city: u.city,
+      bedrooms: u.bedrooms,
+      rentMin: null,
+      rentMax: null,
+      count: 0,
+      availableFrom: null,
+      leasingFacts: u.leasingFacts,
+      rentedAs: u.rentedAs,
+      units: [],
+    };
+    g.count = (g.count ?? 0) + 1;
+    if (u.unitLabel && !g.units.includes(u.unitLabel)) g.units.push(u.unitLabel);
+    if (u.rent !== null) {
+      g.rentMin = g.rentMin === null ? u.rent : Math.min(g.rentMin, u.rent);
+      g.rentMax = g.rentMax === null ? u.rent : Math.max(g.rentMax, u.rent);
+    }
+    // The earliest date any unit of this type frees up, compared as written (ISO dates sort).
+    if (u.availableFrom && (!g.availableFrom || u.availableFrom < g.availableFrom)) {
+      g.availableFrom = u.availableFrom;
+    }
+    groups.set(key, g);
+  }
+  return [...groups.values()].map((g) => ({ ...g, units: [...g.units].sort(naturalCompare) }));
+}
+
+/**
+ * One offered unit type as Sarah gets it (check_availability all_units, log_lead / check_qualification
+ * available_units). Building, type, rent and up to MAX_UNIT_LABELS available unit labels, so a unit the
+ * caller picks can go to request_tour as spoken_unit. Nothing about residents or owners.
+ */
+export function offeredUnitForAgent(t: OfferedUnitType) {
+  return {
+    community: t.community,
+    address: t.address,
+    city: t.city,
+    bedrooms: t.bedrooms,
+    rent_min: t.rentMin,
+    rent_max: t.rentMax,
+    units_available: t.count,
+    available_from: t.availableFrom,
+    // When present, describe the unit exactly this way (it overrides bedrooms / rent wording).
+    leasing_facts: t.leasingFacts ?? (t.rentedAs === "room" ? ROOM_SAY : null),
+    rented_as: t.rentedAs,
+    ...(t.units.length > 0 ? { units: t.units.slice(0, MAX_UNIT_LABELS) } : {}),
   };
 }
 
@@ -416,6 +505,85 @@ export const exactUnit = internalQuery({
     const unit = await exactUnitInProperty(ctx, args.orgId, args.propertyId, args.spokenUnit);
     return unit ? { unitId: unit._id, unitLabel: unit.unitNumber } : null;
   },
+});
+
+// --- request_tour ------------------------------------------------------------
+
+/**
+ * The apartment a tour is for, from the building and unit the caller chose. Same matching as
+ * find_unit and get_unit_details (matchProperty, then exactUnitAmong), this team's buildings only,
+ * and only an AVAILABLE unit is ever attached, as in the other leasing tools. Never anything about
+ * residents. Anything less than an exact match leaves that part out rather than guessing:
+ *  - property null: no building matched (or none was given on a multi-building team).
+ *  - property set, unit null: the building matched; unitStatus says why no unit is attached.
+ */
+export type TourApartment = {
+  property: { id: Id<"properties">; name: string; address: string; street: string } | null;
+  unit: { id: Id<"units">; label: string | null } | null;
+  unitStatus: "matched" | "none_given" | "not_available";
+};
+
+/**
+ * What to try matching a tour's building on, best first. Sarah passes the address exactly as a
+ * log_lead / check_availability result gave it ("1635 Van Vranken Avenue, Schenectady, NY"), so the
+ * street part before the first comma comes first: the city and state are not what tells buildings
+ * apart, and could make two buildings with the same number in one city look alike. Then the whole text.
+ */
+export function tourBuildingQueries(spoken: string | undefined): string[] {
+  const whole = spoken?.trim() ?? "";
+  if (!whole) return [];
+  const street = whole.split(",")[0].trim();
+  return street && street !== whole ? [street, whole] : [whole];
+}
+
+/**
+ * True when the spoken text names the building itself (a word of its street or its name), not just
+ * its city or area. "Schenectady" must never pick a building for a tour, even on a team with only one
+ * building there (conv_0001m7acgw57fpwagbr0ydncsybk passed the city as the building).
+ */
+export function namesBuilding(spoken: string, property: { name: string; address?: { formatted: string } }): boolean {
+  const words = addressTokens(spoken).filter((t) => !/^\d+$/.test(t) && !ADDRESS_NOISE.has(t) && t.length >= 3);
+  const own = new Set(addressTokens(`${(property.address?.formatted ?? property.name).split(",")[0]} ${property.name}`));
+  return words.some((w) => own.has(w));
+}
+
+export async function tourApartmentFor(
+  ctx: QueryCtx,
+  args: { orgId: string; spokenAddress?: string; spokenUnit?: string },
+): Promise<TourApartment> {
+  let property: Doc<"properties"> | null = null;
+  const queries = tourBuildingQueries(args.spokenAddress);
+  if (queries.length === 0) {
+    // No building said: only a one-building team's own building (matchProperty), as find_unit does.
+    property = await matchProperty(ctx, args.orgId, undefined);
+  }
+  for (const q of queries) {
+    const hit = await matchProperty(ctx, args.orgId, q);
+    if (hit && namesBuilding(q, hit)) {
+      property = hit;
+      break;
+    }
+  }
+  if (!property || property.orgId !== args.orgId) {
+    return { property: null, unit: null, unitStatus: saysNoUnit(args.spokenUnit) ? "none_given" : "not_available" };
+  }
+  const where = {
+    id: property._id,
+    name: property.name,
+    address: property.address?.formatted ?? property.name,
+    street: streetLine(property),
+  };
+  const unit = exactUnitAmong(await unitsOf(ctx, args.orgId, property._id), args.spokenUnit);
+  if (unit?.available) {
+    return { property: where, unit: { id: unit._id, label: spokenLabel(unit) }, unitStatus: "matched" };
+  }
+  // An unavailable unit is reported the same as an unknown one: nothing about occupancy is said.
+  return { property: where, unit: null, unitStatus: saysNoUnit(args.spokenUnit) ? "none_given" : "not_available" };
+}
+
+export const tourApartment = internalQuery({
+  args: { orgId: v.string(), spokenAddress: v.optional(v.string()), spokenUnit: v.optional(v.string()) },
+  handler: async (ctx, args): Promise<TourApartment> => await tourApartmentFor(ctx, args),
 });
 
 // --- get_unit_details --------------------------------------------------------

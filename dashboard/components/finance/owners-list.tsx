@@ -12,9 +12,10 @@ import {
   PageHeader,
   Pagination,
   Pill,
+  FilterToggle,
+  FilterToolbar,
   SearchBox,
   SortHeader,
-  Toggle,
   ariaSortOf,
   paginate,
   readSort,
@@ -145,40 +146,43 @@ export function OwnersList() {
       <FinanceNav active="owners" />
       <NeedsOwnerCard />
       <Card>
-        <div className="mb-3">
-          <SearchBox
-            id="owners-search"
-            label="Search owners"
-            value={search.input}
-            onChange={search.setInput}
-            onClear={search.clear}
-            placeholder="Search owner, contact, email or property"
+        <FilterToolbar
+          className="mb-3.5"
+          active={q !== "" || showInactive || problemsOnly}
+          onClear={() => {
+            search.clear();
+            setShowInactive(false);
+            setProblemsOnly(false);
+            paging.resetPage();
+          }}
+          search={
+            <SearchBox
+              id="owners-search"
+              label="Search owners"
+              value={search.input}
+              onChange={search.setInput}
+              onClear={search.clear}
+              placeholder="Search owner, contact, email or property"
+            />
+          }
+        >
+          <FilterToggle
+            label="Show inactive owners"
+            pressed={showInactive}
+            onChange={(v) => {
+              setShowInactive(v);
+              paging.resetPage();
+            }}
           />
-        </div>
-        <div className="mb-4 flex flex-wrap items-center gap-x-5 gap-y-2">
-          <div className="flex items-center gap-2">
-            <Toggle
-              checked={showInactive}
-              label="Show inactive owners"
-              onChange={(v) => {
-                setShowInactive(v);
-                paging.resetPage();
-              }}
-            />
-            <span className="text-[13px]">Show inactive owners</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <Toggle
-              checked={problemsOnly}
-              label="Only owners with problems"
-              onChange={(v) => {
-                setProblemsOnly(v);
-                paging.resetPage();
-              }}
-            />
-            <span className="text-[13px]">Only owners with problems</span>
-          </div>
-        </div>
+          <FilterToggle
+            label="Only owners with problems"
+            pressed={problemsOnly}
+            onChange={(v) => {
+              setProblemsOnly(v);
+              paging.resetPage();
+            }}
+          />
+        </FilterToolbar>
         {owners === undefined ? (
           <Spinner label="Loading owners…" />
         ) : (

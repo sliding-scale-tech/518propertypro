@@ -7,13 +7,14 @@ import { useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { formatCurrency, formatMonth } from "@/convex/rosFormat";
-import { Dialog } from "@/components/properties/dialog";
 import { errorMessage, useToast } from "@/components/toast";
 import { AddUnitModal, type NewUnit } from "@/components/units/add-unit-modal";
-import { ChangeRentDialog, type ChangeRentTarget } from "@/components/units/change-rent";
 import { formatRent, type Manager, type UnitRow } from "@/components/units/types";
-import { UnitDrawer, type UnitDrawerMode, type UnitRentNow } from "@/components/units/unit-drawer";
+import { UnitDrawer, type UnitRentNow } from "@/components/units/unit-drawer";
+import { UnitEditDialog, type UnitEditFocus } from "@/components/units/unit-edit-dialog";
+import { canOpenUnitEdit, unitEditPermissions } from "@/convex/unitEditLib";
 import { normalizeSearch } from "@/components/finance/payments-search";
+import { EXACT_UNIT_PARAM } from "@/convex/tourDisplay";
 import {
   UNIT_AVAILABILITY_FILTERS,
   UNIT_SORT_DEFAULT,
@@ -30,6 +31,8 @@ import {
   Pagination,
   Pill,
   RowMenu,
+  FilterSelect,
+  FilterToolbar,
   SearchBox,
   Select,
   SortHeader,
@@ -49,11 +52,13 @@ const P = "units_";
 
 /**
  * The property's units: Unit · Tenant · Rent/month · Status · Asset manager · ⋯. A row click (or
- * Enter) opens the unit drawer (details, rent and its history, actions). Every unit always has an
- * asset manager: the select's first option ("Same as property") assigns the property default, it
- * never clears the field. Who can do what follows the server: Add / Edit / Remove and the asset
- * manager for the admin view (`canEdit`), Change rent for admin + accountant (`canChangeRent`),
- * availability for the admin view and an asset manager on their own units.
+ * Enter) opens the unit drawer (a read-only summary with one Edit unit button). Every change to a
+ * unit goes through the B45 Edit unit dialog (one Save); the ⋯ menu's New renter… / Move out… are
+ * shortcuts that open that dialog at its Tenant section. Every unit always has an asset manager: the
+ * select's first option ("Same as property") assigns the property default, it never clears the
+ * field. Who can do what follows the server (unitEditLib.unitEditPermissions): Add unit and the
+ * asset manager select for the admin view (`canEdit`); in the dialog, rent for admin + accountant
+ * (`canChangeRent`), details, roster and tenant for the admin view and the unit's own asset manager.
  */
 export function UnitInventory({
   propertyId,
@@ -81,16 +86,13 @@ export function UnitInventory({
   const residents = useQuery(api.residents.list, { propertyId });
   const rentNow = useQuery(api.units.rentSummary, { propertyId });
   const createUnit = useMutation(api.units.create);
-  const updateUnit = useMutation(api.units.update);
-  const removeUnit = useMutation(api.units.remove);
   const assign = useMutation(api.units.assignAssetManager);
   const setAvailability = useMutation(api.units.setAvailability);
 
   const [adding, setAdding] = useState(false);
-  const [open, setOpen] = useState<{ id: string; mode: UnitDrawerMode } | null>(null);
-  const [rentFor, setRentFor] = useState<ChangeRentTarget | null>(null);
-  const [removing, setRemoving] = useState<UnitRow | null>(null);
-  const [busy, setBusy] = useState(false);
+  // The drawer (read-only summary) and the Edit unit dialog (every change, one Save).
+  const [open, setOpen] = useState<string | null>(null);
+  const [editing, setEditing] = useState<{ id: string; focus: UnitEditFocus; replace: boolean } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const tenantsByUnit = useMemo(() => {
@@ -121,6 +123,8 @@ export function UnitInventory({
   const rawFilter = params.get(`${P}filter`) ?? "";
   const filter = (UNIT_AVAILABILITY_FILTERS as readonly string[]).includes(rawFilter) ? (rawFilter as UnitAvailabilityFilter) : "";
   const sort = readSort(params.get(`${P}sort`), params.get(`${P}dir`), UNIT_SORT_KEYS, UNIT_SORT_DEFAULT);
+  // One exact unit, from a tour's Apartment link on the calendar (tourDisplay.apartmentHref).
+  const exactUnit = (params.get(EXACT_UNIT_PARAM) ?? "").trim();
   const paging = useUrlPaging(P);
   /** Set URL params ("" removes one); any change goes back to page 1. */
   const setParams = (updates: Record<string, string>) => {
@@ -142,9 +146,13 @@ export function UnitInventory({
     header: <SortHeader label={label} sortKey={key} sort={sort} onSort={onSort} align={align} />,
     sort: ariaSortOf(sort, key),
   });
-  const visible = unitsView(rows, tenantsOf, { q, filter, sort });
+  const visible = unitsView(rows, tenantsOf, { q, filter, sort, unit: exactUnit });
   const paged = paginate(visible, paging.page, paging.pageSize);
-  const openUnit = open ? (units ?? []).find((u) => u._id === open.id) : undefined;
+  const openUnit = open ? (units ?? []).find((u) => u._id === open) : undefined;
+  const editUnit = editing ? (units ?? []).find((u) => u._id === editing.id) : undefined;
+  /** The viewer's Edit unit permissions for one row (the server checks the same matrix). */
+  const permsFor = (u: UnitRow) =>
+    unitEditPermissions({ admin: canEdit, accountant: canChangeRent, ownAm: canToggleOwn && u.isMine && !u.covering });
 
   const defaultName =
     managers.find((m) => m.userId === defaultAmId)?.name ??
@@ -161,8 +169,6 @@ export function UnitInventory({
       return false;
     }
   };
-  const label = (u: UnitRow) => `Unit ${u.unitNumber} · ${propertyName}`;
-
   const amCell = (u: UnitRow) => {
     const isOverride = !!defaultAmId && u.assetManagerUserId !== defaultAmId;
     if (!canEdit) {
@@ -227,12 +233,16 @@ export function UnitInventory({
     );
   };
 
-  const menuItems = (u: UnitRow): RowMenuItem[] => [
-    ...(canEdit ? [{ label: "Edit unit", onSelect: () => setOpen({ id: u._id, mode: "edit" }) }] : []),
-    ...(canChangeRent ? [{ label: "Change rent…", onSelect: () => setRentFor({ unitId: u._id, label: label(u) }) }] : []),
-    ...(canChangeRent || canHistory ? [{ label: "View history", onSelect: () => setOpen({ id: u._id, mode: "view" }) }] : []),
-    ...(canEdit ? [{ label: "Remove unit…", danger: true, onSelect: () => setRemoving(u) }] : []),
-  ];
+  const menuItems = (u: UnitRow): RowMenuItem[] => {
+    const p = permsFor(u);
+    const edit = (focus: UnitEditFocus, replace = false) => () => setEditing({ id: u._id, focus, replace });
+    return [
+      ...(canOpenUnitEdit(p) ? [{ label: "Edit unit…", onSelect: edit(null) }] : []),
+      ...(p.newRenter ? [{ label: "New renter…", onSelect: edit("tenant", true) }] : []),
+      ...(p.moveOut && tenantsOf(u).length > 0 ? [{ label: "Move out…", onSelect: edit("tenant") }] : []),
+      { label: "View details", onSelect: () => setOpen(u._id) },
+    ];
+  };
 
   const columns: Column<UnitRow>[] = [
     {
@@ -280,7 +290,7 @@ export function UnitInventory({
     { key: "status", ...sortable("available", "Status"), render: statusCell },
     { key: "am", ...sortable("manager", "Asset manager"), render: amCell },
   ];
-  if (canEdit || canChangeRent || canHistory) {
+  if (canEdit || canChangeRent || canHistory || canToggleOwn) {
     columns.push({
       key: "actions",
       header: <span className="sr-only">Actions</span>,
@@ -307,30 +317,58 @@ export function UnitInventory({
         <p className="py-6 text-center text-sm text-muted-foreground">Loading units…</p>
       ) : (
         <>
+          {exactUnit ? (
+            <p className="mb-3 text-sm text-muted-foreground">
+              Showing unit <span className="font-semibold text-foreground">{exactUnit}</span> only.{" "}
+              <button
+                type="button"
+                onClick={() => setParams({ [EXACT_UNIT_PARAM]: "" })}
+                className="font-medium text-primary hover:underline"
+              >
+                Show all units
+              </button>
+            </p>
+          ) : null}
           {rows.length > 0 ? (
-            <div className="mb-4 grid gap-3 sm:grid-cols-[1fr_220px]">
-              <SearchBox
-                id="units-search"
-                label="Search units"
-                value={search.input}
-                onChange={search.setInput}
-                onClear={search.clear}
-                placeholder="Search unit, tenant, asset manager or status"
-              />
-              <Select aria-label="Show units" value={filter} onChange={(e) => setParams({ [`${P}filter`]: e.target.value || "" })}>
-                <option value="">All units</option>
+            <FilterToolbar
+              className="mb-3.5"
+              active={q !== "" || filter !== ""}
+              onClear={() => {
+                search.setInput("");
+                setParams({ [`${P}q`]: "", [`${P}filter`]: "" });
+              }}
+              search={
+                <SearchBox
+                  id="units-search"
+                  label="Search units"
+                  value={search.input}
+                  onChange={search.setInput}
+                  onClear={search.clear}
+                  placeholder="Search unit, tenant, asset manager or status"
+                />
+              }
+            >
+              <FilterSelect
+                label="Show"
+                active={filter !== ""}
+                value={filter || "all"}
+                onChange={(e) =>
+                  setParams({ [`${P}filter`]: !e.target.value || e.target.value === "all" ? "" : e.target.value })
+                }
+              >
+                <option value="all">All units</option>
                 <option value="available">Available</option>
                 <option value="unavailable">Unavailable</option>
                 <option value="vacant">Vacant (no tenant)</option>
-              </Select>
-            </div>
+              </FilterSelect>
+            </FilterToolbar>
           ) : null}
           <DataTable
             caption="Units"
             columns={columns}
             rows={paged.rows}
             rowKey={(u) => u._id}
-            onRowClick={(u) => setOpen({ id: u._id, mode: "view" })}
+            onRowClick={(u) => setOpen(u._id)}
             empty={
               rows.length === 0 ? (
                 canEdit ? "No units yet. Add the first one with Add unit." : "No units yet."
@@ -368,46 +406,33 @@ export function UnitInventory({
 
       {open && openUnit ? (
         <UnitDrawer
-          key={`${openUnit._id}-${open.mode}`}
+          key={openUnit._id}
           unit={openUnit}
           propertyName={propertyName}
           tenants={tenantsOf(openUnit)}
           rent={rentByUnit.get(openUnit._id)}
           managers={managers}
-          initialMode={open.mode}
-          canEdit={canEdit}
-          canChangeRent={canChangeRent}
+          canEdit={canOpenUnitEdit(permsFor(openUnit))}
+          canRentHistory={canChangeRent}
           canHistory={canHistory}
-          onSave={(patch) => updateUnit({ unitId: openUnit._id, ...patch })}
-          onRemove={() => {
+          onEdit={() => {
             setOpen(null);
-            setRemoving(openUnit);
+            setEditing({ id: openUnit._id, focus: null, replace: false });
           }}
           onClose={() => setOpen(null)}
         />
       ) : null}
 
-      {rentFor ? <ChangeRentDialog target={rentFor} onClose={() => setRentFor(null)} /> : null}
-
-      {removing ? (
-        <Dialog title={`Remove unit ${removing.unitNumber}?`} onClose={() => setRemoving(null)}>
-          <p className="text-sm text-muted-foreground">This permanently deletes the unit and its rent history. It cannot be undone.</p>
-          <div className="mt-4 flex justify-end gap-2">
-            <Btn onClick={() => setRemoving(null)}>Cancel</Btn>
-            <Btn
-              variant="dng"
-              disabled={busy}
-              onClick={async () => {
-                setBusy(true);
-                const ok = await run(() => removeUnit({ unitId: removing._id }), "Unit removed");
-                setBusy(false);
-                if (ok) setRemoving(null);
-              }}
-            >
-              Remove unit
-            </Btn>
-          </div>
-        </Dialog>
+      {editing && editUnit ? (
+        <UnitEditDialog
+          key={editUnit._id}
+          unit={editUnit}
+          propertyName={propertyName}
+          managers={managers}
+          focus={editing.focus}
+          startReplace={editing.replace}
+          onClose={() => setEditing(null)}
+        />
       ) : null}
     </Card>
   );

@@ -208,6 +208,19 @@ export const history = query({
                 name: [assignee.firstName, assignee.lastName].filter(Boolean).join(" ").trim() || assignee.email || "Team member",
               }
             : null;
+        // How the owner was set (B41): by the building the caller picked, or by hand (an assignment
+        // from before B41 has no assignedBy and counts as by hand). The building is this team's only.
+        const assignedProperty =
+          assignedUser && qualification?.assignedPropertyId ? await ctx.db.get(qualification.assignedPropertyId) : null;
+        const assignment = assignedUser
+          ? {
+              by: qualification?.assignedBy === "auto_building" ? ("building" as const) : ("manual" as const),
+              building:
+                assignedProperty && assignedProperty.orgId === org.orgId
+                  ? (assignedProperty.address?.formatted ?? assignedProperty.name).split(",")[0].trim() || assignedProperty.name
+                  : null,
+            }
+          : null;
         const tourRow = c.elevenLabsConversationId
           ? (
               await ctx.db
@@ -234,6 +247,7 @@ export const history = query({
           messageCount: messages.length,
           leadScore: computeLeadScore(qualification),
           assignedUser,
+          assignment,
           assignedToMe:
             qualification?.assignedUserId === org.user._id || tourRow?.assignedUserId === org.user._id,
           tour,

@@ -5,7 +5,16 @@
 //   node --test scripts/probes/sarah_replies.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { PHOTO_SAY, WAIT_FOR_CALLER, maintenanceLogLines } from "../../convex/sarahReplies.ts";
+import {
+  LEAD_LOG_AT_FINAL,
+  LEAD_NO_SIZE_SAY,
+  LEAD_TOUR_OFFER_SAY,
+  LOG_AT_FINAL,
+  PHOTO_SAY,
+  WAIT_FOR_CALLER,
+  leadLogLines,
+  maintenanceLogLines,
+} from "../../convex/sarahReplies.ts";
 
 const routed = { routedToAm: true, closedOutOfScope: false };
 const unrouted = { routedToAm: false, closedOutOfScope: false };
@@ -64,6 +73,19 @@ test("a tenant-responsibility close is still spoken straight away", () => {
   assert.equal(r.closing_line, undefined);
 });
 
+test("a routine or urgent log says not to log again after each answer (two logs per call)", () => {
+  for (const severity of ["urgent", "routine"]) {
+    for (const saved of [routed, unrouted, null]) {
+      const r = maintenanceLogLines({ severity, emergencyAlerted: false, saved });
+      assert.ok(r.message.includes(LOG_AT_FINAL), severity);
+    }
+  }
+  // A question that is not a repair (informational) has no STEP 3 final log; life-safety logs and
+  // alerts straight away. Neither gets the line.
+  assert.ok(!maintenanceLogLines({ severity: "informational", emergencyAlerted: false, saved: routed }).message.includes(LOG_AT_FINAL));
+  assert.ok(!maintenanceLogLines({ severity: "emergency", emergencyAlerted: true, saved: routed }).message.includes(LOG_AT_FINAL));
+});
+
 test("every result tells her to wait for an unanswered question", () => {
   for (const severity of ["emergency", "urgent", "routine", "informational"]) {
     const r = maintenanceLogLines({ severity, emergencyAlerted: false, saved: routed });
@@ -76,4 +98,35 @@ test("the photo line is a brief acknowledgement that keeps its meaning", () => {
   assert.doesNotMatch(PHOTO_SAY, /passed|logged|sent/i);
   assert.doesNotMatch(PHOTO_SAY, /\btext\b|\blink\b/i);
   assert.ok(PHOTO_SAY.split(/\s+/).length <= 10, PHOTO_SAY);
+});
+
+// log_lead (conv_0001m7acgw57fpwagbr0ydncsybk): the result said "Call again to add details as you learn
+// them" and offered a tour on every log, and Sarah called log_lead 7 times. Now one first and one final log.
+test("log_lead first log: no tour offer, no say line, and told not to log after each answer", () => {
+  const r = leadLogLines({ final: false, typeAvailable: null, areaSay: null, areaMessage: null });
+  assert.equal(r.say, undefined);
+  assert.ok(r.message.includes(LEAD_LOG_AT_FINAL));
+  assert.ok(r.message.includes("Never tell the caller they do or do not qualify"));
+  assert.ok(r.message.endsWith(WAIT_FOR_CALLER));
+  assert.ok(!/call again to add details/i.test(r.message));
+  assert.match(LEAD_LOG_AT_FINAL, /ONE final log_lead/);
+  assert.match(LEAD_LOG_AT_FINAL, /final_log/);
+});
+
+test("log_lead final log: offers the tour once and does not ask for more logging", () => {
+  const r = leadLogLines({ final: true, typeAvailable: true, areaSay: null, areaMessage: null });
+  assert.equal(r.say, LEAD_TOUR_OFFER_SAY);
+  assert.ok(!r.message.includes(LEAD_LOG_AT_FINAL));
+  assert.match(r.message, /final log: call log_lead again only if the caller says something new/);
+  const noBedsYet = leadLogLines({ final: true, typeAvailable: null, areaSay: null, areaMessage: null });
+  assert.equal(noBedsYet.say, LEAD_TOUR_OFFER_SAY);
+});
+
+test("log_lead: nothing open in that size or area is said straight away, on any log", () => {
+  for (const final of [false, true]) {
+    assert.equal(leadLogLines({ final, typeAvailable: false, areaSay: null, areaMessage: null }).say, LEAD_NO_SIZE_SAY);
+    const area = leadLogLines({ final, typeAvailable: null, areaSay: "We don't have anything open in Troy.", areaMessage: "Offer other cities." });
+    assert.equal(area.say, "We don't have anything open in Troy.");
+    assert.ok(area.message.includes("Offer other cities."));
+  }
 });

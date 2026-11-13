@@ -22,7 +22,13 @@ import { coreBlock } from "./coreQuestions";
 import { withTourBooking } from "./tourPrompt";
 import { currentOrg, isAdminView, requireOrgId } from "./authz";
 import { writeAudit } from "./audit";
-import { composeSarahSections, defaultConfig, normalizeConfig, ownerRoutingMenu } from "./sarahConfigLib";
+import {
+  CALLER_ID_LOOKUP_ENABLED,
+  composeSarahSections,
+  defaultConfig,
+  normalizeConfig,
+  ownerRoutingMenu,
+} from "./sarahConfigLib";
 import type { SarahConfig } from "./sarahConfigLib";
 import {
   OWNER_ADDRESS_RULE,
@@ -83,11 +89,16 @@ const TURN_TUNING: el.TurnTuning = {
   // after the turn starts, so 3s put a filler on four of the five, under a second before the reply.
   // Two tools in a row (log, then escalate) take about 5s. 4.5s clears the slowest one-tool turn that
   // call's LLM timings allow (about 4.3s) and still covers the long wait.
-  softTimeoutSeconds: 4.5,
+  // 3.2s since 2026-11-13. That day's real call: plain turns reached first audio in 1.8-2.8s (LLM
+  // TTFB 1.1-1.5s), tool turns in 3.7-5.0s because the LLM runs twice, and the first-turn
+  // lookup_caller took 5.0s with the 4.5s filler landing just before it. 3.2s sits above the slowest
+  // plain turn, so it rarely fires there, and comes early enough to cover most of a tool turn's wait.
+  // A routine maintenance call now logs twice instead of after every answer, so fewer turns wait.
+  softTimeoutSeconds: 3.2,
   maxSoftTimeoutsPerGeneration: 1,
-  // No "Let me pull that up…": tools run silently since v17, so it played before replies that pulled
-  // nothing up ("Let me pull that up…. I'm sorry to hear that.").
-  fillerMessages: ["Just a sec…", "One moment…"],
+  // Short and neutral: no audio tags and nothing that implies a result. No "Let me pull that up…": it
+  // played before replies that pulled nothing up ("Let me pull that up…. I'm sorry to hear that.").
+  fillerMessages: ["Mm-hm, one sec.", "Okay, one moment."],
   interruptionIgnoreTerms: [
     "okay",
     "ok",
@@ -118,14 +129,15 @@ const TURN_TUNING: el.TurnTuning = {
  * Google may change or retire it without much notice.
  *
  * reasoningEffort "minimal" is the lowest the API accepts for this model and is exactly what
- * the eval ran (scripts/probes/llm_eval.py, reasoning_fields). Temperature 0 and max_tokens 160
- * are unchanged. The backup LLM cascade is not set here and is left as configured on the agent.
+ * the eval ran (scripts/probes/llm_eval.py, reasoning_fields). Temperature 0 is unchanged; max_tokens is now 300
+ * (see maxTokens below). The backup LLM cascade is not set here and is left as configured on the agent.
  */
 const LLM_TUNING: el.LlmTuning = {
   model: "gemini-3-flash-preview",
   temperature: 0,
   reasoningEffort: "minimal",
-  maxTokens: 160,
+  // 300 since 2026-11-13: the single final log_maintenance_request call (all details + confirmed phone) runs ~150-200 tokens and was at risk of being cut off at 160. Only a cap; short replies still stop early.
+  maxTokens: 300,
 };
 
 const VAD_TUNING: el.VadTuning = {
@@ -174,7 +186,7 @@ YOUR JOB, IN ORDER:
    fees, terms or what the company can promise.
 2. If it's a leasing inquiry, follow the LEASING CALLS section below: collect what is listed under
    WHAT TO ASK EVERY LEASING CALLER, LEASING QUESTIONS WE ONLY RECORD and EXTRA SCREENING QUESTIONS,
-   exactly ONE question per turn, recording it with log_lead as you go. Never invent questions of your own.
+   exactly ONE question per turn, recording it with log_lead as LEASING CALLS step 3 says. Never invent questions of your own.
 3. Record, never judge. log_lead only stores their answers for the team and returns what is
    available; it never decides anything. If EXTRA SCREENING QUESTIONS are listed, record those
    answers with check_qualification too. Tell them their answers are recorded and the team will
@@ -194,7 +206,7 @@ YOUR JOB, IN ORDER:
 LEASING QUESTIONS WE ONLY RECORD:
 These are approved for ${COMPANY_NAME} and are the only questions allowed besides the list above.
 Ask them one at a time, in the order the LEASING QUESTION FLOW gives, and send the
-answers to log_lead with the argument named in brackets. Include every answer you have each time you call it.
+answers to log_lead with the argument named in brackets. The final log_lead carries every answer.
 - Whether someone else, such as an agency, an employer or a family member, will be paying part or
   all of the rent [third_party_payer, true or false]. If yes, ask for that payer's name
   [payer_name], phone number [payer_phone] and email address [payer_email].
@@ -207,7 +219,7 @@ PACING:
 The HARD RULES FOR EVERY TURN at the top and bottom of these instructions are the only pacing rules:
 exactly ONE question per turn, a few words of acknowledgement, at most 25 words. Once you have a piece
 of information, use it and move on and never ask for something you already have. Record early: call
-the logging tool after the first useful answer and again as you learn more. The call should feel like
+the logging tool once you have the core of what they need, then as its own steps say. The call should feel like
 it is clearly moving toward a resolution from the first question onward.
 
 CAPTURE ONLY — YOU NEVER JUDGE:
@@ -336,8 +348,23 @@ const OLD_TOOL_SPEECH =
   /Before checking availability,\s+looking someone up, logging a request, or anything else that takes a moment, say a short\s+natural phrase first — "let me check that," "one sec, pulling that up," "give me just a\s+moment" — never go silent while you look something up\./;
 const NEW_TOOL_SPEECH = "Tools run in silence (TURN RULE).";
 
+// The stored prompt told Sarah to log a leasing answer after every one or two answers, so she called
+// log_lead 7 times in one call (conv_0001m7acgw57fpwagbr0ydncsybk). Now: one early log and one final
+// log (LEASING CALLS step 3). Rewritten at compose time the same way.
+const OLD_LEAD_AS_YOU_GO = /exactly ONE question per turn,\s+recording it with log_lead as you go\./;
+const NEW_LEAD_AS_YOU_GO = "exactly ONE question per turn, recording it with log_lead as LEASING CALLS step 3 says.";
+const OLD_LEAD_EVERY_CALL = /Include every answer you have\s+each time you call it\./;
+const NEW_LEAD_EVERY_CALL = "The final log_lead carries every answer.";
+const OLD_RECORD_EARLY =
+  /Record early: call\s+the logging tool after the first useful answer and again as you learn more\./;
+const NEW_RECORD_EARLY =
+  "Record early: call\nthe logging tool once you have the core of what they need, then as its own steps say.";
+
 export function withAreaFirst(prompt: string): string {
   return prompt
+    .replace(OLD_LEAD_AS_YOU_GO, NEW_LEAD_AS_YOU_GO)
+    .replace(OLD_LEAD_EVERY_CALL, NEW_LEAD_EVERY_CALL)
+    .replace(OLD_RECORD_EARLY, NEW_RECORD_EARLY)
     .replace(OLD_RECORD_OPTIONAL, NEW_RECORD_ORDER)
     .replace(OLD_COMMUNITIES_LINE, NEW_AREA_LINE)
     .replace(OLD_ESCALATE_ASK, NEW_ESCALATE_ASK)
@@ -490,7 +517,28 @@ export const voices = action({
 
 // --- Server tools ------------------------------------------------------
 
-const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
+/**
+ * The caller-ID lookup tool, pushed only while CALLER_ID_LOOKUP_ENABLED (sarahConfigLib.ts) is on.
+ * Its route, /tools/lookup-caller, stays in http.ts either way.
+ */
+const LOOKUP_CALLER_DEF = (siteUrl: string): el.ToolDefinition => ({
+  name: "lookup_caller",
+  description:
+    "Looks up the caller's phone number (caller ID) against the resident list. Call it at the " +
+    "start of a resident or maintenance call. If it matches, you get a first name and a unit " +
+    "label: use them only to CONFIRM ('Am I speaking with Sam in unit 4B?'), never to assume. " +
+    "It returns nothing else about the resident. If it does not match, ask only for what the " +
+    "caller has not already said (name, then property, then unit) and use find_unit.",
+  url: `${siteUrl}/tools/lookup-caller`,
+  required: ["conversation_id"],
+  properties: {
+    conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
+    agent_id: { type: "string", dynamicVariable: "system__agent_id" },
+    caller_id: { type: "string", dynamicVariable: "system__caller_id" },
+  },
+});
+
+const TOOL_DEFS = (siteUrl: string, callerIdLookup: boolean): el.ToolDefinition[] => [
   {
     name: "check_availability",
     description:
@@ -502,7 +550,8 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       "has said which city or area they want, always pass it as city: the result then holds " +
       "only units in that city. If city_status is none_available or unknown_city, nothing may " +
       "be offered there: use its say line and name only cities from cities_with_availability, " +
-      "never calling them nearby or saying how far away they are.",
+      "never calling them nearby or saying how far away they are. Each unit type carries its building's " +
+      "address and, in units, some of its available unit labels.",
     url: `${siteUrl}/tools/check-availability`,
     // conversation_id isn't required from the model — it's a dynamic_variable the platform
     // fills in regardless — but declaring it is what lets the webhook resolve *whose*
@@ -533,7 +582,10 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
     description:
       "Looks up the details of an AVAILABLE unit a caller is interested in: bathrooms, floor, laundry, " +
       "heating fuel and who pays for gas, electric and heat. Call it only when the caller asks about " +
-      "one of those, with the building they named; do not read every field unprompted. It returns only " +
+      "one of those, with a real building: a street address or community name the caller said or a " +
+      "result gave, never a city or area. Never call it to say where a unit is or what it is called or " +
+      "costs: answer that from the available_units or check_availability results you already have. " +
+      "Do not read every field unprompted. It returns only " +
       "units that are available right now, never anything about residents or owners. A null field is " +
       "not known: say you don't have that detail and the team will follow up, never guess. If it asks " +
       "which building, use its say line, or let the caller choose from its candidates.",
@@ -544,7 +596,9 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       agent_id: { type: "string", dynamicVariable: "system__agent_id" },
       spoken_building: {
         type: "string",
-        description: "The building the caller is asking about, as they said it: a street address or a community name.",
+        description:
+          "The building the caller is asking about: a street address or community name, as they said it or as an " +
+          "earlier result gave it (for example the address in available_units). Never a city or area.",
       },
       bedrooms: {
         type: "string",
@@ -626,7 +680,9 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
     description:
       "Checks open tour times on the day the caller asked for. Only call this after the caller " +
       "has told you what day suits them; never to get times to suggest. Call it again every time " +
-      "they ask for a different day or time. Only offer times from the latest result.",
+      "they ask for a different day or time. Only offer times from the latest result. Settle the listing " +
+      "first (one available listing from your results in this call) and pass its address as spoken_building " +
+      "(and spoken_unit), the same as for request_tour, so the times are for the people who show it.",
     url: `${siteUrl}/tools/find-tour-times`,
     required: ["conversation_id", "date"],
     properties: {
@@ -652,6 +708,18 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
           "Only when moving an existing tour: its tour_id from find_my_tour, so that tour does not " +
           "block the times around it. Leave out when booking a new tour.",
       },
+      spoken_building: {
+        type: "string",
+        description:
+          "The listing the tour is for: its address exactly as a result in this call gave it (log_lead " +
+          "available_units, check_availability, get_unit_details), the same as you will pass to request_tour. " +
+          "Never an address the caller said that is not in your results, never a city or area, never invented. " +
+          "Omit it only when there are no listings at all or the caller would not choose one.",
+      },
+      spoken_unit: {
+        type: "string",
+        description: "Only with spoken_building: the unit they want to see, if one was named. Omit it otherwise.",
+      },
     },
   },
   {
@@ -660,8 +728,11 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       "Books a tour for a leasing caller who wants one. Pass slot_start with a start value " +
       "from your latest find_tour_times result, only after reading it back and hearing yes. " +
       "Only if find_tour_times said booking isn't available, pass " +
-      "preferred_slot with their preferred day and time instead. Call log_lead first so the " +
-      "caller's answers are recorded.",
+      "preferred_slot with their preferred day and time instead. Call the final log_lead first so the " +
+      "caller's answers are recorded. A tour is for one available listing from your results in this call: " +
+      "pass its address as spoken_building (and the unit as spoken_unit), the same listing you passed to " +
+      "find_tour_times. Never an address the caller said that is not in your results. " +
+      "Say only the address, unit, day and time its result gives: with no address, the team confirms it.",
     url: `${siteUrl}/tools/request-tour`,
     // Neither slot field is required: which one applies depends on whether the team has booking
     // set up, and the webhook rejects a call that sends neither.
@@ -694,6 +765,22 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       },
       caller_name: { type: "string", description: "The caller's name." },
       caller_phone: { type: "string", description: "A callback number for the caller." },
+      spoken_building: {
+        type: "string",
+        description:
+          "The listing the tour is for: one available listing from a result in this call (log_lead " +
+          "available_units, check_availability, get_unit_details), its address exactly as that result gave it, " +
+          "e.g. '1635 Van Vranken Avenue, Schenectady, NY'. Never a city or area, never an address the caller said " +
+          "that is not in your results, never invented. Settle it before find_tour_times: one fits, use it; " +
+          "several fit, offer up to three by address and rent and ask which. Omit it only when there are no " +
+          "listings at all or the caller would not choose one.",
+      },
+      spoken_unit: {
+        type: "string",
+        description:
+          "The unit they want to see, if one was named or picked (a label from that building's units in a " +
+          "result, or as the caller said it). Omit it otherwise.",
+      },
     },
   },
   {
@@ -741,7 +828,10 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
     description:
       "Moves the caller's existing tour to a new time. Use this, never request_tour, when someone who " +
       "already has a tour wants a different time. Only with a time from your latest find_tour_times " +
-      "result (called with this tour_id), after reading the new time back and hearing yes.",
+      "result (called with this tour_id), after reading the new time back and hearing yes. Also corrects " +
+      "which apartment a tour is for: pass the tour's own slot_start (from request_tour) with " +
+      "spoken_building (and spoken_unit) after reading the building back and hearing yes. Say only what " +
+      "its result says.",
     url: `${siteUrl}/tools/reschedule-tour`,
     required: ["conversation_id", "tour_id", "slot_start", "caller_confirmed"],
     properties: {
@@ -751,7 +841,20 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       tour_id: { type: "string", description: "The tour_id from find_my_tour." },
       slot_start: {
         type: "string",
-        description: "The exact start value of the new time, from your latest find_tour_times result.",
+        description:
+          "The exact start value of the new time, from your latest find_tour_times result. To correct only the " +
+          "apartment, the tour's current slot_start (as request_tour returned it).",
+      },
+      spoken_building: {
+        type: "string",
+        description:
+          "Only to correct the apartment: the listing from your results the caller says the tour is really for, " +
+          "its address exactly as that result gave it. Never an address that is not in your results, never a city " +
+          "or area. Omit it when only the time changes.",
+      },
+      spoken_unit: {
+        type: "string",
+        description: "Only with spoken_building: the unit they want to see, if one was named. Omit it otherwise.",
       },
       caller_phone: {
         type: "string",
@@ -759,7 +862,8 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       },
       caller_confirmed: {
         type: "boolean",
-        description: "True only after you read the new day and time back and the caller said yes.",
+        description:
+          "True only after you read the new day and time (or the corrected building) back and the caller said yes.",
       },
     },
   },
@@ -861,30 +965,21 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       },
     },
   },
-  {
-    name: "lookup_caller",
-    description:
-      "Looks up the caller's phone number (caller ID) against the resident list. Call it at the " +
-      "start of a resident or maintenance call. If it matches, you get a first name and a unit " +
-      "label: use them only to CONFIRM ('Am I speaking with Sam in unit 4B?'), never to assume. " +
-      "It returns nothing else about the resident. If it does not match, ask only for what the " +
-      "caller has not already said (name, then property, then unit) and use find_unit.",
-    url: `${siteUrl}/tools/lookup-caller`,
-    required: ["conversation_id"],
-    properties: {
-      conversation_id: { type: "string", dynamicVariable: "system__conversation_id" },
-      agent_id: { type: "string", dynamicVariable: "system__agent_id" },
-      caller_id: { type: "string", dynamicVariable: "system__caller_id" },
-    },
-  },
+  // Only while the caller-ID lookup is on (CALLER_ID_LOOKUP_ENABLED in sarahConfigLib.ts). Off, it is
+  // left out, so the next push sends tool_ids without it and the agent drops it (see ensureTools).
+  ...(callerIdLookup ? [LOOKUP_CALLER_DEF(siteUrl)] : []),
   {
     name: "find_unit",
     description:
       "Checks whether the property name or address and the unit number a caller said match a unit " +
       "in our records. It returns only unit labels and building street addresses, never anything " +
-      "about who lives anywhere or whether a unit is occupied. Use it after lookup_caller did not " +
-      "match, once you have the property and the unit, asked or already said (then call it right " +
-      "away, in silence, and ask its say line only after the result). Only matched true " +
+      "about who lives anywhere or whether a unit is occupied. " +
+      (callerIdLookup ? "Use it after lookup_caller did not match. " : "") +
+      "Call it only when you have BOTH the property and the unit number, asked or already said " +
+      "(then call it right away, in silence, and ask its say line only after the result). If the " +
+      "caller gave only the address, ask for the unit first, as one question, then call it once with " +
+      "both. Never call it on the address alone, unless the caller says the home is a house or has no " +
+      "unit number. Only matched true " +
       "identifies the unit. When matched is false it may return options for the caller to choose " +
       "from: similar_units or all_units (property_matched true: the building matched, the unit did " +
       "not) or address_options (several or close buildings). Read the options as one question, let " +
@@ -957,17 +1052,21 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       "question that is not a repair (a lease question, a package, parking) is also logged here, " +
       "with issue_type other, severity informational and a description that begins 'Question, not " +
       "a repair:'; the asset manager reviews it. Call it only once the unit is identified " +
-      "(the caller said yes to lookup_caller's or find_unit's match) AND the caller has said what is actually " +
+      (callerIdLookup
+        ? "(the caller said yes to lookup_caller's or find_unit's match) AND the caller has said what is actually "
+        : "(the caller said yes to find_unit's match) AND the caller has said what is actually ") +
       "wrong, EXCEPT in a life-safety emergency, where you log immediately with whatever you have. " +
       "'A maintenance issue' or 'a complaint' is not a description: ask what's going on first; a " +
       "call without a real description is refused with logged false. Say it was logged only when " +
       "a result had logged true, once, when you close the call (a life-safety result's say line is " +
       "the only exception). Never pass a placeholder " +
-      "like 'unknown' for anything — leave the field out instead. Safe to call more than once " +
-      "in the same call: each call updates the same request, so if you learn or correct " +
-      "anything afterwards, call it again: only the fields you send are updated. Log it as soon " +
-      "as you know what is wrong, then update as you learn more. For an emergency or urgent " +
-      "issue, call escalate after logging it.",
+      "like 'unknown' for anything — leave the field out instead. Each call updates the same " +
+      "request and only the fields you send are updated. In a routine call, call it twice: once " +
+      "as soon as you know what is wrong, then ONE final call with every detail the first did " +
+      "not carry (first_noticed, pets, preferred_access_times, answers and the rest) and the " +
+      "confirmed number (STEP 3). Do not call it after each answer: remember the answers for the " +
+      "final call. Call it in between only if the issue turns out to be a life-safety emergency or more " +
+      "urgent than logged. For an emergency or urgent issue, call escalate after logging it.",
     url: `${siteUrl}/tools/log-maintenance-request`,
     // Only what an emergency can supply with nothing else known. caller_name and the rest are
     // deliberately optional: when they were required for log_tenant_issue the agent satisfied the
@@ -1112,10 +1211,13 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
   {
     name: "log_lead",
     description:
-      "Records a prospective tenant's answers as you learn them. Capture only: it never says whether " +
-      "they qualify. Call it after the first useful answer and again as you learn more, with everything " +
-      "you have so far; later calls add to the same lead. Returns available_units (the only units you " +
-      "may offer) and who the lead is assigned to.",
+      "Records a prospective tenant's answers. Capture only: it never says whether they qualify. Call it " +
+      "twice: once as soon as you know their city or area (so the lead exists and you get available_units), " +
+      "then ONE final time with final_log true and everything said anywhere in the call, before you offer or " +
+      "book a tour, or before you close if there is no tour. Do not call it after each answer in between: " +
+      "remember the answers. Later calls add to the same lead. On the final log, pass the listing they " +
+      "chose, if they chose one, as spoken_building. Returns available_units (the only units you may offer, " +
+      "each with its address and some unit labels) and who the lead is assigned to.",
     url: `${siteUrl}/tools/log-lead`,
     required: ["conversation_id"],
     properties: {
@@ -1151,6 +1253,23 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       },
       avoid_communities: { type: "string", description: "Communities in the Capital Region they want to avoid." },
       other_info: { type: "string", description: "Anything else the caller wants the team to know." },
+      spoken_building: {
+        type: "string",
+        description:
+          "Only if the caller chose one listing: its address exactly as a result in this call gave it (log_lead " +
+          "available_units, check_availability, get_unit_details). Never an address that is not in your results, " +
+          "never a city or area, never invented. Leave out if they have not chosen one.",
+      },
+      spoken_unit: {
+        type: "string",
+        description: "Only with spoken_building: the unit they chose, if one was named. Omit it otherwise.",
+      },
+      final_log: {
+        type: "boolean",
+        description:
+          "True on the final log_lead, the one with every answer from the whole call, sent before a tour is " +
+          "offered or booked or before you close. Leave out on the first log.",
+      },
     },
   },
   {
@@ -1158,7 +1277,9 @@ const TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
     description:
       "Records a property owner who wants this company to manage their property, and alerts " +
       "the team. Not for renters. Ask for their name and the best number to reach them first; " +
-      "never pass a placeholder like 'unknown' — leave a field out instead.",
+      "never pass a placeholder like 'unknown' — leave a field out instead. No email check. Then say " +
+      "its say line; only if menu_live is true, read the new-owner phone menu, or, if they already asked " +
+      "for someone in the directory, say you'll put them through and call check_staff_availability.",
     url: `${siteUrl}/tools/owner-prospect`,
     required: ["conversation_id", "name"],
     properties: {
@@ -1196,7 +1317,7 @@ const ROUTING_TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
       "with the address only, and say its say line to confirm the property. Then, after reading the email back and " +
       "the caller confirming it, call it again with the confirmed address and the email. Returns ask_property, " +
       "verified, needs_property_confirmation, not_verified or no_match_take_message. Read the phone menu only after " +
-      "verified. Never for tenants, prospects or anyone else.",
+      "verified. Never for tenants, prospects, new owners (they use route_owner_prospect) or anyone else.",
     url: `${siteUrl}/tools/verify-owner`,
     // Not required: a required field pushes the model to fill it before the caller has said one.
     // Missing or empty returns ask_property (no attempt counted).
@@ -1225,14 +1346,15 @@ const ROUTING_TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
   {
     name: "check_staff_availability",
     description:
-      "Owner call menu only. Checks whether the staff member a VERIFIED existing property owner asked for can be " +
-      "put through right now; their number and hours come from the directory, in New York time. Call it only " +
-      "after verify_owner returned verified in this call, with who they asked for: a name, a role such as " +
+      "Owner call menu only. Checks whether the staff member a VERIFIED existing property owner, or a new owner " +
+      "route_owner_prospect recorded, asked for can be put through right now; their number and hours come from the " +
+      "directory, in New York time. Call it only after verify_owner returned verified, or route_owner_prospect " +
+      "returned menu_live true, in this call, with who they asked for: a name, a role such as " +
       "the department they named, or the key they pressed. " +
       (TRANSFER_MECHANISM === "twilio_dial"
         ? "If available is true, call transfer_owner_call with the same person straight away. "
         : "If available is true, call transfer_to_number with its transfer_number and its say line as client_message. ") +
-      "Otherwise say its say line and take a message with take_staff_message. Never for tenants, prospects, vendors or anyone else.",
+      "Otherwise say its say line and take a message with take_staff_message. Never for tenants, renters, vendors or anyone else.",
     url: `${siteUrl}/tools/check-staff-availability`,
     required: ["conversation_id", "person"],
     properties: {
@@ -1261,10 +1383,11 @@ const ROUTING_TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
         {
           name: "transfer_owner_call",
           description:
-            "Owner call menu only. Puts a VERIFIED existing property owner through to the staff member " +
-            "check_staff_availability just returned available for. Call it straight away after that, with the " +
-            "same person, then say its say line and nothing else. If it does not return connecting, say its say " +
-            "line and take a message with take_staff_message. Never for tenants, prospects, vendors or anyone else.",
+            "Owner call menu only. Puts a VERIFIED existing property owner, or a new owner route_owner_prospect " +
+            "recorded, through to the staff member check_staff_availability just returned available for. Call it " +
+            "straight away after that, with the same person, then say its say line and nothing else. If it does not " +
+            "return connecting, say its say line and take a message with take_staff_message. Never for tenants, " +
+            "renters, vendors or anyone else.",
           url: `${siteUrl}/tools/transfer-owner-call`,
           required: ["conversation_id", "call_sid", "person"],
           properties: {
@@ -1282,7 +1405,7 @@ const ROUTING_TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
   {
     name: "take_staff_message",
     description:
-      "Owner call menu only. Saves a message for a staff member an existing owner could not be put through " +
+      "Owner call menu only. Saves a message for a staff member an owner could not be put through " +
       "to, so that person can call them back. Ask for their name, the best callback number (read it back) " +
       "and what it is about first. Never say the message was passed on unless this returns logged true.",
     url: `${siteUrl}/tools/take-staff-message`,
@@ -1305,8 +1428,12 @@ const ROUTING_TOOL_DEFS = (siteUrl: string): el.ToolDefinition[] => [
 ];
 
 /** Every webhook tool the agent gets: the routing tools only while the owner menu is live. Exported for the tests. */
-export function toolDefsFor(siteUrl: string, routing: boolean): el.ToolDefinition[] {
-  return [...TOOL_DEFS(siteUrl), ...(routing ? ROUTING_TOOL_DEFS(siteUrl) : [])];
+export function toolDefsFor(
+  siteUrl: string,
+  routing: boolean,
+  callerIdLookup: boolean = CALLER_ID_LOOKUP_ENABLED,
+): el.ToolDefinition[] {
+  return [...TOOL_DEFS(siteUrl, callerIdLookup), ...(routing ? ROUTING_TOOL_DEFS(siteUrl) : [])];
 }
 
 /**
@@ -1388,7 +1515,9 @@ export const ensureTools = internalAction({
     // tool_ids on every publish. A tool that was removed from TOOL_DEFS (find_resident, route
     // /tools/find-resident) is therefore detached from the agent on its next save; it is never
     // looked up here again. The orphaned workspace tool is left in ElevenLabs (it may still be
-    // attached to agents that have not been re-saved) and its route now answers 404.
+    // attached to agents that have not been re-saved) and its route now answers 404. lookup_caller
+    // is dropped the same way while CALLER_ID_LOOKUP_ENABLED is off, but its route is kept and still
+    // answers, and it is found again by URL (same id) once the switch is back on.
     const ids: string[] = [];
 
     for (const def of defs) {

@@ -1,12 +1,12 @@
 "use client";
 
 import { useAction, useQuery } from "convex/react";
-import { ArrowDown, ArrowUp, ClipboardList, Mail, Phone, Search, Send, Users, Wrench, Coffee } from "lucide-react";
+import { ArrowDown, ArrowUp, ClipboardList, Mail, Phone, Send, Users, Wrench, Coffee } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { Btn, Card, ConfirmDialog, Drawer, Input, Select, cx } from "@/components/ui";
+import { Btn, Card, ConfirmDialog, Drawer, FilterSelect, FilterToolbar, Input, SearchBox, cx } from "@/components/ui";
 import { toast } from "@/components/toast";
 import { ActionMenu, PersonAvatar, useDebounced } from "@/components/asset-managers/shared";
 import { Pagination } from "@/components/ui";
@@ -144,15 +144,6 @@ function InviteCard() {
   );
 }
 
-function LabeledSelect({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="relative">
-      <span className="pointer-events-none absolute -top-2 left-3 z-[1] bg-card px-1 text-[11px] font-semibold text-foreground">{label}</span>
-      {children}
-    </div>
-  );
-}
-
 export function TechniciansTab() {
   const router = useRouter();
   const base = useOverview({ pageSize: 1 });
@@ -214,56 +205,64 @@ export function TechniciansTab() {
       <InviteCard />
 
       <Card className="!px-5">
-        <div className="grid gap-3 md:grid-cols-[1fr_220px_220px]">
-          <div className="relative">
-            <Search aria-hidden className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              aria-label="Search technicians"
+        <FilterToolbar
+          active={search.trim() !== "" || propertyId !== "" || status !== "all"}
+          onClear={() => {
+            setSearch("");
+            setPropertyId("");
+            setStatus("all");
+            setPage(1);
+          }}
+          search={
+            <SearchBox
+              id="technicians-search"
+              label="Search technicians"
               value={search}
               maxLength={100}
-              onChange={(e) => {
-                setSearch(e.target.value);
+              onChange={(v) => {
+                setSearch(v);
+                setPage(1);
+              }}
+              onClear={() => {
+                setSearch("");
                 setPage(1);
               }}
               placeholder="Search by name, email or property…"
-              className="h-11 pl-9"
             />
-          </div>
-          <LabeledSelect label="All Properties">
-            <Select
-              aria-label="Filter by property"
-              value={propertyId}
-              onChange={(e) => {
-                setPropertyId(e.target.value ?? "");
-                setPage(1);
-              }}
-              className="h-11"
-            >
-              <option value="">All</option>
-              {(base?.propertyOptions ?? []).map((p) => (
-                <option key={p.propertyId} value={p.propertyId}>
-                  {p.name}
-                </option>
-              ))}
-            </Select>
-          </LabeledSelect>
-          <LabeledSelect label="All Statuses">
-            <Select
-              aria-label="Filter by status"
-              value={status}
-              onChange={(e) => {
-                const v = e.target.value;
-                setStatus(v === "busy" || v === "idle" ? v : "all");
-                setPage(1);
-              }}
-              className="h-11"
-            >
-              <option value="all">All</option>
-              <option value="busy">Busy</option>
-              <option value="idle">Idle</option>
-            </Select>
-          </LabeledSelect>
-        </div>
+          }
+        >
+          <FilterSelect
+            label="Property"
+            active={propertyId !== ""}
+            value={propertyId || "all"}
+            onChange={(e) => {
+              setPropertyId(!e.target.value || e.target.value === "all" ? "" : e.target.value);
+              setPage(1);
+            }}
+            className="sm:w-56"
+          >
+            <option value="all">All</option>
+            {(base?.propertyOptions ?? []).map((p) => (
+              <option key={p.propertyId} value={p.propertyId}>
+                {p.name}
+              </option>
+            ))}
+          </FilterSelect>
+          <FilterSelect
+            label="Status"
+            active={status !== "all"}
+            value={status}
+            onChange={(e) => {
+              const v = e.target.value;
+              setStatus(v === "busy" || v === "idle" ? v : "all");
+              setPage(1);
+            }}
+          >
+            <option value="all">All</option>
+            <option value="busy">Busy</option>
+            <option value="idle">Idle</option>
+          </FilterSelect>
+        </FilterToolbar>
 
         <div className="-mx-5 mt-4 overflow-x-auto">
           <table className="w-full min-w-[820px] border-collapse text-[13px]">

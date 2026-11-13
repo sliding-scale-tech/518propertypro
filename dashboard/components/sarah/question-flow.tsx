@@ -29,8 +29,8 @@ import { useToast } from "@/components/toast";
  * Each flow is an ordered list of steps. A step can carry "ask only if" conditions; a step whose
  * condition points at an earlier question is a follow-up and is drawn indented under it. Edit view
  * is the working surface; Diagram shows the whole branch structure read-only; the preview panel
- * plays the sequence Sarah will follow for sample answers. All of it edits the DRAFT config: nothing
- * reaches a live call until Publish.
+ * plays the sequence Sarah will follow for sample answers. All of it edits the config: nothing
+ * reaches a call until Save (which then updates Sarah for new calls).
  */
 
 type Group = "maintenance" | "leasing";
