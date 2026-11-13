@@ -1,9 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useMemo, useState } from "react";
 import type { Id } from "@/convex/_generated/dataModel";
+import { validateUnitForm } from "@/convex/unitFieldsPolicy";
 import { Dialog } from "@/components/properties/dialog";
-import { Btn, Field, Grid2, Input, LabeledField, Select, Toggle } from "@/components/ui";
+import { Btn, Field, Grid2, Input, Select, Toggle } from "@/components/ui";
+import { toast } from "@/components/ui/toast";
+import { MoneyInput, useFieldErrors } from "@/components/finance/form-bits";
 import { UNIT_TYPES, type Manager } from "./types";
 
 export type NewUnit = {
@@ -12,24 +15,28 @@ export type NewUnit = {
   bedrooms: string;
   floor?: number;
   bathrooms?: number;
+  /** DOLLARS (units.rent), parsed from the typed text via integer cents. */
   rent?: number;
   available: boolean;
 };
 
-const num = (s: string) => (s.trim() === "" || Number.isNaN(Number(s)) ? undefined : Number(s));
+const ORDER = ["unitNumber", "bedrooms", "floor", "bathrooms", "rent", "assetManagerUserId"] as const;
 
-/** The asset manager defaults to the property's default; it can never be left empty. */
+/**
+ * The asset manager defaults to the property's default; it can never be left empty. Every field is
+ * checked before saving (unitFieldsPolicy, the same rules as the server): the wrong field is marked
+ * red with its message and the first one is toasted.
+ */
 export function AddUnitModal({
   managers,
   defaultAmId,
-  busy,
-  onSubmit,
+  onSave,
   onClose,
 }: {
   managers: Manager[];
   defaultAmId?: Id<"users">;
-  busy: boolean;
-  onSubmit: (unit: NewUnit) => void;
+  /** Saves the unit; throws on a server error (the form marks the field and toasts it). */
+  onSave: (unit: NewUnit) => Promise<unknown>;
   onClose: () => void;
 }) {
   const [unitNumber, setUnitNumber] = useState("");
@@ -39,84 +46,129 @@ export function AddUnitModal({
   const [rent, setRent] = useState("");
   const [available, setAvailable] = useState(false);
   const [am, setAm] = useState<string>(defaultAmId ?? "");
+  const [busy, setBusy] = useState(false);
+  const base = useId();
+  const ids = useMemo(
+    () => ({
+      unitNumber: `${base}-num`,
+      bedrooms: `${base}-type`,
+      floor: `${base}-floor`,
+      bathrooms: `${base}-baths`,
+      rent: `${base}-rent`,
+      assetManagerUserId: `${base}-am`,
+    }),
+    [base],
+  );
+  const f = useFieldErrors(ids);
+  const edit = (field: string, set: (v: string) => void) => (v: string) => {
+    set(v);
+    f.clear(field);
+  };
 
-  const ready = unitNumber.trim() !== "" && bedrooms !== "" && am !== "" && !busy;
+  async function submit() {
+    if (busy) return;
+    const { errors, value } = validateUnitForm({ unitNumber, bedrooms, floor, bathrooms, rent, assetManagerUserId: am });
+    if (!f.check(errors, ORDER) || !value) return;
+    setBusy(true);
+    try {
+      await onSave({ ...value, assetManagerUserId: am as Id<"users">, available });
+      toast.success("Unit added");
+      onClose();
+    } catch (e) {
+      f.fromServer(e);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <Dialog title="Add unit" onClose={onClose}>
       <form
         className="space-y-4"
+        noValidate
         onSubmit={(e) => {
           e.preventDefault();
-          if (!ready) return;
-          onSubmit({
-            unitNumber: unitNumber.trim(),
-            assetManagerUserId: am as Id<"users">,
-            bedrooms,
-            floor: num(floor),
-            bathrooms: num(bathrooms),
-            rent: num(rent),
-            available,
-          });
+          void submit();
         }}
       >
         <Grid2>
-          <LabeledField label="Unit number">
-            {(id) => (
-              <Input id={id} value={unitNumber} maxLength={40} placeholder="4B" onChange={(e) => setUnitNumber(e.target.value)} />
-            )}
-          </LabeledField>
-          <LabeledField label="Unit type">
-            {(id) => (
-              <Select id={id} value={bedrooms} onChange={(e) => setBedrooms(e.target.value)}>
-                <option value="" disabled>
-                  Select unit type
-                </option>
-                {UNIT_TYPES.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
-              </Select>
-            )}
-          </LabeledField>
-        </Grid2>
-        <div className="grid grid-cols-3 gap-3">
-          <LabeledField label="Floor">
-            {(id) => <Input id={id} type="number" value={floor} onChange={(e) => setFloor(e.target.value)} />}
-          </LabeledField>
-          <LabeledField label="Baths">
-            {(id) => (
-              <Input id={id} type="number" min={0} step={0.5} value={bathrooms} onChange={(e) => setBathrooms(e.target.value)} />
-            )}
-          </LabeledField>
-          <LabeledField label="Rent">
-            {(id) => <Input id={id} type="number" min={0} value={rent} onChange={(e) => setRent(e.target.value)} />}
-          </LabeledField>
-        </div>
-        <LabeledField
-          label="Asset manager"
-          hint={defaultAmId ? "Defaults to the property's asset manager." : "Every unit needs one asset manager."}
-        >
-          {(id) => (
-            <Select id={id} value={am} onChange={(e) => setAm(e.target.value)}>
-              <option value="" disabled>
-                Select an asset manager
-              </option>
-              {managers.map((m) => (
-                <option key={m.userId} value={m.userId}>
-                  {m.name}
+          <Field label="Unit number *" htmlFor={ids.unitNumber}>
+            <Input
+              id={ids.unitNumber}
+              value={unitNumber}
+              maxLength={40}
+              placeholder="4B"
+              onChange={(e) => edit("unitNumber", setUnitNumber)(e.target.value)}
+              {...f.control("unitNumber")}
+            />
+            {f.message("unitNumber")}
+          </Field>
+          <Field label="Unit type *" htmlFor={ids.bedrooms}>
+            <Select id={ids.bedrooms} value={bedrooms} onChange={(e) => edit("bedrooms", setBedrooms)(e.target.value || "")} {...f.control("bedrooms")}>
+              <option value="">Select unit type</option>
+              {UNIT_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {t}
                 </option>
               ))}
             </Select>
-          )}
-        </LabeledField>
+            {f.message("bedrooms")}
+          </Field>
+        </Grid2>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <Field label="Floor" htmlFor={ids.floor} hint="Whole number; 0 for the basement.">
+            <Input id={ids.floor} inputMode="numeric" value={floor} onChange={(e) => edit("floor", setFloor)(e.target.value)} {...f.control("floor")} />
+            {f.message("floor")}
+          </Field>
+          <Field label="Baths" htmlFor={ids.bathrooms} hint="Like 1 or 1.5.">
+            <Input
+              id={ids.bathrooms}
+              inputMode="decimal"
+              value={bathrooms}
+              onChange={(e) => edit("bathrooms", setBathrooms)(e.target.value)}
+              {...f.control("bathrooms")}
+            />
+            {f.message("bathrooms")}
+          </Field>
+          <Field label="Rent / month" htmlFor={ids.rent} hint="Optional. Later changes use Change rent.">
+            <MoneyInput
+              id={ids.rent}
+              value={rent}
+              onChange={edit("rent", setRent)}
+              invalid={Boolean(f.errors.rent)}
+              describedBy={f.errors.rent ? `${ids.rent}-err` : undefined}
+            />
+            {f.message("rent")}
+          </Field>
+        </div>
+        <Field
+          label="Asset manager *"
+          htmlFor={ids.assetManagerUserId}
+          hint={defaultAmId ? "Defaults to the property's asset manager." : "Every unit needs one asset manager."}
+        >
+          <Select
+            id={ids.assetManagerUserId}
+            value={am}
+            onChange={(e) => edit("assetManagerUserId", setAm)(e.target.value || "")}
+            {...f.control("assetManagerUserId")}
+          >
+            <option value="">Select an asset manager</option>
+            {managers.map((m) => (
+              <option key={m.userId} value={m.userId}>
+                {m.name}
+              </option>
+            ))}
+          </Select>
+          {f.message("assetManagerUserId")}
+        </Field>
         <Field label="Available to rent">
           <Toggle checked={available} onChange={setAvailable} label="Available to rent" />
         </Field>
         <div className="flex justify-end gap-2">
-          <Btn onClick={onClose}>Cancel</Btn>
-          <Btn type="submit" variant="pri" disabled={!ready}>
+          <Btn onClick={onClose} disabled={busy}>
+            Cancel
+          </Btn>
+          <Btn type="submit" variant="pri" disabled={busy}>
             {busy ? "Adding…" : "Add unit"}
           </Btn>
         </div>

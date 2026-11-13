@@ -9,6 +9,9 @@ import { amScope } from "./amScope";
 import { scheduleNotify } from "./notify";
 import type { MappedUnitFields } from "./rosterMapping";
 import { unitKey } from "./unitMatch";
+import { businessToday, monthOf } from "./rosFormat";
+import { bathroomsProblem, floorProblem, rosterRentProblem } from "./unitFieldsPolicy";
+import { RENT_CHANGE_MSG, rentInEffect, upcomingRentChange } from "./unitRentPolicy";
 
 /**
  * Units: the ONLY module that writes the `units` table.
@@ -18,6 +21,10 @@ import { unitKey } from "./unitMatch";
  * without one is rejected by the schema), and every path that sets it goes through
  * assertValidAssetManager (so it can't point at someone who isn't an AM on this team). There is
  * deliberately no mutation that clears it — reassigning is the only way it changes.
+ *
+ * One exception, `rent`: once a unit has rent history it is written by unitRentLib.changeRent
+ * (kept equal to the latest rent change). `update` refuses a rent edit; rent changes go through
+ * unitRent.changeRent so the history (and the rent for each month) is kept.
  */
 
 const MAX_BULK = 500;
@@ -81,6 +88,27 @@ async function ownUnit(ctx: QueryCtx | MutationCtx, org: OrgContext, unitId: Id<
   const unit = await ctx.db.get(unitId);
   if (!unit || unit.orgId !== org.orgId) throw new ConvexError("Unit not found.");
   return unit;
+}
+
+/** Field-level user error: the form marks `field` red and shows `message` under it and in a toast. */
+function fieldError(field: string, message: string): ConvexError<{ message: string; field: string }> {
+  return new ConvexError({ message, field });
+}
+
+/** The numeric unit fields (shared rules with the forms, unitFieldsPolicy.ts). */
+function checkNumbers(args: { floor?: number; bathrooms?: number; rent?: number }): void {
+  if (args.floor !== undefined) {
+    const p = floorProblem(args.floor);
+    if (p) throw fieldError("floor", p);
+  }
+  if (args.bathrooms !== undefined) {
+    const p = bathroomsProblem(args.bathrooms);
+    if (p) throw fieldError("bathrooms", p);
+  }
+  if (args.rent !== undefined) {
+    const p = rosterRentProblem(args.rent);
+    if (p) throw fieldError("rent", p);
+  }
 }
 
 function cleanText(value: string, label: string, max = MAX_TEXT): string {
@@ -198,6 +226,47 @@ export const list = query({
   },
 });
 
+/**
+ * The rent each unit of a property has THIS month (its rent history, else the roster rent) and its
+ * next change, for the property page's Rent/month column and unit drawer. Same access and scope as
+ * listByProperty (an asset manager gets only the units they manage or cover). Money only, no names.
+ */
+export const rentSummary = query({
+  args: { propertyId: v.id("properties") },
+  handler: async (ctx, args) => {
+    const org = await requireOrg(ctx);
+    if (!canViewUnits(org)) throw new ConvexError("You don't have access to that.");
+    const property = await ctx.db.get(args.propertyId);
+    if (!property || property.orgId !== org.orgId) return [];
+    const units = await ctx.db
+      .query("units")
+      .withIndex("by_property", (q) => q.eq("propertyId", args.propertyId))
+      .collect();
+    const scoped = await scopeForViewer(ctx, org, units.filter((u) => u.orgId === org.orgId));
+    const month = monthOf(businessToday(Date.now()));
+    const out = [];
+    for (const u of scoped.units) {
+      const changes = (
+        await ctx.db
+          .query("unitRentChanges")
+          .withIndex("by_unit_and_month", (q) => q.eq("unitId", u._id))
+          .collect()
+      ).filter((c) => c.orgId === org.orgId);
+      const now = rentInEffect(u, changes, month);
+      const next = upcomingRentChange(changes, month);
+      out.push({
+        unitId: u._id,
+        month,
+        cents: now.cents,
+        fromMonth: now.fromMonth,
+        hasHistory: now.hasHistory,
+        upcoming: next ? { month: next.effectiveMonth, cents: next.rentCents } : null,
+      });
+    }
+    return out;
+  },
+});
+
 /** For routing and notifications, which run server-side with no signed-in caller. */
 export const forAssetManager = internalQuery({
   args: { assetManagerUserId: v.id("users") },
@@ -240,6 +309,7 @@ export const create = mutation({
 
     const bedrooms = cleanText(args.bedrooms, "Bedrooms", 20);
     if (!bedrooms) throw new ConvexError("Enter the number of bedrooms.");
+    checkNumbers(args);
 
     const now = Date.now();
     const id = await ctx.db.insert("units", {
@@ -285,6 +355,7 @@ export const update = mutation({
     bedrooms: v.optional(v.string()),
     bathrooms: v.optional(v.number()),
     parking: v.optional(v.string()),
+    // Kept so an old client gets the specific message below, not a validator failure.
     rent: v.optional(v.number()),
     availableFrom: v.optional(v.string()),
     leasingFacts: v.optional(v.string()),
@@ -292,6 +363,14 @@ export const update = mutation({
   handler: async (ctx, args) => {
     const org = await requireAdminView(ctx);
     const unit = await ownUnit(ctx, org, args.unitId);
+    // Rent has a history now (an effective month per change): it changes only through Change rent.
+    if (args.rent !== undefined) throw fieldError("rent", RENT_CHANGE_MSG.useChangeRent);
+    // Only a value the user CHANGED is checked: an old stored value (a roster 1.25 baths) must not
+    // block saving the other fields.
+    checkNumbers({
+      floor: args.floor !== unit.floor ? args.floor : undefined,
+      bathrooms: args.bathrooms !== unit.bathrooms ? args.bathrooms : undefined,
+    });
 
     // Fields are copied one by one rather than spreading args, so nothing the client adds
     // (an assetManagerUserId, an orgId) can reach the row.
@@ -315,7 +394,6 @@ export const update = mutation({
     if (args.isTopFloor !== undefined) patch.isTopFloor = args.isTopFloor;
     if (args.bathrooms !== undefined) patch.bathrooms = args.bathrooms;
     if (args.parking !== undefined) patch.parking = cleanText(args.parking, "Parking", 200);
-    if (args.rent !== undefined) patch.rent = args.rent;
     if (args.availableFrom !== undefined) patch.availableFrom = args.availableFrom;
     if (args.leasingFacts !== undefined) {
       patch.leasingFacts = cleanText(args.leasingFacts, "Leasing facts");
@@ -538,6 +616,13 @@ export const remove = mutation({
   handler: async (ctx, args) => {
     const org = await requireOrgAdmin(ctx);
     const unit = await ownUnit(ctx, org, args.unitId);
+    // Its rent history goes with it (payments keep their own amounts in the ledger).
+    for (const c of await ctx.db
+      .query("unitRentChanges")
+      .withIndex("by_unit_and_month", (q) => q.eq("unitId", unit._id))
+      .collect()) {
+      if (c.orgId === org.orgId) await ctx.db.delete(c._id);
+    }
     await ctx.db.delete(unit._id);
     await writeAudit(ctx, {
       orgId: org.orgId,
@@ -597,7 +682,13 @@ export async function upsertRosterUnit(
     assetManagerUserId: Id<"users">;
     note: string;
   },
-): Promise<{ unitId: Id<"units">; action: "created" | "updated" | "unchanged"; changed: string[] }> {
+): Promise<{
+  unitId: Id<"units">;
+  action: "created" | "updated" | "unchanged";
+  changed: string[];
+  /** True when the roster's rent differed but was NOT applied because the unit has rent history. */
+  rentKeptForHistory: boolean;
+}> {
   const { fields } = args;
   if (!args.existing) {
     await assertNoDuplicate(ctx, args.propertyId, fields.unitNumberKey);
@@ -630,7 +721,7 @@ export async function upsertRosterUnit(
       to: fields.unitNumber,
       note: args.note,
     });
-    return { unitId: id, action: "created", changed: [] };
+    return { unitId: id, action: "created", changed: [], rentKeptForHistory: false };
   }
 
   const unit = args.existing;
@@ -645,7 +736,19 @@ export async function upsertRosterUnit(
   }
   const patch: Record<string, unknown> = {};
   const changed: string[] = [];
+  // A unit with rent history keeps its rent: the history (changed with Change rent) is the source
+  // of the rent for each month, and a re-imported roster rent would silently disagree with it.
+  const hasRentHistory =
+    (await ctx.db
+      .query("unitRentChanges")
+      .withIndex("by_unit_and_month", (q) => q.eq("unitId", unit._id))
+      .first()) !== null;
+  let rentKeptForHistory = false;
   for (const key of ROSTER_FIELDS) {
+    if (key === "rent" && hasRentHistory) {
+      if (fields.rent !== unit.rent) rentKeptForHistory = true;
+      continue;
+    }
     if (fields[key] !== unit[key]) {
       patch[key] = fields[key];
       changed.push(key);
@@ -655,7 +758,7 @@ export async function upsertRosterUnit(
     patch.leasingFacts = fields.leasingFacts;
     changed.push("leasingFacts");
   }
-  if (changed.length === 0) return { unitId: unit._id, action: "unchanged", changed };
+  if (changed.length === 0) return { unitId: unit._id, action: "unchanged", changed, rentKeptForHistory };
   if (patch.available === false) patch.availableFrom = undefined;
   await ctx.db.patch(unit._id, { ...(patch as Partial<Doc<"units">>), updatedAt: Date.now() });
   await writeAudit(ctx, {
@@ -665,7 +768,7 @@ export async function upsertRosterUnit(
     action: "unit_updated",
     note: `${args.note}: ${changed.join(", ")}`,
   });
-  return { unitId: unit._id, action: "updated", changed };
+  return { unitId: unit._id, action: "updated", changed, rentKeptForHistory };
 }
 
 /**
@@ -675,6 +778,12 @@ export async function upsertRosterUnit(
  * is also deleting the audit trail itself. Normal code must never call this.
  */
 export async function purgeOrgUnits(ctx: MutationCtx, orgId: string): Promise<number> {
+  for (const c of await ctx.db
+    .query("unitRentChanges")
+    .withIndex("by_org", (q) => q.eq("orgId", orgId))
+    .collect()) {
+    await ctx.db.delete(c._id);
+  }
   const units = await ctx.db
     .query("units")
     .withIndex("by_org", (q) => q.eq("orgId", orgId))

@@ -2,11 +2,10 @@
 
 import { useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
-import { CheckCheck, ChevronRight, CircleCheck, Lock, MoreHorizontal, X } from "lucide-react";
+import { CheckCheck, ChevronRight, CircleCheck, Lock, X } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
-import { createPortal } from "react-dom";
+import { useMemo, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { api } from "@/convex/_generated/api";
 import { MAX_BULK_MARK, TEAM_LABELS, landsOnText, statementMonthFor, type Team } from "@/convex/rentPaymentsPolicy";
 import { formatCurrency, formatDate, formatMonth, isMonth } from "@/convex/rosFormat";
@@ -17,6 +16,7 @@ import {
   PageHeader,
   Pagination,
   Pill,
+  RowMenu,
   SearchBox,
   Select,
   cx,
@@ -25,6 +25,7 @@ import {
   readPageSize,
   useUrlSearch,
 } from "@/components/ui";
+import { ChangeRentDialog } from "@/components/units/change-rent";
 import { useNow } from "./finance-nav";
 import { Checkbox, Spinner } from "./form-bits";
 import { currentMonth, rentMonthOptions } from "./months";
@@ -57,7 +58,8 @@ type Dialog =
   | { kind: "mark"; unit: PaymentUnit }
   | { kind: "bulk"; units: PaymentUnit[]; title?: string; note?: string }
   | { kind: "edit"; payment: PaymentInit }
-  | { kind: "undo"; payment: PaymentInit };
+  | { kind: "undo"; payment: PaymentInit }
+  | { kind: "rent"; unitId: string; label: string };
 
 const TEAMS = Object.keys(TEAM_LABELS) as Team[];
 const STATUS_OPTIONS: StatusFilter[] = ["", "unpaid", "paid", "not_markable"];
@@ -245,7 +247,7 @@ export function PaymentsView() {
     <div className="pb-10">
       <PageHeader
         title="Payments"
-        subtitle="Mark rent received for each unit and month. A payment goes on the owner statement for the month it was received (cash basis), always for the full roster rent."
+        subtitle="Mark rent received for each unit and month. A payment goes on the owner statement for the month it was received (cash basis), always for the unit's full rent for that month. Change a unit's rent from its ⋯ menu."
       />
 
       <Card className="px-4 py-4 sm:px-[22px] sm:py-5">
@@ -516,6 +518,10 @@ export function PaymentsView() {
       {data && dialog?.kind === "undo" ? (
         <UndoPaymentDialog payment={dialog.payment} month={data.month} onClose={() => setDialog(null)} />
       ) : null}
+      {data && dialog?.kind === "rent" ? (
+        // The new rent starts in the page's rent month by default.
+        <ChangeRentDialog target={{ unitId: dialog.unitId, label: dialog.label }} defaultMonth={data.month} onClose={() => setDialog(null)} />
+      ) : null}
     </div>
   );
 }
@@ -679,7 +685,7 @@ function BuildingRows({
           {greyForced ? null : (
             <GreyToggle count={g.notMarkable.length} reasons={reasonsSummary(g.notMarkable)} open={greyOpen} onClick={onToggleGrey} />
           )}
-          {greyForced || greyOpen ? g.notMarkable.map((r) => <GreyRow key={r.unitId} r={r} />) : null}
+          {greyForced || greyOpen ? g.notMarkable.map((r) => <GreyRow key={r.unitId} r={r} onDialog={onDialog} />) : null}
         </>
       ) : null}
     </tbody>
@@ -726,8 +732,13 @@ function GreyToggle({
   );
 }
 
-/** A unit that can't be marked (dim, with the reason). */
-function GreyRow({ r }: { r: Row }) {
+/** The "Change rent…" menu item: a new rent from a month on (the page's month by default). */
+function changeRentItem(r: Row, onDialog: (d: Dialog) => void) {
+  return { label: "Change rent…", onSelect: () => onDialog({ kind: "rent", unitId: r.unitId, label: `Unit ${r.unit} · ${r.propertyName}` }) };
+}
+
+/** A unit that can't be marked (dim, with the reason). Its ⋯ menu still offers Change rent (e.g. no rent set). */
+function GreyRow({ r, onDialog }: { r: Row; onDialog: (d: Dialog) => void }) {
   const tenant = tenantOf(r);
   const rent = rentOf(r);
   return (
@@ -740,8 +751,13 @@ function GreyRow({ r }: { r: Row }) {
         {tenant || <span className="text-faint">—</span>}
       </td>
       <td className="px-3 py-2 text-right tabular-nums opacity-70">{rent !== null ? formatCurrency(rent) : "—"}</td>
-      <td className="truncate px-3 py-2 text-[12.5px]" title={r.reason ?? undefined}>
-        Not markable{r.reason ? ` · ${r.reason}` : ""}
+      <td className="px-3 py-1.5 text-[12.5px]">
+        <div className="flex items-center justify-between gap-2">
+          <span className="min-w-0 truncate" title={r.reason ?? undefined}>
+            Not markable{r.reason ? ` · ${r.reason}` : ""}
+          </span>
+          <RowMenu label={`Actions for Unit ${r.unit} at ${r.propertyName}`} items={[changeRentItem(r, onDialog)]} />
+        </div>
       </td>
     </tr>
   );
@@ -835,6 +851,7 @@ function StatusCell({ r, month, onDialog }: { r: Row; month: string; onDialog: (
             Mark paid
           </Btn>
         ) : null}
+        <RowMenu label={`Actions for Unit ${r.unit} at ${r.propertyName}`} items={[changeRentItem(r, onDialog)]} />
       </div>
     );
   }
@@ -861,23 +878,29 @@ function StatusCell({ r, month, onDialog }: { r: Row; month: string; onDialog: (
         </span>
         <span className="sr-only">{detail}</span>
       </span>
-      {p.kind === "ledger" ? (
-        <LockMark reason={p.lockedReason} href="/owner-statements/ledger" linkText="Open the Ledger page" />
-      ) : p.locked ? (
-        <LockMark
-          reason={p.lockedReason}
-          href={p.statementId ? `/owner-statements/${p.statementId}` : null}
-          linkText="Open the statement"
-        />
-      ) : payment ? (
+      <span className="flex shrink-0 items-center gap-0.5">
+        {p.kind === "ledger" ? (
+          <LockMark reason={p.lockedReason} href="/owner-statements/ledger" linkText="Open the Ledger page" />
+        ) : p.locked ? (
+          <LockMark
+            reason={p.lockedReason}
+            href={p.statementId ? `/owner-statements/${p.statementId}` : null}
+            linkText="Open the statement"
+          />
+        ) : null}
         <RowMenu
           label={`Actions for Unit ${r.unit} at ${r.propertyName}`}
           items={[
-            { label: "Edit payment", onSelect: () => onDialog({ kind: "edit", payment }) },
-            { label: "Undo payment…", danger: true, onSelect: () => onDialog({ kind: "undo", payment }) },
+            ...(payment && p.kind === "payment" && !p.locked
+              ? [
+                  { label: "Edit payment", onSelect: () => onDialog({ kind: "edit", payment }) },
+                  { label: "Undo payment…", danger: true, onSelect: () => onDialog({ kind: "undo", payment }) },
+                ]
+              : []),
+            changeRentItem(r, onDialog),
           ]}
         />
-      ) : null}
+      </span>
     </div>
   );
 }
@@ -895,107 +918,6 @@ function LockMark({ reason, href, linkText }: { reason: string | null; href: str
     <span title={text} role="img" aria-label={`Locked: ${text}`} className={cls}>
       <Lock aria-hidden className="h-3.5 w-3.5" />
     </span>
-  );
-}
-
-type MenuItem = { label: string; onSelect: () => void; danger?: boolean };
-
-/** "⋯" button with a fixed-position menu (portalled, so the table's scroll box can't clip it). */
-function RowMenu({ label, items }: { label: string; items: MenuItem[] }) {
-  const [coords, setCoords] = useState<{ top: number; right: number } | null>(null);
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const open = coords !== null;
-
-  useEffect(() => {
-    if (!open) return;
-    const close = () => setCoords(null);
-    const onDown = (e: Event) => {
-      const t = e.target as Node;
-      if (menuRef.current?.contains(t) || btnRef.current?.contains(t)) return;
-      close();
-    };
-    document.addEventListener("pointerdown", onDown, true);
-    window.addEventListener("scroll", close, true);
-    window.addEventListener("resize", close);
-    menuRef.current?.querySelector<HTMLElement>("[role='menuitem']")?.focus();
-    return () => {
-      document.removeEventListener("pointerdown", onDown, true);
-      window.removeEventListener("scroll", close, true);
-      window.removeEventListener("resize", close);
-    };
-  }, [open]);
-
-  const onMenuKey = (e: KeyboardEvent<HTMLDivElement>) => {
-    const list = [...(menuRef.current?.querySelectorAll<HTMLElement>("[role='menuitem']") ?? [])];
-    const at = list.indexOf(document.activeElement as HTMLElement);
-    if (e.key === "Escape" || e.key === "Tab") {
-      if (e.key === "Escape") e.preventDefault();
-      setCoords(null);
-      btnRef.current?.focus();
-    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      e.preventDefault();
-      const next = e.key === "ArrowDown" ? (at + 1) % list.length : (at - 1 + list.length) % list.length;
-      list[next]?.focus();
-    }
-  };
-
-  return (
-    <>
-      <button
-        ref={btnRef}
-        type="button"
-        aria-label={label}
-        title="More actions"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => {
-          if (open) return setCoords(null);
-          const r = btnRef.current?.getBoundingClientRect();
-          if (!r) return;
-          const menuH = items.length * 36 + 12;
-          const top = r.bottom + menuH > window.innerHeight - 8 ? Math.max(8, r.top - menuH - 4) : r.bottom + 4;
-          setCoords({ top, right: Math.max(8, window.innerWidth - r.right) });
-        }}
-        className={cx(
-          "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring",
-          open && "bg-muted text-foreground",
-        )}
-      >
-        <MoreHorizontal aria-hidden className="h-4 w-4" />
-      </button>
-      {open && typeof document !== "undefined"
-        ? createPortal(
-            <div
-              ref={menuRef}
-              role="menu"
-              aria-label={label}
-              onKeyDown={onMenuKey}
-              style={{ position: "fixed", top: coords.top, right: coords.right }}
-              className="z-[90] min-w-[170px] rounded-2xl border border-border bg-card p-1.5 shadow-card"
-            >
-              {items.map((it) => (
-                <button
-                  key={it.label}
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setCoords(null);
-                    it.onSelect();
-                  }}
-                  className={cx(
-                    "flex w-full rounded-[10px] px-2.5 py-2 text-left text-[13.5px] hover:bg-muted focus-visible:bg-muted focus-visible:outline-none",
-                    it.danger ? "text-danger-ink hover:bg-danger-soft focus-visible:bg-danger-soft" : "text-foreground",
-                  )}
-                >
-                  {it.label}
-                </button>
-              ))}
-            </div>,
-            document.body,
-          )
-        : null}
-    </>
   );
 }
 

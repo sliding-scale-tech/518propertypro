@@ -1237,8 +1237,8 @@ Rent reaches a statement ONLY as a payment marked on the Payments page (user dec
 
 **Decisions.**
 1. **Cash basis like Buildium:** a payment is dated the day it was RECEIVED and lands on that month's statement, whatever month the rent is for. September rent received 10/2 is on the October statement.
-2. **No partial payments:** one payment per unit per rent month, always the full roster rent (`rosterRentToCents(units.rent)`, never an amount from the client). Statuses are Paid / Unpaid (plus Not markable).
-3. **Greyed-out units** (not markable), with the reason: owner collects rent directly (`rentPaidTo "owner_direct"`), rent included in another unit, vacant on the roster, no active tenant, no rent on the roster, roster rent not a valid dollar amount (`rentMarkability`, rules in that order).
+2. **No partial payments:** one payment per unit per rent month, always the unit's full rent FOR THAT RENT MONTH (`unitRentPolicy.rentForMonth`: its rent history, else the roster rent `rosterRentToCents(units.rent)`; never an amount from the client). Statuses are Paid / Unpaid (plus Not markable). See "Rent history" below (2026-11-13).
+3. **Greyed-out units** (not markable), with the reason: owner collects rent directly (`rentPaidTo "owner_direct"`), rent included in another unit, vacant on the roster, no active tenant, no rent on the roster, roster rent not a valid dollar amount, and (with rent history) "No rent set for this month" (`no_rent_month`) (`rentMarkability`, rules in that order).
 4. **Editable until final:** a payment can be edited or undone until it is billed on a final statement or its received date is in a month that is final for the property (`paymentLock`, the locked-month rule).
 5. **Rent is edited only here.** The statement shows payment lines read-only with "Edit on Payments page".
 
@@ -1314,6 +1314,42 @@ Lock reasons shown on the page: "On the {Month YYYY} final statement." / `{Month
 
 **Which statement a payment lands on** (`statementMonthFor(receivedDate)` = `monthOf(receivedDate)`, the cash-basis rule the builder uses): `landsOnText` "Goes on the {Month YYYY} statement (the month it was received)." under Received on in the Mark / Mark selected / Edit dialogs; `landsOnShort` "→ {Mon YYYY} statement" on paid rows.
 
+**Rent history (2026-11-13).** A unit's rent changes with an effective month; payments use the rent FOR the month they are for.
+
+- **Table `unitRentChanges`** `{ orgId, unitId, effectiveMonth "YYYY-MM", rentCents (integer, > 0, <= $1,000,000.00), previousRentCents? (the rent in force for effectiveMonth before the change; absent = none), note?, createdBy, createdAt }`, indexes `by_unit_and_month` ["unitId", "effectiveMonth"], `by_org`. One row per unit per effective month. Written only by `unitRentLib.changeRent`; deleted with the unit (`units.remove`, `purgeOrgUnits`).
+- **`rentForMonth(unit, changes, month)`** (`unitRentPolicy.ts`, pure) -> cents | null: the latest change with `effectiveMonth <= month`; before the first change, that change's `previousRentCents` (the roster rent when the history started); no changes, `rosterRentToCents(units.rent)`. `rentInEffect` also returns `fromMonth` (null = roster) for display.
+- **`units.rent` stays the CURRENT rent** for Sarah, leasing and docs: it is set to the change with the newest effective month (so an upcoming rent shows there as soon as it is set; no cron). Money never reads it once a unit has history. `units.update` refuses a rent edit (`Rent is changed with Change rent, so its history is kept.` [rent]); a roster re-import (`upsertRosterUnit`) leaves `rent` alone on a unit with history. `units.create` validates the rent (`Enter the rent as a dollar amount over $0, like 1250 or 1250.50.` [rent]) and the floor / baths (`unitFieldsPolicy.ts`).
+- **Who reads it:** `rentPayments.list` (each row's `rentCents` and the summary's expected total are that month's rent), `markReceived` / `markManyReceived` (the amount), the draft's `RENT_UNPAID` info warning (per month: a unit counts only for months it has rent set; the loader passes `rentChanges`), `units.rentSummary` (property page: rent this month, `fromMonth`, upcoming change; same access and AM scope as `units.list`).
+- **Paid months are never changed:** a payment stores its own amount. A change that covers months already paid at another amount (from its effective month up to the next change) leaves those payments alone and returns an info line per month.
+
+| Function (`convex/unitRent.ts`, `requireFinance` first: admin view + accountant; AM / technician / none refused with "You don't have access to owner statements.") | Args (nullable strings) | Returns |
+|---|---|---|
+| `changeRent` mutation | `{ unitId, rent /* typed dollars, parseDollarsToCents */, effectiveMonth, note? }` | `{ rentCents, effectiveMonth, previousRentCents, replaced, paidMonths: [{ month, amountCents }], info: string[] }` |
+| `history` query | `{ unitId }` | `{ unitId, unitNumber, propertyName, current: { cents, fromMonth }, upcoming: { month, cents } \| null, hasHistory, lines: [{ changeId, effectiveMonth, fromCents, toCents, note, byName, at }] (newest first), changes, rosterRent, earliestMonth, latestMonth, currentMonth }` |
+
+`changeRent` rules, in order: unit (org-scoped); fields (`validateRentChange`, the same on the client); the amount must differ from the rent already in force for that month; then write. A second change for the same effective month REPLACES the first (its `previousRentCents` is kept). Audit entity `unit`, action `rent_changed`: `from` = JSON `{ rentCents }` (in force before), `to` = JSON `{ rentCents, effectiveMonth }`, `note` = `Unit {X} at {property} · from {Month YYYY}` + ` · replaced the earlier change for {Month YYYY} ($X)` when it replaced one + ` · {note}`.
+
+Messages (exact; `RENT_CHANGE_MSG`; field in brackets):
+
+| When | Message |
+|---|---|
+| unit missing [unitId] | "Select the unit to change rent for." |
+| unit not found / other org [unitId] | "Unit not found." |
+| rent missing [rent] | "Enter the new rent." |
+| rent not a dollar amount (negative, 3 decimals, text) [rent] | "Enter the rent as a dollar amount, like 1250 or 1250.50." |
+| rent $0 [rent] | "The rent must be more than $0.00." |
+| rent over $1,000,000.00 [rent] | "The rent can't be more than $1,000,000.00." |
+| month missing [effectiveMonth] | "Select the month the new rent starts." |
+| month not real [effectiveMonth] | "Select a real month (like October 2026)." |
+| more than 24 months back [effectiveMonth] | `The new rent can't start in {Month YYYY} — that's more than 24 months ago.` |
+| more than 12 months ahead [effectiveMonth] | `The new rent can't start in {Month YYYY} — that's more than 12 months ahead.` |
+| note over 200 [note] | "Keep the note under 200 characters." |
+| same as the rent in force [rent] | `The rent from {Month YYYY} is already {$X}.` |
+| info (not an error): a covered month already paid at another amount | `{Month YYYY} is already marked paid at {$X}; that payment isn't changed.` |
+| marking a month with no rent set (history) [unitId] | `Rent can't be marked for Unit {X} at {property}: no rent is set for this month.` |
+
+UI: "Change rent…" in every Payments row's ⋯ menu (paid, unpaid, locked and not-markable rows; the new rent starts in the page's rent month by default); on the property page in each unit's ⋯ menu and the unit drawer (with the rent history list: effective month, from → to, who, when, note), and from the Edit unit form's read-only rent line.
+
 **On statements.** A payment is an unbilled ledger row: the draft for its received month (or a later one, carried forward) picks it up like a manual row, it counts toward the fee base (Rent Income), finalize stamps it (`statementId`, `postedDate`), and it is then immutable. It can't be left off a statement (only a payment left off by default, dated before the first statement month, can be put back; while it is left off, the info warning RENT_PAYMENT_BEFORE_START lists it, 5.8). The info warning RENT_UNPAID (5.4) lists units still unpaid.
 
 ## 6. UI (WP5 statements and finance; WP3 work orders)
@@ -1386,53 +1422,50 @@ Visual language: keep the designer's mock (`ros19.png`, Figma file `wISc3YonhsLV
 
 ### 6.3 Statement page `/owner-statements/[id]`
 
-Layout: breadcrumb "Owner reports / {legalName} / {Month YYYY}", title "{legalName}: {Month YYYY}", status `Pill`. Two columns: main (left) and the side card "Review & delivery" (right, sticky).
+**Layout (rebuilt 2026-11-13 as a five-step page).** One column: no two columns and no "Review & delivery" side card. Header: breadcrumb "Owner reports / {legalName} / {Month YYYY}", title "{legalName}: {Month YYYY}", the status `Pill`, the period, and one pill per property. Under it the step bar, the step's content, and the totals bar. Code: `components/finance/statement-page.tsx` (page, step state), `statement-chrome.tsx` (step bar, totals bar, header), `statement-steps.ts` (pure: step ids, `?step=` reading, warning-to-step mapping, step status dots, `totalsOf`, `groupWarnings`), `statement-check.tsx`, `statement-lines.tsx`, `statement-payout.tsx`, `statement-review.tsx`, `finalize-dialogs.tsx` (Finalize / Discard), `statement-preview.tsx`.
 
-`Seg` tabs: **Transactions** (draft default) | **Preview** (final default).
+**Steps:** Check · Money in · Money out · Fees & payout · Review & finalize.
+- The step is in the URL (`?step=check|in|out|payout|review`). A draft opens on Check; a final or discarded statement opens on Review. A bad `?step=` falls back to that default.
+- Navigation is free: every step can be opened at any time (a click on the step bar, or **Back** / **Next** under the content). Each step has a status dot: ✓ done, `!` needs attention (blocking items), • worth a look (info items). Mobile shows "Step N of 5" with a dropdown to jump.
+- A final statement is view-only on every step (no add, edit, skip or put-back controls).
 
-**Transactions tab (draft):**
-1. **Warnings card** (only if there are any):
-   - blocking items in red, with the title "Fix before finalizing"
-   - info items in amber, with the title "Check"
-   - each WO warning links to `/work-orders?wo=<id>` (or `/work-orders/<id>`)
-2. **Additions to cash** and **Subtractions from cash** cards. Each is a `DataTable` of `LineView`s in statement order:
-   - Columns: Date (when `carriedForward`: the original `storedDate`, with a muted "posts {M/D/YYYY}" hint for the effective date), Property (hidden when there is one property), Unit, Account, Name, Memo, Amount (right), Source (badge `sourceLabel`; a carried-forward line also gets the pill "From {Month YYYY} — not on a final statement yet", or "From {Month YYYY}" on a final statement), and actions.
-   - Footer row: the total.
-   - Actions by kind:
-     - `entry`: **Edit** (TransactionForm modal → `ledger.update`), **Leave off this month** (`excludeLine`), and, for an editable manual row, **Delete** (also inside the edit modal): dialog "Delete this transaction?" / "It is removed from this and every future statement. It stays in the history with your reason." with a required reason → `ledger.voidEntry`; toast "Transaction deleted."
-     - `wo`: **Edit billing** (BillingForm modal: description, bill amount, account, property-level toggle, no-charge toggle → `workOrderBilling.updateBilling`; cost is not shown here), **Leave off this month**, **Open work order** link
-     - Rent payment (an `entry` line with `rentForMonth`, source "Payments page"): read-only. The Source cell links "Edit on Payments page" (draft) / "View on Payments page" (final) to `/owner-statements/payments?month={rentForMonth}&property={propertyId}`. No Edit, no Delete, no "Leave off this month" (the server refuses it: "Rent is recorded on the Payments page. To take this payment off the statement, undo it there."); only a payment left off by default (dated before the first statement month) can be put back, and that put-back reverted. A hand-entered Rent Income line keeps Leave off and Delete but has no Edit. The Additions card head has a "Record rent on Payments page" link (that month, this owner). (The roster-rent `rent` line actions and `rent-dialog.tsx` were removed 2026-11-12.)
-     - `fee`: **Edit** (amount + memo, "Reset to calculated" → `setGenerated(amountCents: null, memo: null)`), **Skip this month** (`excluded: true`)
-     - `draw`: **Edit amount** (shows "Suggested: $X"), "Reset to suggested", **Skip this month**
-   - "Add transaction" button (TransactionForm → `ledger.add`):
-     - property limited to the statement's properties
-     - the date picker defaults to `min(today, periodEnd)` and must be inside the period: client check "Pick a date in {Month YYYY}." (the server applies the normal lock rules)
-3. **Left off this statement** (collapsed card, count in the title): the lines, each with a **Put back** button (`includeLine`). The note under the title reads "Lines left off stay unbilled and come back on next month's draft." Lines dated before the owner's first statement month are listed here by default (`defaultExcluded`), each with its `note` (5.8); "Put back" puts them on the statement (`includedKeys`). A removed roster-rent line is listed here too (note "Removed: the tenant didn't pay this month. Put it back if the payment came in.") with the same **Put back** button; it is not carried to next month.
-   - (The "Not prefilled from the roster" card was removed 2026-11-12.)
-4. **Adjustments** card, one block per property:
-   - "Tenant security deposits" read-only = the sum of the units, with a link "Edit deposits" to the owner page
-   - "Management fee" read-only: `{x.xx}%` with "(own fee)" or "(default)" (`feeSource`; "Not set" only if `fee.bps` is null), and a "Change fee" link to the owner page (draft only)
-   - "Early payments", "Property reserve" (prefilled from the owner setting; hint "Default {amount} from the owner settings"), "Unpaid bills": money inputs
-   - "Save adjustments" → `setAdjustments`
-   - "Pending ePay payments: $0.00 (card payments are not live yet)"
-5. **History** (collapsed): `ownerStatements.history`, shown as `Timeline`.
+**Totals bar (every step).** Income, Expenses (includes the management fee), Fee, Owner draw, Ending cash, Available (available for payment). All are the server's figures (`result`), never summed in the browser (`totalsOf(result)`). Desktop: a slim bar fixed to the bottom of the screen. Mobile: a compact card above the content with "All totals" / "Fewer totals". It also holds **Preview** (opens the Preview drawer) and the PDF button ("Preview PDF" for a draft, "Download PDF" for a final statement).
 
-**Preview tab:** render `view` as HTML tables in the PDF's order: Summary by property, Income statement, Detail transactions. Use the same strings; bold `total`/`grand`; right-aligned numbers; horizontal scroll on narrow screens. Above them is the PDF header block (title, period, statement date, Prepared By).
+**Step 1: Check.** The server's warnings (5.4) grouped per property, blocking first, in cards with a short banner at the top of the step. `NO_DRAW` and `PERIOD_OPEN` are not per-property fixes: they sit under "Notes". The warning-code-to-step mapping lives in `statement-steps.ts` (`warningStep`: `RENT_UNPAID` / `RENT_PAYMENT_BEFORE_START` → Money in; the `WO_*` codes → Money out; `AMOUNT_TOO_LARGE`, `PAYEE_MISSING`, `FEE_NOT_SET`, `NO_DRAW`, `NEGATIVE_ENDING`, `DEPOSITS_NOT_SET` → Fees & payout; `PERIOD_OPEN` → Review; anything else is a Check item), and decides each step's status dot. Every other step shows its own warnings as a banner at the top. Quick fixes, one click and no navigation:
+- Opening balance not set: **"It's $0.00"** (writes 0 through `owners.updateLinkSettings`; it first re-reads the link and, when an opening balance has been set meanwhile, does not write and shows the info toast "Opening balance for {property} is already set to {$X}.") or **"Set amount…"** (a dialog).
+- Deposits not set: **"None held"** (records $0.00 only for units with nothing recorded, so a deposit entered meanwhile is kept; per-unit writes, not atomic: accepted) or **"Enter deposits…"** (the in-place deposits dialog).
+- Other warnings link to where they are fixed (a work order, the owner page, the Payments page).
 
-**Side card "Review & delivery":**
-- Report status "Draft" / "Final", Owner, Period (`formatPeriod`), Statement date (draft: "Set when finalized"), Ending cash (All properties), Available for payment.
-- "Before finalizing": the blocking count, or a ✓ "Ready to finalize" line.
-- (The **Confirm rent** checkbox was removed 2026-11-12.)
-- Buttons (draft):
-  - **Finalize** (primary; disabled with a tooltip while `!canFinalize`)
-  - **Preview PDF** (secondary, a draft PDF with a DRAFT watermark, ASSUMPTION A29)
-  - **Discard draft** (text/destructive; ConfirmDialog "Discard this draft? Nothing in the ledger or on any work order changes.")
+**Steps 2 and 3: Money in / Money out.** The statement's additions (step 2) or expenses (step 3), grouped by property, each group a `LinesTable` with its subtotal ("Money in: {property}"); with several properties a grand total row follows ("Total money in" is the server's `view.detail.additionsTotal`; "Total money out (before fee and draw)" is the sum of the lines shown, because the server's subtractions total also contains the fee and draw). The management fee and owner draw are on Fees & payout, not here.
+- Columns: Date (a carried-forward line shows the original `storedDate` with a muted "posts {M/D/YYYY}" hint), Unit, Account, Name, Memo, Amount (right), Source (badge `sourceLabel`; a carried-forward line also gets "From {Month YYYY} — not on a final statement yet", or "From {Month YYYY}" on a final statement). Property is the group heading.
+- Each row has one **main action** button and a **⋯ menu** (`components/ui/row-menu.tsx`, with hover hints as `title`: "Leave off this month" shows `LEAVE_OFF.tooltip`; Delete on a legacy hand-entered Rent Income line shows `PAYMENTS_LINK.legacyRentTooltip`). A **click on the row** runs the main action. By kind:
+  - `entry`: main Edit (TransactionForm → `ledger.update`); ⋯ Leave off this month (`excludeLine`), Delete… (an editable manual row; dialog "Delete this transaction?" with a required reason → `ledger.voidEntry`; toast "Transaction deleted.").
+  - `wo`: main Edit billing (BillingForm → `workOrderBilling.updateBilling`); ⋯ Leave off this month, Open work order.
+  - Rent payment (an `entry` line with `rentForMonth`, source "Payments page"): read-only. The Source cell links "Edit on Payments page" (draft) / "View on Payments page" (final) to `/payments?month={rentForMonth}&owner={ownerId}`. No Edit, Delete or Leave off (the server refuses it: "Rent is recorded on the Payments page. To take this payment off the statement, undo it there."); only a payment left off by default (dated before the first statement month) can be put back. A hand-entered Rent Income line keeps Leave off and Delete but has no Edit.
+- Buttons at the top: **"Add income"** (step 2) / **"Add expense"** (step 3) open TransactionForm limited to that side (`addition` / `subtraction`); each property group also has **"Add income here"** / **"Add expense here"** (property preselected). Step 2 also has "Record rent on Payments page" (`/payments?month=&owner=`). TransactionForm: property limited to the statement's properties; the date defaults to `min(today, periodEnd)` and must be inside the period (client check "Pick a date in {Month YYYY}."; the server applies the normal lock rules).
+- **Left off** is split per step: the lines left off this statement that belong to money in are listed at the bottom of step 2, those that belong to money out at the bottom of step 3, each with **Put back** (`includeLine`) and the line's `note` (5.8; lines dated before the owner's first statement month are listed here by default). The note reads "Lines left off stay unbilled and come back on next month's draft." The fee and the draw, when skipped, are listed on Fees & payout with their own Put back.
+
+**Step 4: Fees & payout.** One card per property:
+- Heading with "Available for payment {amount}" (server).
+- **Management fee** row: "{x.xx}% (this property's fee / default fee) of {base} fee-base income" with the amount and **Edit** / **Skip** (draft). Edit / Skip are hidden when the fee percentage is not set (`fee.bps` null: there is nothing to edit); a skipped fee shows "Skipped this month" with **Put back**. A **"Change %"** link goes to the property on the owner page.
+- **Hold back** (these do not change the cash balance): "Tenant security deposits held: {amount}" with an in-place **"Edit deposits…"** dialog (owner deposits per unit, `owners.setUnitDeposit`); the property reserve, unpaid bills and early payments inputs; **Save adjustments** (`setAdjustments`).
+- **Owner draw** row: the suggested draw with **Edit amount** / **Skip this month** / **Put back** and "Reset to suggested". Editing a draw shows "Suggested: $X".
+- "Pending ePay payments: $0.00 (card payments are not live yet)".
+The fee and draw are the only `fee` / `draw` generated lines (`setGenerated`, `setGeneratedExcluded`).
+
+**Step 5: Review & finalize.**
+- Summary: status (Draft / Final / Discarded), owner, period, statement date (draft: "Set when finalized"), finalized by (and when), ending cash and available for payment per property.
+- **Gate:** while `!canFinalize` Finalize is off with the server's reason: "Fix N items on the Check step first." (N = blocking count; `finalizeBlocker` in `finalize-dialogs.tsx`), or the `PERIOD_OPEN` message while the month is still open.
+- Buttons (draft): **Finalize** (primary), **Discard draft** (ConfirmDialog "Discard this draft? Nothing in the ledger or on any work order changes."), **Preview PDF**. Final: **Download PDF**; the note reads "Emailing statements to owners comes later."
+- **"What gets locked"** card: what Finalize freezes (the month for these properties; the figures; the ledger rows it writes) and that corrections go on next month's statement.
+- **History** (collapsed): `ownerStatements.history` as a `Timeline` (it moved here from the old Transactions tab).
 - Finalize ConfirmDialog:
   - Title: "Finalize {Month YYYY} for {legalName}?"
   - Body: one row per property "{property}: ending cash {x}, owner draw {y}, management fee {z} ({pct}%), available for payment {w}" (the % is that property's fee, `fee.bps`), then the line "Finalizing locks {Month YYYY} for these properties. Corrections go on next month's statement."
   - A checkbox "I've checked the owner draw amounts" must be ticked; until it is, confirming shows "Tick the box to confirm the owner draw amounts."
   - **The dialog freezes what the user reviewed** (`components/finance/finalize-guard.ts`, pure): `captureReviewed(data)` records `previewHash`, `expectedEndingCents` and `expectedAvailableCents` **when the dialog opens**. It calls `finalize({ statementId, expectedEndingCents, expectedAvailableCents, expectedHash: previewHash })` with those captured values, never the live ones. While the dialog is open the live `get().previewHash` is compared with the captured one (`reviewChanged`); if it differs (another tab, a work-order edit, a ledger change), the dialog shows "The statement changed since you opened this. Review it again." (`STATEMENT_CHANGED`) with "Close this and open Finalize again.", and the Finalize button is disabled. The server guard (5.4 step 4) is the second line of defence.
-- Final: **Download PDF** (primary). The note reads "Emailing statements to owners comes later."
+
+**Preview = a drawer** opened from the totals bar on any step (there is no Transactions / Preview tab switch any more). `StatementPreview` takes an optional `sections` prop (which of Summary by property, Income statement, Detail transactions to render; default all) and renders `view` as HTML tables in the PDF's order with the same strings (bold `total` / `grand`, right-aligned numbers, horizontal scroll on narrow screens), above them the PDF header block (title, period, statement date, Prepared By).
 
 ### 6.4 Ledger `/owner-statements/ledger`
 
@@ -2080,3 +2113,12 @@ All paths are relative to the repo root. **One owner per file.** A package may *
   - **LOW-1:** rent months before the owner's first statement month (`Statements for {property} start in {Month}.`) or more than 24 months ago (`You can't mark rent for {Month} — it's more than 24 months ago.`) are refused on the server; the list greys out pre-start months and shows old months view-only. **LOW-2:** `ledger.update` refuses any edit of a row on Rent Income ("Rent can't be moved to another account. Delete it and record it on the Payments page."). **LOW-3:** filtered lists read only the matching properties' units; accurate truncation notes. **LOW-4:** `ownerChanged` message on a date edit. **LOW-5:** `lockedThrough` reads one row. **LOW-6:** older `?month=` values open. **LOW-7:** `MethodSelect` (and the shared `Select`) set `aria-invalid`.
   - **Which statement:** "Goes on the {Month} statement (the month it was received)." in the dialogs and "→ {Mon YYYY} statement" on paid rows (`statementMonthFor`, `landsOnText`, `landsOnShort`).
   - Tests: `ros_rent.test.mjs` (MEDIUM-1, MEDIUM-2, LOW-1/2/3/4/5, lands-on; the uniqueness test now expects the same-month refusal), `ros_warning_links.test.mjs` (new code, new hrefs), new `ros_lists.test.mjs` (search, totals, per-page select all, pagination maths, sorting, statements / owners finders).
+- **2026-11-13, rent history (rent changes with an effective month) and the property page redesign.**
+  - **Rent history (5.9 "Rent history").** New table `unitRentChanges` (+ `by_unit_and_month`, `by_org`); pure `unitRentPolicy.ts` (`rentForMonth`, `rentInEffect`, `validateRentChange`, messages), `unitRentLib.ts` (`changeRent`, `rentHistory`), registered in `unitRent.ts` (`changeRent`, `history`; `requireFinance` first: admin view + accountant). Payments (`list`, `markReceived`, `markManyReceived`) and the draft's `RENT_UNPAID` use the rent FOR the month: a late October payment marked after a November increase is October's rent. Paid months are never changed (info message). `units.rent` = the latest change (Sarah and other readers unchanged). `units.update` refuses rent; `units.create` / `update` validate floor, baths and rent (`unitFieldsPolicy.ts`); a roster re-import skips `rent` on units with history; removing a unit removes its history. New not-markable code `no_rent_month` ("No rent set for this month"). New `units.rentSummary` (rent this month per unit) and `properties.linkedOwners` (the owner links, admin view + accountant).
+  - **Property page.** Header (name, address, team, linked owner → owner page, unit / occupancy counts, Edit property) and tabs Units · Details · Asset manager (`?tab=`). Units: table Unit · Tenant · Rent / month · Status · Asset manager · ⋯ (Edit unit, Change rent…, View history, Remove unit…), whole-row click opens the unit drawer (details, rent now and upcoming, rent history, asset manager history; Edit unit and Change rent inline). Details: read-only Profile / Owner / Leasing rules cards with focused Edit dialogs (same `updateProfile` call and validation). Payments page rows all get a ⋯ menu with Change rent…; the shared `RowMenu` moved to `components/ui/row-menu.tsx`.
+  - Tests: new `ros_rent_history.test.mjs` (rentForMonth, cents round trip, validation messages, changeRent on a fake database, late payment after an increase, past changes and paid months, same-month replace, no-rent months, unit form parsing, access); `ros_rent.test.mjs` (RENT_UNPAID with history); `ros_authz.test.mjs` scans `unitRent.ts`.
+
+- **2026-11-13, statement page rebuilt as five steps (C) and review fixes.**
+  - **Statement page (6.3).** Single column with a header (period, property pills); steps Check · Money in · Money out · Fees & payout · Review & finalize (`?step=`, free navigation, Back / Next, status dots); a totals bar on every step (server figures; fixed bottom on desktop, compact card on mobile) with Preview (a drawer; `StatementPreview` gets an optional `sections`) and the PDF; Check groups warnings per property with one-click "It's $0.00" / "Set amount…" and "None held" / "Enter deposits…"; Money in / out grouped by property with subtotals, a main action plus a ⋯ menu, row click edits, "Add income" / "Add expense" (and "… here"); Left off split per step; fee and draw on Fees & payout; History and "What gets locked" on Review. New files `statement-steps.ts`, `statement-check.tsx`, `statement-lines.tsx`, `statement-payout.tsx`, `statement-review.tsx`, `statement-chrome.tsx`, `finalize-dialogs.tsx` (replaces `side-panel.tsx`), `components/ui/row-menu.tsx`; `warnings-card.tsx` removed.
+  - **Tests:** new `ros_statement_steps.test.mjs` (step reading, warning-to-step mapping, status dots, totals, grouping, quick actions); `ros_authz` and `ros_rent` updated; `ros_rent_history.test.mjs` extended.
+  - **Review fixes.** (1) "It's $0.00" re-reads the opening balance and does not overwrite one set meanwhile (info toast "Opening balance for {property} is already set to {$X}."). (2) Fees & payout hides the fee Edit / Skip buttons when the fee percentage is not set. (3) `unitRent.changeRent` refuses replacing a unit's first change with its `previousRentCents` ("The rent from {Month YYYY} would be the same as before ({$X}). Nothing to change."; test added). (4) The roster re-import counts units whose roster rent was kept because they have rent history: summary fields `rentKeptForHistory` (count) and `rentKeptUnits` (up to 20 labels), printed by `import_roster.py`. (5) The Change rent panel's "Rent now" says "Before the first rent change" like the unit drawer. (6) "Total money in" is the server's `view.detail.additionsTotal`. (7) "Leave off this month" and the legacy-rent Delete keep their hover hints in the ⋯ menu (`RowMenuItem.title`). (8) Edit unit validates floor / baths only when changed (client `validateUnitForm(…, unchanged)` and `units.update`), and the property form validates only the fields shown in that dialog. Accepted as is: "None held" writes per unit (not atomic) and comma parsing.

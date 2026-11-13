@@ -7,7 +7,8 @@
  * Decisions (user, 2026-11-12):
  * - Cash basis like Buildium: a payment is a Rent Income ledger row dated the day it was RECEIVED,
  *   so it lands on that month's statement, whatever month the rent is for (`rentForMonth`).
- * - No partial payments: one payment per unit per rent month, always the full roster rent.
+ * - No partial payments: one payment per unit per rent month, always the unit's full rent for that
+ *   month (its rent history, unitRentPolicy.rentForMonth; the roster rent when it has none).
  * - Units whose rent the owner collects directly (or that is included in another unit) can't be
  *   marked; vacant units and units with no / an invalid roster rent can't either.
  * - A payment can be changed or undone until the statement covering its received date is final.
@@ -17,6 +18,7 @@
 
 import { formatDate, formatMonth, isIsoDate, isMonth, monthOf, monthStart, nextMonth, prevMonth } from "./rosFormat";
 import { RENT_SKIP_TEXT, rentCounterparty, rosterRentToCents, rosterSaysVacant, type FieldResult } from "./rosPolicy";
+import { rentInEffect, type RentChange } from "./unitRentPolicy";
 
 // --- constants -----------------------------------------------------------------------------------
 
@@ -134,7 +136,15 @@ export const RENT_PAY_MSG = {
 
 // --- which units can be marked ---------------------------------------------------------------------
 
-export type NotMarkableCode = "owner_direct" | "included_in_other_unit" | "roster_vacant" | "vacant" | "no_rent" | "invalid_rent";
+export type NotMarkableCode =
+  | "owner_direct"
+  | "included_in_other_unit"
+  | "roster_vacant"
+  | "vacant"
+  | "no_rent"
+  | "invalid_rent"
+  /** The unit has rent history but no rent is set for this month (before its first change, with no rent before it). */
+  | "no_rent_month";
 
 /** The reason a unit's row is greyed out (Payments page). */
 export const NOT_MARKABLE_REASON: Readonly<Record<NotMarkableCode, string>> = {
@@ -144,7 +154,11 @@ export const NOT_MARKABLE_REASON: Readonly<Record<NotMarkableCode, string>> = {
   vacant: "Vacant (no active tenant)",
   no_rent: "No rent on the roster",
   invalid_rent: "Roster rent isn't a valid dollar amount",
+  no_rent_month: "No rent set for this month",
 };
+
+/** The not-markable sentence for "no_rent_month" (the others are rosPolicy.RENT_SKIP_TEXT). */
+export const NO_RENT_MONTH_SENTENCE = "no rent is set for this month";
 
 export type MarkUnitInput = {
   /** units.rent, DOLLARS. */
@@ -158,24 +172,35 @@ export type Markability =
   | { markable: true; amountCents: number; counterparty: string }
   | { markable: false; code: NotMarkableCode; reason: string; sentence: string };
 
+/** The rent month and the unit's rent history, so the amount is the rent FOR that month. */
+export type MarkMonthRent = { month: string; changes: readonly RentChange[] };
+
 /**
  * Can rent be marked received for this unit, and for how much? Rules in this order: rent paid to
  * the owner directly / included in another unit, vacant on the roster (even with an active resident
- * on file), no active tenant, no rent, invalid rent. The amount is ALWAYS the roster rent in integer
- * cents (rosterRentToCents: no float drift), never a typed amount.
+ * on file), no active tenant, no rent, invalid rent. The amount is ALWAYS the unit's rent for the
+ * rent month in integer cents, never a typed amount: with rent history (`forMonth.changes`, see
+ * unitRentPolicy.rentForMonth) the change in force for `forMonth.month`; without history the roster
+ * rent (rosterRentToCents: no float drift). So a late October payment marked after a November
+ * increase is October's rent.
  */
-export function rentMarkability(u: MarkUnitInput, tenants: string[]): Markability {
+export function rentMarkability(u: MarkUnitInput, tenants: string[], forMonth?: MarkMonthRent): Markability {
   const no = (code: NotMarkableCode): Markability => ({
     markable: false,
     code,
     reason: NOT_MARKABLE_REASON[code],
-    sentence: RENT_SKIP_TEXT[code],
+    sentence: code === "no_rent_month" ? NO_RENT_MONTH_SENTENCE : RENT_SKIP_TEXT[code],
   });
   if (u.rentPaidTo === "owner_direct") return no("owner_direct");
   if (u.rentPaidTo === "included_in_other_unit") return no("included_in_other_unit");
   if (rosterSaysVacant(u)) return no("roster_vacant");
   const names = tenants.map((n) => n.trim()).filter((n) => n !== "");
   if (names.length === 0) return no("vacant");
+  if (forMonth && forMonth.changes.length > 0) {
+    const r = rentInEffect(u, forMonth.changes, forMonth.month);
+    if (r.cents === null) return no("no_rent_month");
+    return { markable: true, amountCents: r.cents, counterparty: rentCounterparty(names) };
+  }
   if (u.rent === undefined || u.rent === null) return no("no_rent");
   const cents = rosterRentToCents(u.rent);
   if (cents === null) return no("invalid_rent");

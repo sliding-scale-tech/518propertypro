@@ -23,7 +23,8 @@ import { useFieldErrors } from "./form-bits";
  * Payments page dialogs (spec 5.9 / 6.8): mark one unit received, mark several, edit a payment,
  * undo a payment. Client validation runs the shared validatePaymentFieldsAll, so the messages match
  * convex/rentPayments.ts; the server checks everything again (owner, markable, duplicates, locks).
- * The amount is never typed: it is always the unit's roster rent, shown read-only.
+ * The amount is never typed: it is always the unit's rent for the rent month (its rent history, else
+ * the roster rent), shown read-only.
  */
 
 const ORDER = ["receivedDate", "method", "note"] as const;
@@ -34,7 +35,7 @@ export type PaymentUnit = {
   unit: string;
   propertyName: string;
   tenants: string[];
-  /** The roster rent in cents (markable rows always have one). */
+  /** The unit's rent for the rent month in cents (markable rows always have one). */
   rentCents: number | null;
 };
 
@@ -55,7 +56,7 @@ function UnitSummary({ u, amountCents }: { u: PaymentUnit; amountCents: number |
         <div className="text-[12px] text-muted-foreground">Amount</div>
         <div className="font-semibold tabular-nums">{amountCents !== null ? formatCurrency(amountCents) : "—"}</div>
         <p className="mt-0.5 text-xs text-muted-foreground">
-          Always the full roster rent (no partial payments). To change it, fix the rent on the unit first.
+          Always the unit&apos;s full rent for this month (no partial payments). To change it, use Change rent in the unit&apos;s ⋯ menu first.
         </p>
       </div>
     </div>
@@ -314,7 +315,7 @@ export function BulkMarkDialog({
             {units.length} {units.length === 1 ? "unit" : "units"} · {formatCurrency(totalCents)} in total
           </div>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            Each unit is marked for its full roster rent, received on the same date and paid the same way. If any unit
+            Each unit is marked for its full rent for this month, received on the same date and paid the same way. If any unit
             can&apos;t be marked, nothing is saved.
           </p>
           <ul className="mt-2 max-h-40 overflow-y-auto text-[12.5px]">

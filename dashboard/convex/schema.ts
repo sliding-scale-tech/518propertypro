@@ -875,6 +875,26 @@ export default defineSchema({
     .index("by_asset_manager", ["assetManagerUserId"])
     .index("by_org_and_asset_manager", ["orgId", "assetManagerUserId"]),
 
+  // Rent history (docs/specs/ros-build-spec.md 5.9 "Rent history"): "from effectiveMonth the rent is
+  // rentCents". The rent for a month = the latest change effective on or before it (before the first
+  // change: that change's previousRentCents; no changes: units.rent). units.rent is kept equal to the
+  // change with the newest effective month. Written ONLY by unitRentLib.changeRent (one row per unit
+  // per effective month: a second change for the same month replaces the first, both audited);
+  // deleted with the unit. Payments store their own amount, so a change never alters one.
+  unitRentChanges: defineTable({
+    orgId: v.string(),
+    unitId: v.id("units"),
+    effectiveMonth: v.string(), // "YYYY-MM"
+    rentCents: v.number(), // integer cents > 0, <= $1,000,000.00
+    // The rent in force for effectiveMonth before this change (integer cents); absent = none set.
+    previousRentCents: v.optional(v.number()),
+    note: v.optional(v.string()),
+    createdBy: v.id("users"),
+    createdAt: v.number(),
+  })
+    .index("by_unit_and_month", ["unitId", "effectiveMonth"])
+    .index("by_org", ["orgId"]),
+
   // Append-only history, written in the same mutation as the change it describes so a change
   // never exists without its trail. convex/audit.ts exports no update or delete.
   auditEvents: defineTable({

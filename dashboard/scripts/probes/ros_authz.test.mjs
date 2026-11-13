@@ -35,7 +35,10 @@ const FEE_FILES = ["feeSettings.ts"];
 // Rent payments (2026-11-12): rentPayments.ts is gated like the WP2 files; its logic lives in
 // rentPaymentsLib.ts, which registers nothing and checks every record against the caller's org.
 const PAYMENT_FILES = ["rentPayments.ts"];
-const SCANNED = [...WP2_FILES, ...FEE_FILES, ...PAYMENT_FILES, ...(existsSync(join(CONVEX, WP3_FILE)) ? [WP3_FILE] : [])];
+// Rent history (2026-11-13): unitRent.ts (changeRent, history) is gated the same way: admin view +
+// accountant change rent; asset managers and technicians are refused.
+const RENT_HISTORY_FILES = ["unitRent.ts"];
+const SCANNED = [...WP2_FILES, ...FEE_FILES, ...PAYMENT_FILES, ...RENT_HISTORY_FILES, ...(existsSync(join(CONVEX, WP3_FILE)) ? [WP3_FILE] : [])];
 
 /** Each top-level `export const X = query|mutation|action(` with its text up to the next top-level export. */
 function registeredFunctions(src) {

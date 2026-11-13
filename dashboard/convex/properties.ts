@@ -10,6 +10,7 @@ import { amScope } from "./amScope";
 import { applyDefaultAssetManager } from "./units";
 import { cleanOwnerEmails, MAX_OWNER_EMAILS, ownerEmailProblems, ownerEmailsOf } from "./ownerVerifyLib";
 import { linkOwnerForProperty, ownerIdentityChanged } from "./ownerLinking";
+import { canUseFinance } from "./financeAccess";
 
 const DEFAULT_PROPERTY = {
   name: "518 Property Pro",
@@ -200,6 +201,7 @@ export const list = query({
         category: p.category,
         utilityGasPhone: p.utilityGasPhone,
         petsAllowed: p.petsAllowed,
+        moveInWindowDays: p.moveInWindowDays,
         defaultAssetManagerUserId: p.defaultAssetManagerUserId,
         // Owner contact details and override counts are admin-only.
         ownerName: scope ? undefined : p.ownerName,
@@ -216,6 +218,34 @@ export const list = query({
           : 0,
         updatedAt: p.updatedAt,
       });
+    }
+    return out;
+  },
+});
+
+/**
+ * The property's owners on the owner statements (ownerProperties links), for the property page
+ * header's owner link. Admin view + accountant only (the owner pages are finance pages); anyone else
+ * gets [] and the page falls back to the roster owner name. One link = the owner; two or more =
+ * co-owned.
+ */
+export const linkedOwners = query({
+  args: { propertyId: v.id("properties") },
+  handler: async (ctx, args) => {
+    const org = await currentOrg(ctx);
+    if (!org || !canUseFinance(org)) return [];
+    const property = await ctx.db.get(args.propertyId);
+    if (!property || property.orgId !== org.orgId) return [];
+    const links = (
+      await ctx.db
+        .query("ownerProperties")
+        .withIndex("by_property", (q) => q.eq("propertyId", args.propertyId))
+        .collect()
+    ).filter((l) => l.orgId === org.orgId);
+    const out: Array<{ ownerId: Id<"owners">; legalName: string }> = [];
+    for (const l of links) {
+      const owner = await ctx.db.get(l.ownerId);
+      if (owner && owner.orgId === org.orgId) out.push({ ownerId: owner._id, legalName: owner.legalName });
     }
     return out;
   },

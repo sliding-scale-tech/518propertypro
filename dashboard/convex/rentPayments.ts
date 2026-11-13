@@ -43,7 +43,7 @@ export const list = query({
   },
 });
 
-/** Mark one unit's rent received. The amount is always the roster rent; the client never sends one. */
+/** Mark one unit's rent received. The amount is always the unit's rent for that month (rent history, else roster rent); the client never sends one. */
 export const markReceived = mutation({
   args: { unitId: text, month: text, receivedDate: text, method: text, note: text },
   handler: async (ctx, args) => {

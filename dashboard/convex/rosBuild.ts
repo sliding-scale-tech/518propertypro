@@ -54,6 +54,7 @@ import {
   unpaidCheckMonths,
   type RentRecord,
 } from "./rentPaymentsPolicy";
+import type { RentChange } from "./unitRentPolicy";
 
 // --- DB-shaped inputs (Convex Docs are assignable to these) -------------------------------------
 
@@ -197,6 +198,12 @@ export type BuildPropertyData = {
    * They never go on the statement from here (that is `entries`).
    */
   rentRecords?: RentRecord[];
+  /**
+   * Rent history of the property's units (unitRentChanges), used ONLY for the "no rent marked
+   * received" info warning: whether a unit's rent can be marked depends on its rent for each month.
+   * Absent = none loaded (every unit uses its roster rent).
+   */
+  rentChanges?: Array<RentChange & { unitId: string }>;
   /**
    * Work orders of the property: closed ones that are still pending for the ROS (rosPending, or
    * not backfilled yet) and status completed. Filtered again here (selectWorkOrders).
@@ -671,9 +678,14 @@ export function assembleStatement(data: BuildData, isDraft = true): BuiltStateme
         records.push(r);
       }
       const months = unpaidCheckMonths(st.month, link.startMonth);
+      const changesOf = new Map<string, RentChange[]>();
+      for (const c of pd.rentChanges ?? []) changesOf.set(c.unitId, [...(changesOf.get(c.unitId) ?? []), c]);
       for (const u of pd.units) {
-        if (!rentMarkability(u, tenantsOf.get(u._id) ?? []).markable) continue;
+        const tenants = tenantsOf.get(u._id) ?? [];
+        const changes = changesOf.get(u._id) ?? [];
         for (const m of months) {
+          // Per month: with rent history a unit may have rent set for one month and not another.
+          if (!rentMarkability(u, tenants, { month: m, changes }).markable) continue;
           const rec = rentRecordsFor(u._id, m, records, rentAccountIds);
           if (rec.payment === null && rec.ledger.length === 0) unpaidByMonth.set(m, (unpaidByMonth.get(m) ?? 0) + 1);
         }
@@ -1194,7 +1206,13 @@ export async function loadBuildData(
 
     const residents: Doc<"residents">[] = [];
     const rentRecords: Doc<"ledgerEntries">[] = [];
+    const rentChanges: Doc<"unitRentChanges">[] = [];
     for (const u of units) {
+      const changes = await ctx.db
+        .query("unitRentChanges")
+        .withIndex("by_unit_and_month", (q) => q.eq("unitId", u._id))
+        .collect();
+      for (const c of changes) if (c.orgId === orgId) rentChanges.push(c);
       const rows = await ctx.db
         .query("residents")
         .withIndex("by_unit", (q) => q.eq("unitId", u._id))
@@ -1267,6 +1285,7 @@ export async function loadBuildData(
       entries,
       residents,
       rentRecords,
+      rentChanges,
       workOrders,
     });
   }

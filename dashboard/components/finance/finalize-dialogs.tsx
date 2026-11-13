@@ -2,148 +2,35 @@
 
 import { useMutation } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
-import { CheckCircle2 } from "lucide-react";
-import { useRouter } from "next/navigation";
-import { useId, useMemo, useState, type ReactNode } from "react";
+import { useId, useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
-import type { Id } from "@/convex/_generated/dataModel";
-import { formatBps, formatCurrency, formatDate, formatPeriod } from "@/convex/rosFormat";
+import { formatBps, formatCurrency } from "@/convex/rosFormat";
 import { MAX_MEMO } from "@/convex/rosPolicy";
-import { DownloadStatementPdfButton } from "@/components/finance/pdf/download-button";
-import { Btn, Card, Field, Modal, Textarea } from "@/components/ui";
+import { Btn, Field, Modal, Textarea } from "@/components/ui";
 import { toast } from "@/components/ui/toast";
-import { STATEMENT_CHANGED, captureReviewed, finalizeArgs, reviewChanged, type Reviewed } from "./finalize-guard";
+import { STATEMENT_CHANGED, finalizeArgs, reviewChanged, type Reviewed } from "./finalize-guard";
 import { Checkbox, useFieldErrors } from "./form-bits";
-import { StatusPill } from "./statements-list";
 
 export type StatementData = FunctionReturnType<typeof api.ownerStatements.get>;
 
 const CONFIRM_DRAWS = "Tick the box to confirm the owner draw amounts.";
 const REASON_LONG = "Keep the reason under 300 characters.";
 
-function Item({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div>
-      <div className="text-[12px] text-muted-foreground">{label}</div>
-      <div className="text-[13.5px] font-medium tabular-nums">{children}</div>
-    </div>
-  );
-}
-
 /** Why Finalize is off right now, in the server's words (blocking first, then PERIOD_OPEN). */
 export function finalizeBlocker(data: StatementData): string | null {
   if (data.statement.status !== "draft" || data.canFinalize) return null;
   const n = data.warnings.blocking.length;
-  if (n > 0) return `Fix ${n} ${n === 1 ? "item" : "items"} under “Fix before finalizing” first.`;
+  if (n > 0) return `Fix ${n} ${n === 1 ? "item" : "items"} on the Check step first.`;
   const open = data.warnings.info.find((w) => w.code === "PERIOD_OPEN");
   return open ? open.message : "This statement can't be finalized yet.";
 }
 
 /**
- * The right-hand "Review & delivery" card (spec 6.3): status, owner, period, statement date, the
- * two bottom-line totals (server figures), the finalize gate, and the draft / final actions.
+ * Finalize and Discard dialogs (spec 6.3). The Finalize dialog freezes what the user reviewed
+ * (finalize-guard.ts): it sends the figures and hash captured when it opened, never the live ones,
+ * and refuses while the live statement differs.
  */
-export function SidePanel({ data, onFinalized }: { data: StatementData; onFinalized: () => void }) {
-  const router = useRouter();
-  const { statement, owner, result } = data;
-  const isDraft = statement.status === "draft";
-  const [finalizing, setFinalizing] = useState<Reviewed | null>(null);
-  const [discarding, setDiscarding] = useState(false);
-  const blocker = finalizeBlocker(data);
-  const nBlocking = data.warnings.blocking.length;
-  const sid = statement._id as Id<"ownerStatements">;
-
-  return (
-    <Card className="flex flex-col gap-4 lg:sticky lg:top-4">
-      <h3 className="text-[15px] font-semibold">Review &amp; delivery</h3>
-      <div className="flex flex-col gap-3">
-        <Item label="Report status">
-          <StatusPill status={statement.status} />
-        </Item>
-        <Item label="Owner">{owner.legalName}</Item>
-        <Item label="Period">{formatPeriod(statement.periodStart, statement.periodEnd)}</Item>
-        <Item label="Statement date">
-          {statement.statementDate ? (
-            formatDate(statement.statementDate)
-          ) : (
-            <span className="font-normal text-muted-foreground">Set when finalized</span>
-          )}
-        </Item>
-        <Item label="Ending cash (All properties)">{formatCurrency(result.summary.ending.total)}</Item>
-        <Item label="Available for payment">{formatCurrency(result.summary.available.total)}</Item>
-        {statement.status === "final" && statement.finalizedByName ? (
-          <Item label="Finalized by">{statement.finalizedByName}</Item>
-        ) : null}
-      </div>
-
-      {isDraft ? (
-        <>
-          <div className="border-t border-border pt-3">
-            <div className="mb-1 text-[13.5px] font-semibold">Before finalizing</div>
-            {nBlocking > 0 ? (
-              <p className="text-[13px] text-danger-ink">
-                {nBlocking} {nBlocking === 1 ? "item needs" : "items need"} fixing.
-              </p>
-            ) : data.canFinalize ? (
-              <p className="flex items-center gap-1.5 text-[13px] text-success-ink">
-                <CheckCircle2 aria-hidden className="h-4 w-4" /> Ready to finalize
-              </p>
-            ) : (
-              <p className="text-[13px] text-warning-ink">{blocker}</p>
-            )}
-          </div>
-          <div className="flex flex-col gap-2">
-            <Btn
-              variant="pri"
-              disabled={!data.canFinalize}
-              title={blocker ?? undefined}
-              aria-describedby={blocker ? `${statement._id}-blocker` : undefined}
-              onClick={() => setFinalizing(captureReviewed(data))}
-            >
-              Finalize
-            </Btn>
-            {blocker ? (
-              <p id={`${statement._id}-blocker`} className="sr-only">
-                {blocker}
-              </p>
-            ) : null}
-            <DownloadStatementPdfButton statementId={sid} draft label="Preview PDF" />
-            <Btn variant="dng" onClick={() => setDiscarding(true)}>
-              Discard draft
-            </Btn>
-          </div>
-          <p className="text-xs text-muted-foreground">The preview PDF is marked DRAFT.</p>
-        </>
-      ) : statement.status === "final" ? (
-        <div className="flex flex-col gap-2 border-t border-border pt-3">
-          <DownloadStatementPdfButton statementId={sid} draft={false} label="Download PDF" />
-          <p className="text-xs text-muted-foreground">Emailing statements to owners comes later.</p>
-        </div>
-      ) : null}
-
-      {finalizing ? (
-        <FinalizeDialog
-          data={data}
-          reviewed={finalizing}
-          onClose={() => setFinalizing(null)}
-          onDone={() => {
-            setFinalizing(null);
-            onFinalized();
-          }}
-        />
-      ) : null}
-      {discarding ? (
-        <DiscardDialog
-          statementId={statement._id}
-          onClose={() => setDiscarding(false)}
-          onDone={() => router.push(`/owner-statements?month=${statement.month}`)}
-        />
-      ) : null}
-    </Card>
-  );
-}
-
-function FinalizeDialog({
+export function FinalizeDialog({
   data,
   reviewed,
   onClose,
@@ -245,7 +132,7 @@ function FinalizeDialog({
   );
 }
 
-function DiscardDialog({ statementId, onClose, onDone }: { statementId: string; onClose: () => void; onDone: () => void }) {
+export function DiscardDialog({ statementId, onClose, onDone }: { statementId: string; onClose: () => void; onDone: () => void }) {
   const discard = useMutation(api.ownerStatements.discard);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);

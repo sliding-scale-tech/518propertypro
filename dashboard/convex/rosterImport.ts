@@ -208,6 +208,10 @@ async function importOnce(ctx: MutationCtx, args: ImportArgs, groups: Map<string
     properties: zero(),
     units: zero(),
     unitsChanged: [] as string[],
+    // Units whose roster rent differed but was kept because they have rent history (Change rent
+    // owns it): how many, and up to 20 labels so a big import stays readable.
+    rentKeptForHistory: 0,
+    rentKeptUnits: [] as string[],
     sourceRows: zero(),
     residents: { created: 0, updated: 0, deactivated: 0, unchanged: 0 },
     available: [] as string[],
@@ -252,6 +256,10 @@ async function importOnce(ctx: MutationCtx, args: ImportArgs, groups: Map<string
       });
       summary.units[result.action] += 1;
       if (result.action === "updated") summary.unitsChanged.push(`${row.rowId}: ${result.changed.join(", ")}`);
+      if (result.rentKeptForHistory) {
+        summary.rentKeptForHistory += 1;
+        if (summary.rentKeptUnits.length < 20) summary.rentKeptUnits.push(`${name} ${row.unit.unitNumber}`);
+      }
       if (row.unit.available) summary.available.push(`${name} ${row.unit.unitNumber}`);
 
       const saved = (await ctx.db.get(result.unitId))!;

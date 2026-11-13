@@ -11,6 +11,7 @@ import {
   MAX_MEMO,
   validateEntryFields,
   validateEntryFieldsAll,
+  ADDITION_TYPES,
   type RowType,
 } from "@/convex/rosPolicy";
 import { Btn, DatePicker, Field, Input, Modal, Select, Textarea } from "@/components/ui";
@@ -62,6 +63,7 @@ export function TransactionForm({
   allowedPropertyIds,
   period,
   defaultPropertyId,
+  side,
   onClose,
   onVoid,
 }: {
@@ -70,6 +72,11 @@ export function TransactionForm({
   allowedPropertyIds?: string[];
   period?: DraftPeriod;
   defaultPropertyId?: string;
+  /**
+   * Add mode on the statement's Money in / Money out steps: only the accounts on that side of the
+   * statement are offered, and the dialog is titled "Add income" / "Add expense".
+   */
+  side?: "addition" | "subtraction";
   onClose: () => void;
   /** Edit mode: open the Delete (void) dialog for this entry. */
   onVoid?: () => void;
@@ -113,7 +120,9 @@ export function TransactionForm({
   const properties = (opts?.properties ?? []).filter(
     (p) => !allowedPropertyIds || allowedPropertyIds.includes(p.propertyId) || p.propertyId === entry?.propertyId,
   );
-  const accounts = opts?.accounts ?? [];
+  const accounts = (opts?.accounts ?? []).filter(
+    (a) => !side || mode !== "add" || ADDITION_TYPES.has(a.kind as RowType) === (side === "addition"),
+  );
   const units = unitOpts?.units ?? [];
   const property = properties.find((p) => p.propertyId === propertyId) ?? null;
   const unit = units.find((u) => u.unitId === unitId) ?? null;
@@ -214,7 +223,7 @@ export function TransactionForm({
 
   return (
     <Modal
-      title={mode === "add" ? "Add transaction" : "Edit transaction"}
+      title={mode === "edit" ? "Edit transaction" : side === "addition" ? "Add income" : side === "subtraction" ? "Add expense" : "Add transaction"}
       eyebrow={period ? `${formatMonth(period.month)} statement` : undefined}
       onClose={onClose}
       size="lg"

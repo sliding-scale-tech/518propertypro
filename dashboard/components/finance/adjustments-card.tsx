@@ -1,15 +1,13 @@
 "use client";
 
 import { useMutation } from "convex/react";
-import Link from "next/link";
 import { useId, useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { PropertyAdjustmentView } from "@/convex/rosBuild";
-import { MAX_AMOUNT_CENTS, formatBps, formatCurrency, parseDollarsToCents, parseSignedDollarsToCents } from "@/convex/rosFormat";
-import { Btn, Card, CardHead, Field } from "@/components/ui";
+import { MAX_AMOUNT_CENTS, formatCurrency, parseDollarsToCents, parseSignedDollarsToCents } from "@/convex/rosFormat";
+import { Btn, Field } from "@/components/ui";
 import { toast } from "@/components/ui/toast";
 import { MoneyInput, centsToInput, useFieldErrors } from "./form-bits";
-import { ANCHOR } from "./warning-links";
 
 /** Exact server messages (ownerStatements.setAdjustments, spec 5.4). */
 const MSG = {
@@ -21,7 +19,7 @@ const MSG = {
 } as const;
 
 type Key = "earlyPaymentsCents" | "unpaidBillsCents" | "propertyReserveCents";
-const ORDER: readonly Key[] = ["earlyPaymentsCents", "propertyReserveCents", "unpaidBillsCents"];
+const ORDER: readonly Key[] = ["propertyReserveCents", "unpaidBillsCents", "earlyPaymentsCents"];
 
 /** Typed money -> cents | null (blank) | an error message. */
 function readAdjustment(raw: string, key: Key): number | null | string {
@@ -34,56 +32,22 @@ function readAdjustment(raw: string, key: Key): number | null | string {
   return cents > MAX_AMOUNT_CENTS ? MSG.tooBig : cents;
 }
 
-/**
- * Adjustments card (spec 6.3 item 4): per property, the security deposits (read-only, from the
- * units), early payments, property reserve and unpaid bills. Final statements show them read-only.
- */
-export function AdjustmentsCard({
-  statementId,
-  ownerId,
-  properties,
-  readOnly,
-}: {
-  statementId: string;
-  ownerId: string;
-  properties: PropertyAdjustmentView[];
-  readOnly: boolean;
-}) {
-  return (
-    <Card>
-      <CardHead
-        title="Adjustments"
-        hint="These change Available for payment on the summary, not the cash balance."
-      />
-      <div className="flex flex-col gap-4">
-        {properties.map((p) => (
-          <PropertyAdjustments
-            // Re-seed the inputs when the saved values change (after a save or another tab's edit).
-            key={`${p.propertyId}:${p.earlyPaymentsCents}:${p.unpaidBillsCents}:${p.propertyReserveCents}`}
-            statementId={statementId}
-            ownerId={ownerId}
-            p={p}
-            readOnly={readOnly}
-            showName={properties.length > 1}
-          />
-        ))}
-      </div>
-    </Card>
-  );
-}
+const savedOf = (p: PropertyAdjustmentView, k: Key): number =>
+  k === "earlyPaymentsCents" ? p.earlyPaymentsCents : k === "unpaidBillsCents" ? p.unpaidBillsCents : p.propertyReserveCents;
 
-function PropertyAdjustments({
+/**
+ * One property's adjustments on the Fees & payout step (spec 6.3 item 4): property reserve, unpaid
+ * bills and early payments (ownerStatements.setAdjustments). Final statements show them read-only.
+ * The parent keys it on the saved values so it re-seeds after a save or another tab's edit.
+ */
+export function AdjustmentsForm({
   statementId,
-  ownerId,
   p,
   readOnly,
-  showName,
 }: {
   statementId: string;
-  ownerId: string;
   p: PropertyAdjustmentView;
   readOnly: boolean;
-  showName: boolean;
 }) {
   const setAdjustments = useMutation(api.ownerStatements.setAdjustments);
   const [values, setValues] = useState<Record<Key, string>>({
@@ -102,6 +66,7 @@ function PropertyAdjustments({
     [base],
   );
   const f = useFieldErrors(ids);
+  const dirty = ORDER.some((k) => values[k] !== centsToInput(savedOf(p, k)));
 
   async function save() {
     if (busy) return;
@@ -123,7 +88,7 @@ function PropertyAdjustments({
         unpaidBillsCents: parsed.unpaidBillsCents,
         propertyReserveCents: parsed.propertyReserveCents,
       });
-      toast.success("Adjustments saved.");
+      toast.success(`Adjustments saved for ${p.name}.`);
     } catch (e) {
       f.fromServer(e);
     } finally {
@@ -132,11 +97,9 @@ function PropertyAdjustments({
   }
 
   const input = (k: Key, label: string, hint?: string) => (
-    <Field label={label} htmlFor={ids[k]} hint={hint}>
+    <Field label={label} htmlFor={readOnly ? undefined : ids[k]} hint={hint}>
       {readOnly ? (
-        <div className="py-2 text-[13.5px] tabular-nums">
-          {formatCurrency(k === "earlyPaymentsCents" ? p.earlyPaymentsCents : k === "unpaidBillsCents" ? p.unpaidBillsCents : p.propertyReserveCents)}
-        </div>
+        <div className="py-2 text-[13.5px] tabular-nums">{formatCurrency(savedOf(p, k))}</div>
       ) : (
         <>
           <MoneyInput
@@ -156,57 +119,26 @@ function PropertyAdjustments({
   );
 
   return (
-    <div className="rounded-2xl border border-border p-4">
-      {showName ? <h4 className="mb-3 text-[13.5px] font-semibold">{p.name}</h4> : null}
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="Tenant security deposits">
-          <div className="flex flex-wrap items-baseline gap-2 py-2 text-[13.5px]">
-            <span className="tabular-nums">{formatCurrency(p.securityDepositsCents)}</span>
-            {!readOnly ? (
-              <Link
-                href={`/owner-statements/owners/${encodeURIComponent(ownerId)}#${ANCHOR.deposits(p.propertyId)}`}
-                className="text-[12.5px] font-medium text-primary hover:underline"
-              >
-                Edit deposits
-              </Link>
-            ) : null}
-          </div>
-        </Field>
-        <Field label="Management fee">
-          <div className="flex flex-wrap items-baseline gap-2 py-2 text-[13.5px]">
-            <span className="tabular-nums">
-              {/* Every property has a fee (own ?? org default); null only in rosCalc's guard path. */}
-              {p.fee.bps !== null ? `${formatBps(p.fee.bps)}%` : null}
-              {p.feeSource === "own" ? " (own fee)" : p.feeSource === "default" ? " (default)" : ""}
-            </span>
-            {!readOnly ? (
-              <Link
-                href={`/owner-statements/owners/${encodeURIComponent(ownerId)}#${ANCHOR.property(p.propertyId)}`}
-                className="text-[12.5px] font-medium text-primary hover:underline"
-              >
-                Change fee
-              </Link>
-            ) : null}
-          </div>
-        </Field>
-        {input("earlyPaymentsCents", "Early payments")}
-        {input(
-          "propertyReserveCents",
-          "Property reserve",
-          `Default ${formatCurrency(p.propertyReserveDefaultCents)} from the owner settings.`,
-        )}
+    <form
+      className="flex flex-col gap-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void save();
+      }}
+    >
+      <div className="grid gap-3 sm:grid-cols-3">
+        {input("propertyReserveCents", "Property reserve", `Owner default ${formatCurrency(p.propertyReserveDefaultCents)}.`)}
         {input("unpaidBillsCents", "Unpaid bills")}
+        {input("earlyPaymentsCents", "Early payments")}
       </div>
-      <div className="mt-3 flex flex-wrap items-center gap-3">
-        <p className="text-xs text-muted-foreground">
-          Pending ePay payments: {formatCurrency(0)} (card payments are not live yet)
-        </p>
-        {!readOnly ? (
-          <Btn sm variant="pri" className="ml-auto" onClick={() => void save()} disabled={busy}>
+      {!readOnly ? (
+        <div className="flex flex-wrap items-center justify-end gap-3">
+          {dirty ? <span className="text-[12px] text-warning-ink">Not saved yet</span> : null}
+          <Btn sm type="submit" variant={dirty ? "pri" : "default"} disabled={busy}>
             {busy ? "Saving…" : "Save adjustments"}
           </Btn>
-        ) : null}
-      </div>
-    </div>
+        </div>
+      ) : null}
+    </form>
   );
 }

@@ -29,6 +29,7 @@ import {
   type PaymentStatus,
   type RentRecord,
 } from "./rentPaymentsPolicy";
+import { rentChangesByUnit, rentChangesOf } from "./unitRentLib";
 
 /**
  * Rent payments (the Payments page, /payments), spec 5.9: the logic behind
@@ -38,7 +39,8 @@ import {
  *
  * A payment is a `ledgerEntries` row: source "rent_payment", the Rent Income system account, type
  * income, the unit, counterparty = the unit's active tenant(s) when marked, memo "Payment", amount =
- * the unit's roster rent in cents (never sent by the client), `date` = the day it was RECEIVED (cash
+ * the unit's rent FOR the rent month in cents (unitRentPolicy.rentForMonth: its rent history, else
+ * the roster rent; never sent by the client), `date` = the day it was RECEIVED (cash
  * basis: it lands on that month's statement) and `rentForMonth` = the month the rent is for.
  * At most one non-voided rent_payment per unit per rentForMonth, checked inside the mutation (Convex
  * mutations are serializable, so two concurrent marks can't both pass).
@@ -264,6 +266,8 @@ export async function listPayments(ctx: Ctx, org: PayOrg, args: ListArgs, today:
     if (!r.active) continue;
     tenantsOf.set(r.unitId, [...(tenantsOf.get(r.unitId) ?? []), r.fullName]);
   }
+  // Rent history: the amount is the unit's rent FOR this month (unitRentPolicy.rentForMonth).
+  const rentChanges = await rentChangesByUnit(ctx, org);
 
   // What is recorded for the month: rent payments FOR the month, and Rent Income rows entered any
   // other way (by hand in the ledger before this page existed) DATED in the month.
@@ -309,7 +313,7 @@ export async function listPayments(ctx: Ctx, org: PayOrg, args: ListArgs, today:
     /** Set = no owner / co-owned: rent can't be marked until that is fixed. */
     ownerProblem: string | null;
     tenants: string[];
-    /** The roster rent in integer cents; null when missing or not a clean dollar amount. */
+    /** The unit's rent for this month in integer cents (rent history, else roster rent); null when not markable. */
     rentCents: number | null;
     status: PaymentStatus;
     /** Why the row is greyed out (status not_markable). */
@@ -336,7 +340,7 @@ export async function listPayments(ctx: Ctx, org: PayOrg, args: ListArgs, today:
       );
     }
     const tenants = [...new Set((tenantsOf.get(u._id) ?? []).map((n) => n.trim()).filter((n) => n !== ""))].sort(naturalCompare);
-    const mark = rentMarkability(u, tenants);
+    const mark = rentMarkability(u, tenants, { month, changes: rentChanges.get(u._id) ?? [] });
     const rec = rentRecordsFor(u._id, month, recordsByUnit.get(u._id) ?? [], rentIds);
     // A month before the owner's first statement month: rent isn't expected (it was in Buildium).
     const startMonth = links.length === 1 ? (links[0].startMonth ?? null) : null;
@@ -512,7 +516,9 @@ async function planMark(
   if (problem) return { ok: false, field: "unitId", message: problem };
   const link = links[0];
 
-  const mark = rentMarkability(unit, await activeTenants(ctx, org, unit._id));
+  // The amount is the unit's rent for `month` (its rent history), so a late payment for an earlier
+  // month is that month's rent, not today's.
+  const mark = rentMarkability(unit, await activeTenants(ctx, org, unit._id), { month, changes: await rentChangesOf(ctx, org, unit._id) });
   if (!mark.markable) return { ok: false, field: "unitId", message: RENT_PAY_MSG.notMarkable(label, mark.sentence) };
 
   // No rent for a month before the owner's first statement month (those months were in Buildium).
@@ -625,7 +631,7 @@ async function insertPayment(
 
 export type MarkArgs = { unitId?: Raw; month?: Raw; receivedDate?: Raw; method?: Raw; note?: Raw };
 
-/** rentPayments.markReceived: one unit's rent for a month, received on a date, for the roster rent. */
+/** rentPayments.markReceived: one unit's rent for a month, received on a date, for the unit's rent for that month. */
 export async function markOne(ctx: WriteCtx, org: PayOrg, args: MarkArgs, today: string, deps: PaymentDeps) {
   const f = validatePaymentFields({ month: args.month, receivedDate: args.receivedDate, method: args.method, note: args.note, today });
   if (!f.ok) throw fieldError(f.field, f.message);

@@ -1,17 +1,18 @@
 "use client";
 
 import { useMutation, useQuery } from "convex/react";
-import { History, Pencil, Plus, Trash2 } from "lucide-react";
+import { Plus } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { formatCurrency, formatMonth } from "@/convex/rosFormat";
 import { Dialog } from "@/components/properties/dialog";
 import { errorMessage, useToast } from "@/components/toast";
 import { AddUnitModal, type NewUnit } from "@/components/units/add-unit-modal";
-import { EditUnitModal } from "@/components/units/edit-unit-modal";
+import { ChangeRentDialog, type ChangeRentTarget } from "@/components/units/change-rent";
 import { formatRent, type Manager, type UnitRow } from "@/components/units/types";
-import { UnitHistory } from "@/components/units/unit-history";
+import { UnitDrawer, type UnitDrawerMode, type UnitRentNow } from "@/components/units/unit-drawer";
 import { normalizeSearch } from "@/components/finance/payments-search";
 import {
   UNIT_AVAILABILITY_FILTERS,
@@ -26,9 +27,9 @@ import {
   Card,
   CardHead,
   DataTable,
-  IconBtn,
   Pagination,
   Pill,
+  RowMenu,
   SearchBox,
   Select,
   SortHeader,
@@ -40,35 +41,45 @@ import {
   useUrlPaging,
   useUrlSearch,
   type Column,
+  type RowMenuItem,
 } from "@/components/ui";
 
 // This list shares the page with the properties list's URL keys, so its own keys are prefixed.
 const P = "units_";
 
 /**
- * Unit inventory for one property. Every unit always has an asset manager: the select's first
- * option ("Same as property") assigns the property default, it never clears the field.
- * Edit controls render only when `canEdit` (admin view); the server enforces the same gate.
+ * The property's units: Unit · Tenant · Rent/month · Status · Asset manager · ⋯. A row click (or
+ * Enter) opens the unit drawer (details, rent and its history, actions). Every unit always has an
+ * asset manager: the select's first option ("Same as property") assigns the property default, it
+ * never clears the field. Who can do what follows the server: Add / Edit / Remove and the asset
+ * manager for the admin view (`canEdit`), Change rent for admin + accountant (`canChangeRent`),
+ * availability for the admin view and an asset manager on their own units.
  */
 export function UnitInventory({
   propertyId,
+  propertyName,
   defaultAmId,
   managers,
   canEdit,
   canToggleOwn = false,
   canHistory,
+  canChangeRent = false,
 }: {
   propertyId: Id<"properties">;
+  propertyName: string;
   defaultAmId?: Id<"users">;
   managers: Manager[];
   canEdit: boolean;
   /** Asset-manager view: may toggle availability on units they manage (not ones they only cover). */
   canToggleOwn?: boolean;
   canHistory: boolean;
+  /** Admin view + accountant: Change rent and the rent history. */
+  canChangeRent?: boolean;
 }) {
   const toast = useToast();
   const units = useQuery(api.units.list, { propertyId });
   const residents = useQuery(api.residents.list, { propertyId });
+  const rentNow = useQuery(api.units.rentSummary, { propertyId });
   const createUnit = useMutation(api.units.create);
   const updateUnit = useMutation(api.units.update);
   const removeUnit = useMutation(api.units.remove);
@@ -76,9 +87,9 @@ export function UnitInventory({
   const setAvailability = useMutation(api.units.setAvailability);
 
   const [adding, setAdding] = useState(false);
-  const [editing, setEditing] = useState<UnitRow | null>(null);
+  const [open, setOpen] = useState<{ id: string; mode: UnitDrawerMode } | null>(null);
+  const [rentFor, setRentFor] = useState<ChangeRentTarget | null>(null);
   const [removing, setRemoving] = useState<UnitRow | null>(null);
-  const [history, setHistory] = useState<UnitRow | null>(null);
   const [busy, setBusy] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -89,8 +100,17 @@ export function UnitInventory({
     }
     return map;
   }, [residents]);
+  const rentByUnit = useMemo(() => new Map<string, UnitRentNow>((rentNow ?? []).map((r) => [r.unitId, r])), [rentNow]);
 
-  const rows = units ?? [];
+  // Rent/month (and its sort) is the rent THIS month: the rent history when there is one.
+  const rows = useMemo(
+    () =>
+      (units ?? []).map((u) => {
+        const now = rentByUnit.get(u._id);
+        return now ? { ...u, rent: now.cents !== null ? now.cents / 100 : undefined } : u;
+      }),
+    [units, rentByUnit],
+  );
   const tenantsOf = (u: UnitRow) => tenantsByUnit.get(u._id) ?? [];
 
   const router = useRouter();
@@ -124,6 +144,7 @@ export function UnitInventory({
   });
   const visible = unitsView(rows, tenantsOf, { q, filter, sort });
   const paged = paginate(visible, paging.page, paging.pageSize);
+  const openUnit = open ? (units ?? []).find((u) => u._id === open.id) : undefined;
 
   const defaultName =
     managers.find((m) => m.userId === defaultAmId)?.name ??
@@ -140,6 +161,7 @@ export function UnitInventory({
       return false;
     }
   };
+  const label = (u: UnitRow) => `Unit ${u.unitNumber} · ${propertyName}`;
 
   const amCell = (u: UnitRow) => {
     const isOverride = !!defaultAmId && u.assetManagerUserId !== defaultAmId;
@@ -154,7 +176,7 @@ export function UnitInventory({
     return (
       <Select
         aria-label={`Asset manager for unit ${u.unitNumber}`}
-        className="min-w-48"
+        className="min-w-44"
         highlight={isOverride}
         disabled={busyId === u._id}
         value={isOverride || !defaultAmId ? u.assetManagerUserId : ""}
@@ -167,9 +189,7 @@ export function UnitInventory({
         }}
       >
         {defaultAmId ? <option value="">Same as property · {defaultName}</option> : null}
-        {!known && (isOverride || !defaultAmId) ? (
-          <option value={u.assetManagerUserId}>{u.assetManagerName}</option>
-        ) : null}
+        {!known && (isOverride || !defaultAmId) ? <option value={u.assetManagerUserId}>{u.assetManagerName}</option> : null}
         {managers.map((m) => (
           <option key={m.userId} value={m.userId}>
             {m.name}
@@ -178,6 +198,41 @@ export function UnitInventory({
       </Select>
     );
   };
+
+  const statusCell = (u: UnitRow) => {
+    const occupied = tenantsOf(u).length > 0;
+    const canToggle = canEdit || (canToggleOwn && u.isMine && !u.covering);
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <Pill tone={occupied ? "ok" : "neutral"}>{residents === undefined ? "…" : occupied ? "Occupied" : "Vacant"}</Pill>
+        {canToggle ? (
+          <span className="inline-flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+            <Toggle
+              label={`Unit ${u.unitNumber} available`}
+              checked={u.available}
+              disabled={busyId === u._id}
+              onChange={async (available) => {
+                setBusyId(u._id);
+                await run(() => setAvailability({ unitId: u._id, available }), "Availability updated");
+                setBusyId(null);
+              }}
+            />
+            Available
+          </span>
+        ) : u.available ? (
+          <Pill tone="acc">Available</Pill>
+        ) : null}
+        {u.covering ? <Pill tone="acc">Covering</Pill> : null}
+      </div>
+    );
+  };
+
+  const menuItems = (u: UnitRow): RowMenuItem[] => [
+    ...(canEdit ? [{ label: "Edit unit", onSelect: () => setOpen({ id: u._id, mode: "edit" }) }] : []),
+    ...(canChangeRent ? [{ label: "Change rent…", onSelect: () => setRentFor({ unitId: u._id, label: label(u) }) }] : []),
+    ...(canChangeRent || canHistory ? [{ label: "View history", onSelect: () => setOpen({ id: u._id, mode: "view" }) }] : []),
+    ...(canEdit ? [{ label: "Remove unit…", danger: true, onSelect: () => setRemoving(u) }] : []),
+  ];
 
   const columns: Column<UnitRow>[] = [
     {
@@ -199,82 +254,61 @@ export function UnitInventory({
       ...sortable("tenant", "Tenant"),
       render: (u) => {
         const names = tenantsByUnit.get(u._id);
-        return names?.length ? names.join(", ") : <span className="text-faint">{residents === undefined ? "…" : "Vacant"}</span>;
+        return names?.length ? names.join(", ") : <span className="text-faint">{residents === undefined ? "…" : "—"}</span>;
       },
     },
-    { key: "rent", ...sortable("rent", "Rent", "right"), align: "right", className: "tabular-nums", render: (u) => formatRent(u.rent) },
-    { key: "am", ...sortable("manager", "Asset manager"), render: amCell },
     {
-      key: "avail",
-      ...sortable("available", "Available"),
-      render: (u) =>
-        canEdit || (canToggleOwn && u.isMine && !u.covering) ? (
-          <Toggle
-            label={`Unit ${u.unitNumber} available`}
-            checked={u.available}
-            disabled={busyId === u._id}
-            onChange={async (available) => {
-              setBusyId(u._id);
-              await run(() => setAvailability({ unitId: u._id, available }), "Availability updated");
-              setBusyId(null);
-            }}
-          />
-        ) : (
-          <span className="flex items-center gap-2">
-            {canToggleOwn ? (
-              <Toggle label={`Unit ${u.unitNumber} available`} checked={u.available} disabled onChange={() => {}} />
-            ) : (
-              <Pill tone={u.available ? "ok" : "neutral"}>{u.available ? "Available" : "Unavailable"}</Pill>
-            )}
-            {u.covering ? <Pill tone="acc">Covering</Pill> : null}
-          </span>
-        ),
+      key: "rent",
+      ...sortable("rent", "Rent / month", "right"),
+      align: "right",
+      className: "tabular-nums whitespace-nowrap",
+      render: (u) => {
+        const now = rentByUnit.get(u._id);
+        if (!now) return formatRent(u.rent);
+        return (
+          <div>
+            <span className="font-medium">{now.cents !== null ? formatCurrency(now.cents) : <span className="text-faint">Not set</span>}</span>
+            {now.upcoming ? (
+              <div className="text-[11.5px] text-muted-foreground">
+                {formatCurrency(now.upcoming.cents)} from {formatMonth(now.upcoming.month)}
+              </div>
+            ) : null}
+          </div>
+        );
+      },
     },
+    { key: "status", ...sortable("available", "Status"), render: statusCell },
+    { key: "am", ...sortable("manager", "Asset manager"), render: amCell },
   ];
-  if (canEdit) {
+  if (canEdit || canChangeRent || canHistory) {
     columns.push({
       key: "actions",
       header: <span className="sr-only">Actions</span>,
-      render: (u) => (
-        <div className="flex items-center justify-end gap-1.5">
-          {canHistory ? (
-            <IconBtn label={`History for unit ${u.unitNumber}`} onClick={() => setHistory(u)}>
-              <History />
-            </IconBtn>
-          ) : null}
-          <IconBtn label={`Edit unit ${u.unitNumber}`} onClick={() => setEditing(u)}>
-            <Pencil />
-          </IconBtn>
-          <IconBtn label={`Remove unit ${u.unitNumber}`} onClick={() => setRemoving(u)}>
-            <Trash2 />
-          </IconBtn>
-        </div>
-      ),
+      align: "right",
+      render: (u) => <RowMenu label={`Actions for unit ${u.unitNumber}`} items={menuItems(u)} />,
     });
   }
 
   return (
     <Card>
       <CardHead
-        title="Unit inventory"
+        title="Units"
         right={
           canEdit ? (
             <Btn variant="pri" sm onClick={() => setAdding(true)} disabled={managers.length === 0}>
               <Plus className="h-3.5 w-3.5" />
               Add unit
             </Btn>
-          ) : (
-            "Asset manager can be set per unit"
-          )
+          ) : undefined
         }
-        hint={canEdit ? "Asset manager can be set per unit. Every unit always has one." : undefined}
+        hint="Click a unit to see its details, rent and history."
       />
       {units === undefined ? (
-        <p className="text-sm text-muted-foreground">Loading units…</p>
+        <p className="py-6 text-center text-sm text-muted-foreground">Loading units…</p>
       ) : (
         <>
           {rows.length > 0 ? (
-            <div className="mb-4 grid gap-3 sm:grid-cols-2">
+            <div className="mb-4 grid gap-3 sm:grid-cols-[1fr_220px]">
               <SearchBox
                 id="units-search"
                 label="Search units"
@@ -283,11 +317,7 @@ export function UnitInventory({
                 onClear={search.clear}
                 placeholder="Search unit, tenant, asset manager or status"
               />
-              <Select
-                aria-label="Show units"
-                value={filter}
-                onChange={(e) => setParams({ [`${P}filter`]: e.target.value || "" })}
-              >
+              <Select aria-label="Show units" value={filter} onChange={(e) => setParams({ [`${P}filter`]: e.target.value || "" })}>
                 <option value="">All units</option>
                 <option value="available">Available</option>
                 <option value="unavailable">Unavailable</option>
@@ -296,13 +326,14 @@ export function UnitInventory({
             </div>
           ) : null}
           <DataTable
-            caption="Unit inventory"
+            caption="Units"
             columns={columns}
             rows={paged.rows}
             rowKey={(u) => u._id}
+            onRowClick={(u) => setOpen({ id: u._id, mode: "view" })}
             empty={
               rows.length === 0 ? (
-                "No units yet."
+                canEdit ? "No units yet. Add the first one with Add unit." : "No units yet."
               ) : q ? (
                 <span>
                   No units match &ldquo;{search.q.trim()}&rdquo;.{" "}
@@ -316,7 +347,7 @@ export function UnitInventory({
             }
           />
           <Pagination
-            label="Unit inventory pages"
+            label="Unit pages"
             page={paged.page}
             pageSize={paged.pageSize}
             total={paged.total}
@@ -330,40 +361,37 @@ export function UnitInventory({
         <AddUnitModal
           managers={managers}
           defaultAmId={defaultAmId}
-          busy={busy}
           onClose={() => setAdding(false)}
-          onSubmit={async (unit: NewUnit) => {
-            setBusy(true);
-            const ok = await run(() => createUnit({ propertyId, ...unit }), "Unit added");
-            setBusy(false);
-            if (ok) setAdding(false);
-          }}
+          onSave={(unit: NewUnit) => createUnit({ propertyId, ...unit })}
         />
       ) : null}
 
-      {editing ? (
-        <EditUnitModal
-          unit={editing}
-          busy={busy}
-          onClose={() => setEditing(null)}
-          onSubmit={async (patch) => {
-            setBusy(true);
-            const ok = await run(() => updateUnit({ unitId: editing._id, ...patch }), "Unit updated");
-            setBusy(false);
-            if (ok) setEditing(null);
+      {open && openUnit ? (
+        <UnitDrawer
+          key={`${openUnit._id}-${open.mode}`}
+          unit={openUnit}
+          propertyName={propertyName}
+          tenants={tenantsOf(openUnit)}
+          rent={rentByUnit.get(openUnit._id)}
+          managers={managers}
+          initialMode={open.mode}
+          canEdit={canEdit}
+          canChangeRent={canChangeRent}
+          canHistory={canHistory}
+          onSave={(patch) => updateUnit({ unitId: openUnit._id, ...patch })}
+          onRemove={() => {
+            setOpen(null);
+            setRemoving(openUnit);
           }}
+          onClose={() => setOpen(null)}
         />
       ) : null}
 
-      {history ? (
-        <Dialog title={`Unit ${history.unitNumber} · asset manager history`} onClose={() => setHistory(null)}>
-          <UnitHistory unitId={history._id} managers={managers} />
-        </Dialog>
-      ) : null}
+      {rentFor ? <ChangeRentDialog target={rentFor} onClose={() => setRentFor(null)} /> : null}
 
       {removing ? (
         <Dialog title={`Remove unit ${removing.unitNumber}?`} onClose={() => setRemoving(null)}>
-          <p className="text-sm text-muted-foreground">This permanently deletes the unit. It cannot be undone.</p>
+          <p className="text-sm text-muted-foreground">This permanently deletes the unit and its rent history. It cannot be undone.</p>
           <div className="mt-4 flex justify-end gap-2">
             <Btn onClick={() => setRemoving(null)}>Cancel</Btn>
             <Btn

@@ -955,6 +955,22 @@ test("RENT_UNPAID (info only): units with markable rent and nothing recorded, pe
   assert.deepStrictEqual(warn(B.assembleStatement(rentData(), false), "RENT_UNPAID"), []);
 });
 
+test("RENT_UNPAID with rent history (2026-11-13): per month, a unit counts only for the months it has rent set", () => {
+  // 4B had no rent before November; 4A's history doesn't change whether it can be marked.
+  const units = [RENT_UNITS[0], { ...RENT_UNITS[1], rent: 900 }];
+  const rentChanges = [{ unitId: "u5", effectiveMonth: "2026-11", rentCents: 90000, createdAt: 1 }];
+  const nov = B.assembleStatement(rentData({ month: "2026-11", property: { units, rentChanges } }));
+  assert.deepStrictEqual(warn(nov, "RENT_UNPAID").map((w) => [w.rentMonth, w.message]), [
+    ["2026-09", "1 unit has no rent marked received for September 2026."],
+    ["2026-10", "1 unit has no rent marked received for October 2026."],
+    ["2026-11", "2 units have no rent marked received for November 2026."],
+  ]);
+  // no history loaded: the roster rent, as before
+  const plain = B.assembleStatement(rentData({ month: "2026-11", property: { units } }));
+  assert.equal(warn(plain, "RENT_UNPAID").length, 3);
+  assert.equal(warn(plain, "RENT_UNPAID")[0].message, "2 units have no rent marked received for September 2026.");
+});
+
 test("GOLDEN: 108 Jackson September (rent entered by hand) is byte-for-byte the same statement; its rent counts as recorded", () => {
   const withRoster = B.assembleStatement(data());
   const noRoster = (u) => Object.fromEntries(Object.entries(u).filter(([k]) => k !== "rent" && k !== "rentPaidTo"));

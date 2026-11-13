@@ -7,45 +7,66 @@ import { Card, cx } from "@/components/ui";
  * On-screen preview of the statement (spec 6.3 "Preview tab"): the server's StatementView rendered
  * as HTML tables in the PDF's order. No number is computed here; every string comes from `view`.
  */
-export function StatementPreview({ view, draft }: { view: StatementView; draft: boolean }) {
+export type PreviewSection = "header" | "summary" | "income" | "detail";
+const ALL_SECTIONS: readonly PreviewSection[] = ["header", "summary", "income", "detail"];
+
+export function StatementPreview({
+  view,
+  draft,
+  sections = ALL_SECTIONS,
+}: {
+  view: StatementView;
+  draft: boolean;
+  /** Which parts to show (default: all, in the PDF's order). */
+  sections?: readonly PreviewSection[];
+}) {
+  const show = (s: PreviewSection) => sections.includes(s);
   return (
     <div className="flex flex-col gap-5">
-      <Card>
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h2 className="text-[20px] font-bold tracking-[-0.01em]">{view.header.title}</h2>
-            <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-[13px]">
-              <dt className="text-muted-foreground">{view.header.periodLabel}</dt>
-              <dd className="tabular-nums">{view.header.period}</dd>
-              <dt className="text-muted-foreground">{view.header.dateLabel}</dt>
-              <dd className="tabular-nums">
-                {view.header.date}
-                {draft ? <span className="ml-2 text-xs text-warning-ink">(draft: set when finalized)</span> : null}
-              </dd>
-            </dl>
+      {show("header") ? (
+        <Card>
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h2 className="text-[20px] font-bold tracking-[-0.01em]">{view.header.title}</h2>
+              <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-[13px]">
+                <dt className="text-muted-foreground">{view.header.periodLabel}</dt>
+                <dd className="tabular-nums">{view.header.period}</dd>
+                <dt className="text-muted-foreground">{view.header.dateLabel}</dt>
+                <dd className="tabular-nums">
+                  {view.header.date}
+                  {draft ? <span className="ml-2 text-xs text-warning-ink">(draft: set when finalized)</span> : null}
+                </dd>
+              </dl>
+            </div>
+            <address className="text-right text-[12.5px] not-italic text-muted-foreground">
+              {view.header.preparedBy.map((l) => (
+                <div key={l}>{l}</div>
+              ))}
+            </address>
           </div>
-          <address className="text-right text-[12.5px] not-italic text-muted-foreground">
-            {view.header.preparedBy.map((l) => (
-              <div key={l}>{l}</div>
-            ))}
-          </address>
-        </div>
-      </Card>
+        </Card>
+      ) : null}
 
-      <Card>
-        <h3 className="mb-3 text-[15px] font-semibold">{view.summary.title}</h3>
-        <ViewTable columns={view.summary.columns} rows={view.summary.rows} />
-      </Card>
+      {show("summary") ? (
+        <Card>
+          <h3 className="mb-3 text-[15px] font-semibold">{view.summary.title}</h3>
+          <ViewTable columns={view.summary.columns} rows={view.summary.rows} />
+        </Card>
+      ) : null}
 
-      <Card>
-        <h3 className="mb-3 text-[15px] font-semibold">{view.incomeStatement.title}</h3>
-        <ViewTable columns={view.incomeStatement.columns} rows={view.incomeStatement.rows} />
-      </Card>
+      {show("income") ? (
+        <Card>
+          <h3 className="mb-3 text-[15px] font-semibold">{view.incomeStatement.title}</h3>
+          <ViewTable columns={view.incomeStatement.columns} rows={view.incomeStatement.rows} />
+        </Card>
+      ) : null}
 
-      <Card>
-        <h3 className="mb-3 text-[15px] font-semibold">{view.detail.title}</h3>
-        <DetailTable detail={view.detail} />
-      </Card>
+      {show("detail") ? (
+        <Card>
+          <h3 className="mb-3 text-[15px] font-semibold">{view.detail.title}</h3>
+          <DetailTable detail={view.detail} />
+        </Card>
+      ) : null}
     </div>
   );
 }

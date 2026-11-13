@@ -1,10 +1,12 @@
 "use client";
 
+import { Loader2 } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import type { ReactNode } from "react";
 import type { LineView } from "@/convex/rosBuild";
 import { formatAmount } from "@/convex/rosFormat";
-import { Btn, DataTable, Pill, type Column } from "@/components/ui";
+import { Btn, DataTable, Pill, RowMenu, type Column, type RowMenuItem } from "@/components/ui";
 import { TONE_SOFT, cx } from "@/components/ui/cx";
 import {
   DELETE_ENTRY,
@@ -51,6 +53,7 @@ export function LinesTable({
   actions,
   empty,
   draft,
+  caption,
 }: {
   lines: LineView[];
   showProperty: boolean;
@@ -61,6 +64,8 @@ export function LinesTable({
   empty: ReactNode;
   /** The statement is a draft (the carried-forward pill says the line is not on a final statement yet). */
   draft: boolean;
+  /** Screen-reader table name. */
+  caption?: string;
 }) {
   const columns: Column<LineView>[] = [
     {
@@ -144,7 +149,16 @@ export function LinesTable({
 
   return (
     <div className="flex flex-col gap-2">
-      <DataTable columns={columns} rows={lines} rowKey={(l) => l.key} empty={empty} />
+      <DataTable
+        columns={columns}
+        rows={lines}
+        rowKey={(l) => l.key}
+        empty={empty}
+        caption={caption}
+        // A click on a row opens its edit dialog (the same as its Edit button).
+        onRowClick={actions ? (l) => primaryAction(l, actions)?.run() : undefined}
+        rowClickable={actions ? (l) => primaryAction(l, actions) !== null && actions.busyKey !== l.key : undefined}
+      />
       <div className="flex justify-end gap-6 px-3.5 text-[13.5px] font-semibold">
         <span>{totalLabel}</span>
         <span className="tabular-nums">{total}</span>
@@ -153,65 +167,57 @@ export function LinesTable({
   );
 }
 
+/** The row's main edit action (also what a click on the row opens), or null when it has none. */
+function primaryAction(l: LineView, a: LineActions): { label: string; run: () => void } | null {
+  if (l.kind === "entry") return canEditEntryLine(l) ? { label: "Edit", run: () => a.onEditEntry(l) } : null;
+  if (l.kind === "wo") return l.editable ? { label: "Edit billing", run: () => a.onEditBilling(l) } : null;
+  if (l.kind === "fee" || l.kind === "draw") {
+    return l.editable ? { label: l.kind === "fee" ? "Edit" : "Edit amount", run: () => a.onEditGenerated(l) } : null;
+  }
+  return null;
+}
+
 function RowActions({ line: l, actions: a }: { line: LineView; actions: LineActions }) {
+  const router = useRouter();
   const busy = a.busyKey === l.key;
   if (!l.editable && l.kind !== "entry") return null;
+  const primary = primaryAction(l, a);
   // A rent payment is changed or undone on the Payments page only (the link is in the Source cell);
   // canLeaveOffLine allows only taking back a "put back" of one that is off by default.
+  const more: RowMenuItem[] = [];
+  if (l.kind === "entry") {
+    if (canLeaveOffLine(l)) more.push({ label: LEAVE_OFF.button, title: LEAVE_OFF.tooltip, onSelect: () => a.onExclude(l) });
+    if (canDeleteLine(l)) more.push({
+        label: `${DELETE_ENTRY.button}…`,
+        title: l.onRentAccount ? PAYMENTS_LINK.legacyRentTooltip : undefined,
+        onSelect: () => a.onDeleteEntry(l),
+        danger: true,
+      });
+  } else if (l.kind === "wo") {
+    more.push({ label: LEAVE_OFF.button, title: LEAVE_OFF.tooltip, onSelect: () => a.onExclude(l) });
+    if (l.workOrderId) {
+      const href = `/work-orders/${l.workOrderId}`;
+      more.push({ label: "Open work order", onSelect: () => router.push(href) });
+    }
+  } else if (l.kind === "fee" || l.kind === "draw") {
+    more.push({ label: "Skip this month", onSelect: () => a.onSkipGenerated(l) });
+  }
+  if (!primary && more.length === 0) return null;
   return (
-    <div className="flex flex-wrap justify-end gap-1.5">
-      {l.kind === "entry" ? (
-        <>
-          {canEditEntryLine(l) ? (
-            <Btn sm onClick={() => a.onEditEntry(l)} disabled={busy}>
-              Edit
-            </Btn>
-          ) : null}
-          {canLeaveOffLine(l) ? (
-            <Btn sm onClick={() => a.onExclude(l)} disabled={busy} title={LEAVE_OFF.tooltip}>
-              {LEAVE_OFF.button}
-            </Btn>
-          ) : null}
-          {canDeleteLine(l) ? (
-            <Btn
-              sm
-              variant="dng"
-              onClick={() => a.onDeleteEntry(l)}
-              disabled={busy}
-              title={l.onRentAccount ? PAYMENTS_LINK.legacyRentTooltip : undefined}
-            >
-              {DELETE_ENTRY.button}
-            </Btn>
-          ) : null}
-        </>
+    <div className="flex items-center justify-end gap-1.5">
+      {primary ? (
+        <Btn sm onClick={primary.run} disabled={busy}>
+          {primary.label}
+        </Btn>
       ) : null}
-      {l.kind === "wo" ? (
-        <>
-          <Btn sm onClick={() => a.onEditBilling(l)} disabled={busy}>
-            Edit billing
-          </Btn>
-          <Btn sm onClick={() => a.onExclude(l)} disabled={busy} title={LEAVE_OFF.tooltip}>
-            {LEAVE_OFF.button}
-          </Btn>
-          {l.workOrderId ? (
-            <Link
-              href={`/work-orders/${l.workOrderId}`}
-              className="self-center whitespace-nowrap px-1 text-[12.5px] font-medium text-primary hover:underline"
-            >
-              Open work order
-            </Link>
-          ) : null}
-        </>
-      ) : null}
-      {l.kind === "fee" || l.kind === "draw" ? (
-        <>
-          <Btn sm onClick={() => a.onEditGenerated(l)} disabled={busy}>
-            {l.kind === "fee" ? "Edit" : "Edit amount"}
-          </Btn>
-          <Btn sm onClick={() => a.onSkipGenerated(l)} disabled={busy}>
-            Skip this month
-          </Btn>
-        </>
+      {more.length > 0 ? (
+        busy ? (
+          <span className="inline-flex h-7 w-7 items-center justify-center" aria-label="Working…">
+            <Loader2 aria-hidden className="h-4 w-4 animate-spin text-muted-foreground" />
+          </span>
+        ) : (
+          <RowMenu label={`More actions for ${l.accountName} ${formatAmount(l.amountCents)}`} items={more} />
+        )
       ) : null}
     </div>
   );
