@@ -192,6 +192,8 @@ export const myAccess = query({
     const org = await currentOrg(ctx);
     if (!org) return null;
     return {
+      // The caller's own user id, so a page can ask for "my" records (e.g. the tech app's jobs).
+      userId: org.user._id,
       // Default landing view only (home redirect). Access decisions use `roles`, the full set held.
       view: viewFor(org.isAdmin, org.jobRoles),
       roles: [...rolesFor(org.isAdmin, org.jobRoles)],
@@ -603,12 +605,17 @@ export const invite = action({
     phone: v.optional(v.string()),
     fullName: v.optional(v.string()),
   },
-  handler: async (ctx, args): Promise<{ email: string; resent: boolean }> =>
-    await createAndSendInvite(ctx, {
+  handler: async (ctx, args): Promise<{ email: string; resent: boolean }> => {
+    // Admin check first, so a non-admin always hears "Only admins can invite people." and never a
+    // role-validation message. createAndSendInvite checks again (it has other callers).
+    const inviter = await requireOrgId(ctx);
+    if (!isAdminView(inviter)) throw new ConvexError("Only admins can invite people.");
+    return await createAndSendInvite(ctx, {
       ...args,
       appRole: args.appRole === undefined ? undefined : parseAppRole(args.appRole),
       appRoles: args.appRoles === undefined ? undefined : parseAppRoles(args.appRoles),
-    }),
+    });
+  },
 });
 
 /**

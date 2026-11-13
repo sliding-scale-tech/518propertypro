@@ -532,3 +532,141 @@ test("team.setRoles is admin-only and validates with parseAppRoles", () => {
   assert.match(team, /throw new ConvexError\("Ask another Admin to change your role\."\)/);
   assert.match(team, /throw new ConvexError\("The team needs at least one Admin\."\)/);
 });
+
+// --- 4. team.setRoles through the real handler --------------------------------------------------------
+
+/** A mutation ctx over the in-memory db: patch, insert and a no-op scheduler (nothing is sent). */
+function mctx(tables) {
+  const c = ctxFor(tables);
+  const all = () => Object.values(tables).flat();
+  c.db.patch = async (id, fields) => {
+    Object.assign(
+      all().find((x) => x._id === id),
+      fields,
+    );
+  };
+  c.db.insert = async (t, doc) => {
+    const id = `${t}_${++seq}`;
+    (tables[t] ??= []).push(row(id, doc));
+    return id;
+  };
+  c.scheduler = { runAfter: async () => null };
+  return c;
+}
+
+test("setRoles: every non-admin persona is refused, for others and for themselves", async () => {
+  for (const [name, p] of Object.entries(PERSONAS)) {
+    if (name === "admin") continue;
+    const t = world(p.role, p.jobRoles);
+    const r = await run(TEAM.setRoles, mctx(t), { membershipId: "mT2", roles: ["admin"] });
+    assert.equal(r.ok, false, name);
+    assert.equal(r.error, "Only admins can do this.", name);
+    assert.deepEqual(t.memberships.find((m) => m._id === "mT2").jobRoles, ["technician"], name);
+    const self = await run(TEAM.setRoles, mctx(t), { membershipId: "mC", roles: ["admin"] });
+    assert.equal(self.ok, false, `${name} self-promote`);
+    assert.equal(self.error, "Only admins can do this.", `${name} self-promote`);
+    assert.deepEqual(t.memberships.find((m) => m._id === "mC").jobRoles, p.jobRoles, `${name} unchanged`);
+  }
+});
+
+test("setRoles: an admin gets a specific message for each bad selection and nothing is stored", async () => {
+  const t = world(PERSONAS.admin.role, PERSONAS.admin.jobRoles);
+  const c = mctx(t);
+  const before = JSON.stringify(t.memberships);
+  assert.equal((await run(TEAM.setRoles, c, { membershipId: "mT2", roles: ["admin", "accountant"] })).error, R.ROLE_MESSAGES.adminCombined);
+  assert.equal((await run(TEAM.setRoles, c, { membershipId: "mT2", roles: [] })).error, R.ROLE_MESSAGES.none);
+  assert.equal((await run(TEAM.setRoles, c, { membershipId: "mT2", roles: ["owner"] })).error, R.ROLE_MESSAGES.invalid);
+  const nonString = await run(TEAM.setRoles, c, { membershipId: "mT2", roles: [null, 5] });
+  assert.equal(nonString.ok, false);
+  assert.equal(nonString.error, R.ROLE_MESSAGES.invalid);
+  assert.equal(JSON.stringify(t.memberships), before, "rejected selections change nothing");
+});
+
+test("setRoles: an admin cannot change their own roles", async () => {
+  const t = world(PERSONAS.admin.role, PERSONAS.admin.jobRoles);
+  const r = await run(TEAM.setRoles, mctx(t), { membershipId: "mC", roles: ["accountant"] });
+  assert.equal(r.error, "Ask another Admin to change your role.");
+});
+
+test("setRoles: a member who owns units cannot lose the asset manager role; another team's member is not found", async () => {
+  const t = world(PERSONAS.admin.role, PERSONAS.admin.jobRoles);
+  const c = mctx(t);
+  // mM2 manages U2.
+  const own = await run(TEAM.setRoles, c, { membershipId: "mM2", roles: ["technician"] });
+  assert.equal(own.ok, false);
+  assert.equal(typeof own.error, "string");
+  assert.ok(own.error.length > 0);
+  assert.deepEqual(t.memberships.find((m) => m._id === "mM2").jobRoles, ["asset_manager"]);
+  // Another team's membership reads as missing.
+  t.memberships.push(row("mX", { orgId: "org2", userId: "uX", role: "member", jobRoles: ["technician"], createdAt: 1 }));
+  assert.equal((await run(TEAM.setRoles, c, { membershipId: "mX", roles: ["accountant"] })).error, "Member not found.");
+  assert.deepEqual(t.memberships.find((m) => m._id === "mX").jobRoles, ["technician"]);
+});
+
+test("setRoles: duplicates are removed and the roles are stored as role member plus jobRoles", async () => {
+  const t = world(PERSONAS.admin.role, PERSONAS.admin.jobRoles);
+  const ok = await run(TEAM.setRoles, mctx(t), { membershipId: "mM2", roles: ["technician", "asset_manager", "technician"] });
+  assert.ok(ok.ok, ok.error);
+  const m2 = t.memberships.find((m) => m._id === "mM2");
+  assert.deepEqual([m2.role, m2.jobRoles], ["member", ["asset_manager", "technician"]]);
+});
+
+test("setRoles: a second admin can demote another admin", async () => {
+  const t = world("admin", ["executive", "maintenance_lead"]);
+  t.memberships.push(row("mA2", { orgId: "org1", userId: "uA2", role: "admin", jobRoles: ["simplr_admin"], createdAt: 1 }));
+  const r = await run(TEAM.setRoles, mctx(t), { membershipId: "mA2", roles: ["accountant"] });
+  assert.ok(r.ok, r.error);
+  const m = t.memberships.find((x) => x._id === "mA2");
+  assert.deepEqual(R.appRolesOf(m.role, m.jobRoles), ["accountant"]);
+});
+
+// --- 5. The tech app's "My jobs" list ----------------------------------------------------------------
+
+test("tech app list: technicianUserId = self gives AM+Technician and Technician+Accountant only their own jobs", async () => {
+  for (const name of ["am+tech", "tech+acc", "am+tech+acc"]) {
+    const p = PERSONAS[name];
+    const t = world(p.role, p.jobRoles);
+    // A job on C's own unit that belongs to another technician, and one more finished job of theirs.
+    t.workOrders.push(row("WO5", { ...t.workOrders[0], _id: "WO5", technicianUserId: "uT2", number: 5 }));
+    // The page passes the caller's own id (team.myAccess().userId).
+    const access = await run(TEAM.myAccess, ctxFor(t));
+    assert.equal(access.value.userId, "uC", `${name} myAccess.userId`);
+    const mine = await run(WO.list, ctxFor(t), { technicianUserId: access.value.userId });
+    assert.ok(mine.ok, mine.error);
+    const ids = mine.value.map((w) => w._id).sort();
+    assert.deepEqual(ids, ["WO1", "WO3"], name);
+    assert.ok(mine.value.every((w) => w.technicianUserId === "uC"), name);
+    // Without the filter the union of the roles shows other people's jobs (why the page must pass it).
+    const all = await run(WO.list, ctxFor(t), {});
+    assert.ok(all.value.some((w) => w.technicianUserId !== "uC"), `${name} unfiltered list has others' jobs`);
+  }
+});
+
+test("tech app list: a technician-only account gets the same jobs with or without the filter", async () => {
+  const p = PERSONAS.tech;
+  const t = world(p.role, p.jobRoles);
+  const plain = await run(WO.list, ctxFor(t), {});
+  const filtered = await run(WO.list, ctxFor(t), { technicianUserId: "uC" });
+  const other = await run(WO.list, ctxFor(t), { technicianUserId: "uT2" });
+  const ids = (r) => r.value.map((w) => w._id).sort();
+  assert.deepEqual(ids(plain), ["WO1", "WO3"]);
+  assert.deepEqual(ids(filtered), ids(plain));
+  assert.deepEqual(ids(other), ids(plain), "a technician-only caller can never widen the list");
+});
+
+test("tech page passes its own id for anyone holding the technician role", () => {
+  const page = readFileSync(join(CONVEX, "..", "app", "tech", "page.tsx"), "utf8");
+  assert.match(page, /api\.team\.myAccess/);
+  assert.match(page, /technicianUserId: access\.userId/);
+  assert.match(page, /access\.roles\.includes\("technician"\)/);
+});
+
+test("team.invite checks the admin before it validates roles", () => {
+  const team = readFileSync(join(CONVEX, "team.ts"), "utf8");
+  const at = team.indexOf("export const invite = action(");
+  assert.ok(at >= 0);
+  const body = team.slice(at, team.indexOf("export async function createAndSendInvite", at));
+  const gate = body.indexOf("Only admins can invite people.");
+  assert.ok(gate >= 0 && gate < body.indexOf("parseAppRoles(args.appRoles)"));
+  assert.ok(gate < body.indexOf("parseAppRole(args.appRole)"));
+});

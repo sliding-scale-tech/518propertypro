@@ -71,11 +71,6 @@ export const KIND_LABELS: Readonly<Record<RowType, string>> = {
 
 export const MAX_STATEMENT_LINES = 2000;
 
-/** Finance (owner statements) is for the admin and accountant views only. */
-export function canUseFinanceView(view: string): boolean {
-  return view === "admin" || view === "accountant";
-}
-
 /** Column order: naturalCompare(name), then id. Returns a new array. */
 export function sortProperties<T extends { id: string; name: string }>(ps: T[]): T[] {
   return [...ps].sort((a, b) => naturalCompare(a.name, b.name) || cmpStr(a.id, b.id));

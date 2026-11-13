@@ -465,11 +465,6 @@ test("changeRent: unit, amount, month and note refused with exact field messages
 // =================================================================================================
 
 test("access: unitRent.ts functions are admin view + accountant (requireFinance first); AM and technician are refused", () => {
-  assert.equal(P.canUseFinanceView("admin"), true);
-  assert.equal(P.canUseFinanceView("accountant"), true);
-  assert.equal(P.canUseFinanceView("asset_manager"), false);
-  assert.equal(P.canUseFinanceView("technician"), false);
-  assert.equal(P.canUseFinanceView("none"), false);
   const src = read("unitRent.ts");
   for (const name of ["history", "changeRent"]) {
     const at = src.indexOf(`export const ${name} = `);

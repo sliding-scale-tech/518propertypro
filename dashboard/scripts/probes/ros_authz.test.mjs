@@ -21,7 +21,6 @@ registerHooks({
     }
   },
 });
-const { canUseFinanceView } = await import("../../convex/rosPolicy.ts");
 
 const CONVEX = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "convex");
 const read = (name) => readFileSync(join(CONVEX, name), "utf8");
@@ -50,15 +49,6 @@ function registeredFunctions(src) {
     return { ...s, body: src.slice(s.index, end) };
   });
 }
-
-test("canUseFinanceView: admin and accountant only", () => {
-  assert.equal(canUseFinanceView("admin"), true);
-  assert.equal(canUseFinanceView("accountant"), true);
-  assert.equal(canUseFinanceView("asset_manager"), false);
-  assert.equal(canUseFinanceView("technician"), false);
-  assert.equal(canUseFinanceView("none"), false);
-  assert.equal(canUseFinanceView(""), false);
-});
 
 test("FINANCE_DENIED wording", () => {
   const src = read("financeAccess.ts");

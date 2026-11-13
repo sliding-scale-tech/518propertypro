@@ -18,7 +18,15 @@ const LIST_LIMIT = 300;
 
 function MyJobs() {
   const [tab, setTab] = useState<Tab>("open");
-  const jobs = useQuery(api.workOrders.list, {});
+  const access = useQuery(api.team.myAccess);
+  // Someone with the technician role plus another (e.g. asset manager or accountant) gets the union
+  // of what their roles reach from workOrders.list, so ask for their own jobs only. A technician-only
+  // account is already limited to its own jobs server-side; an admin (never a technician) keeps the full list.
+  const ownJobsOnly = !!access && access.roles.includes("technician");
+  const jobs = useQuery(
+    api.workOrders.list,
+    access === undefined || access === null ? "skip" : ownJobsOnly ? { technicianUserId: access.userId } : {},
+  );
   const paging = useUrlPaging();
 
   // Jobs Pat sent back or asked about come first; the server's order is kept within each group.

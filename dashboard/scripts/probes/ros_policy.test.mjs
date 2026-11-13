@@ -21,7 +21,7 @@ const { monthStart, nextMonth } = await import("../../convex/rosFormat.ts");
 
 const MISSING = ["", null, undefined, "   "];
 
-test("row types, kind labels, finance views", () => {
+test("row types, kind labels", () => {
   assert.deepStrictEqual([...P.ADDITION_TYPES], ["income", "owner_contribution", "other_addition"]);
   assert.deepStrictEqual([...P.SUBTRACTION_TYPES], ["expense", "owner_draw", "other_subtraction"]);
   assert.equal(P.MAX_STATEMENT_LINES, 2000);
@@ -33,9 +33,6 @@ test("row types, kind labels, finance views", () => {
     other_subtraction: "Other subtraction",
     owner_draw: "Owner draw",
   });
-  assert.equal(P.canUseFinanceView("admin"), true);
-  assert.equal(P.canUseFinanceView("accountant"), true);
-  for (const v of ["asset_manager", "technician", "none", ""]) assert.equal(P.canUseFinanceView(v), false, v);
 });
 
 test("sortProperties: natural name order, then id", () => {
