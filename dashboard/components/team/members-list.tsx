@@ -2,16 +2,14 @@
 
 import type { FunctionReturnType } from "convex/server";
 import { motion } from "framer-motion";
-import { Shield } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { api } from "@/convex/_generated/api";
-import { AppRoleBadge } from "@/components/team/member-details";
+import { AppRolesBadges } from "@/components/team/member-details";
 import { ROLE_FILTERS, inviteTypeLabel, matchesRoleFilter, parseRoleFilter, type RoleFilter } from "@/components/team/invite-panel";
 import { MEMBER_SORT_DEFAULT, MEMBER_SORT_KEYS, membersView, type MemberSortKey } from "@/components/team/member-list-view";
 import {
   Avatar,
   Card,
-  CardHead,
   Chips,
   Pagination,
   SearchBox,
@@ -34,7 +32,7 @@ const SORT_OPTIONS: Array<{ key: MemberSortKey; dir: "asc" | "desc"; label: stri
 ];
 
 /**
- * The Members card of /team: search, role filter, sort and paging (all kept in the URL). The whole
+ * The Members tab of /team: search, role filter, sort and paging (all kept in the URL). The whole
  * row opens the member drawer; the Tours switch is a sibling of the row button so it works alone.
  * Needs a <Suspense> boundary (URL state).
  */
@@ -82,18 +80,6 @@ export function MembersList({
 
   return (
     <Card>
-      <CardHead
-        title={
-          <>
-            Members <span className="text-muted-foreground">({members.length})</span>
-          </>
-        }
-        icon={<Shield />}
-        hint={`The Tours switch decides whether Sarah books tours for someone. ${
-          isAdmin ? "You can switch anyone's." : "You can switch your own; an Admin can switch anyone's."
-        }`}
-      />
-
       <div className="mb-4 grid gap-3 sm:grid-cols-[1fr_200px]">
         <SearchBox
           id="members-search"
@@ -131,7 +117,7 @@ export function MembersList({
           options={ROLE_FILTERS.map((f) => ({
             value: f.value,
             label: `${f.label} (${members.filter((m) => matchesRoleFilter(f.value, m)).length})`,
-          })).filter((o) => o.value !== "none" || roleFilter === "none" || members.some((m) => m.appRole === null))}
+          })).filter((o) => o.value !== "none" || roleFilter === "none" || members.some((m) => m.appRoles.length === 0))}
         />
       </div>
 
@@ -182,7 +168,7 @@ export function MembersList({
                 <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium">
                   <span className="truncate">{member.name}</span>
                   {member.isSelf ? <span className="text-xs font-normal text-muted-foreground">you</span> : null}
-                  <AppRoleBadge appRole={member.appRole} />
+                  <AppRolesBadges appRoles={member.appRoles} />
                 </span>
               </button>
               <div
@@ -201,6 +187,11 @@ export function MembersList({
           );
         })}
       </div>
+
+      <p className="mt-4 text-xs text-muted-foreground">
+        The Tours switch decides whether Sarah books tours for someone.{" "}
+        {isAdmin ? "You can switch anyone's." : "You can switch your own; an Admin can switch anyone's."}
+      </p>
 
       <Pagination
         label="Member pages"

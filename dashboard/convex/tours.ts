@@ -3,7 +3,7 @@ import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { action, internalAction, internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import type { ActionCtx, MutationCtx } from "./_generated/server";
-import { currentOrg, requireOrg, requireOrgAdmin, requireOrgId, isAdminView, viewFor } from "./authz";
+import { currentOrg, hasAnyRole, requireOrg, requireOrgAdmin, requireOrgId, isAdminView } from "./authz";
 import * as google from "./googleApi";
 import { accessTokenFor } from "./googleCalendar";
 import * as sched from "./tourSchedule";
@@ -45,7 +45,7 @@ export const availabilitySettings = query({
 
     // Other members' calendar connection state and tour availability are admin-view data;
     // everyone else gets only their own row.
-    const adminView = viewFor(org.isAdmin, org.jobRoles) === "admin";
+    const adminView = isAdminView(org);
     const team = await Promise.all(
       memberships.filter((m) => adminView || m.userId === org.user._id).map(async (m) => {
         const [user, connection, hours] = await Promise.all([
@@ -327,8 +327,8 @@ export const upcoming = query({
   handler: async (ctx, args) => {
     const org = await currentOrg(ctx);
     if (!org) return [];
-    const view = viewFor(org.isAdmin, org.jobRoles);
-    if (view !== "admin" && view !== "asset_manager") return [];
+    if (!hasAnyRole(org, "admin", "asset_manager")) return [];
+    const adminView = isAdminView(org);
 
     const days = Math.min(30, Math.max(1, Math.floor(Number.isFinite(args.days) ? (args.days as number) : 7)));
     const now = Date.now();
@@ -349,7 +349,7 @@ export const upcoming = query({
     const out = [];
     for (const t of rows) {
       if (t.status !== "booked") continue;
-      if (view === "asset_manager" && t.assignedUserId !== org.user._id) continue;
+      if (!adminView && t.assignedUserId !== org.user._id) continue;
       if (!names.has(t.assignedUserId)) {
         const u = await ctx.db.get(t.assignedUserId);
         names.set(

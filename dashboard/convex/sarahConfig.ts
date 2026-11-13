@@ -3,7 +3,7 @@ import { internal } from "./_generated/api";
 import { action, internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { isAdminView, requireAdminView, requireAdminViewId, viewFor } from "./authz";
+import { isAdminView, requireAdminView, requireAdminViewId } from "./authz";
 import type { JobRole } from "./authz";
 import type { SeverityLevel } from "./severity";
 import { requireE164 } from "./phone";
@@ -456,7 +456,7 @@ const NOT_ADMIN_MSG = "Only an admin can approve.";
 
 /** Org comes from requireAdminView, which already enforces the admin view; kept as a server-side re-check. */
 function canApproveItems(org: { isAdmin: boolean; jobRoles: JobRole[] }): boolean {
-  return viewFor(org.isAdmin, org.jobRoles) === "admin";
+  return isAdminView(org);
 }
 
 type Org = Awaited<ReturnType<typeof requireAdminView>>;

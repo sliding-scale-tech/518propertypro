@@ -78,6 +78,7 @@ import type * as resendApi from "../resendApi.js";
 import type * as residentMatch from "../residentMatch.js";
 import type * as residentTriage from "../residentTriage.js";
 import type * as residents from "../residents.js";
+import type * as roleSet from "../roleSet.js";
 import type * as rosBuild from "../rosBuild.js";
 import type * as rosCalc from "../rosCalc.js";
 import type * as rosFormat from "../rosFormat.js";
@@ -203,6 +204,7 @@ declare const fullApi: ApiFromModules<{
   residentMatch: typeof residentMatch;
   residentTriage: typeof residentTriage;
   residents: typeof residents;
+  roleSet: typeof roleSet;
   rosBuild: typeof rosBuild;
   rosCalc: typeof rosCalc;
   rosFormat: typeof rosFormat;

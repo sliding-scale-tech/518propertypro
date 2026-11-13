@@ -34,7 +34,9 @@ import {
   jobRolesFor,
   notifyChannelValidator,
   parseAppRole,
+  parseAppRoles,
 } from "./jobRoles";
+import { appRolesOf, rolesFor, storageForRoles } from "./roleSet";
 import { sendEmail } from "./resendApi";
 import { countOwnedBy, purgeOrgUnits } from "./units";
 
@@ -88,7 +90,7 @@ export const overview = query({
     // Phone numbers are PII: only the people who dispatch work (and the owner of the number)
     // get them. Everyone else on the roster sees the member, not how to reach them.
     const canSeePhones = isAdminView(org);
-    const fullRoster = viewFor(org.isAdmin, org.jobRoles) === "admin";
+    const fullRoster = isAdminView(org);
 
     const members = await Promise.all(
       memberships.map(async (m) => {
@@ -117,7 +119,9 @@ export const overview = query({
           imageUrl: user?.imageUrl ?? null,
           role: m.role,
           jobRoles: m.jobRoles ?? [],
+          // Primary role (old single-role callers) and every role held (B31).
           appRole: appRoleOf(m.role, m.jobRoles ?? []),
+          appRoles: appRolesOf(m.role, m.jobRoles ?? []),
           phone: canSeePhones || m.userId === org.user._id ? (m.phone ?? null) : null,
           notifyBy: m.notifyBy ?? [],
           unavailableUntil: m.unavailableUntil ?? null,
@@ -160,6 +164,7 @@ export const overview = query({
             role: i.role,
             jobRoles: i.jobRoles ?? [],
             appRole: appRoleOf(i.role, i.jobRoles ?? []),
+            appRoles: appRolesOf(i.role, i.jobRoles ?? []),
             fullName: i.fullName ?? null,
             phone: i.phone ?? null, // admin-only list; lets "Resend" reuse the original details
             createdAt: i.createdAt,
@@ -187,7 +192,9 @@ export const myAccess = query({
     const org = await currentOrg(ctx);
     if (!org) return null;
     return {
+      // Default landing view only (home redirect). Access decisions use `roles`, the full set held.
       view: viewFor(org.isAdmin, org.jobRoles),
+      roles: [...rolesFor(org.isAdmin, org.jobRoles)],
       isAdmin: isAdminView(org),
       jobRoles: org.jobRoles,
       canManageMaintenance: canManageMaintenance(org),
@@ -289,9 +296,73 @@ export const setJobRoles = mutation({
 });
 
 /**
- * Sets a member's app role (Admin / Asset manager / Technician / Accountant), writing both the
- * membership role and the job roles in one patch so they can never disagree. Admin-only.
- * appRole arrives as a plain string and is checked by parseAppRole for a clear ConvexError.
+ * The one write path for a member's roles (setRoles and the older setAppRole): writes the
+ * membership role and the job roles in one patch so they can never disagree. `roles` is already
+ * checked (parseAppRole / parseAppRoles). Last-Admin, self-demotion and units-owned rules apply.
+ */
+async function writeMemberRoles(
+  ctx: MutationCtx,
+  org: Awaited<ReturnType<typeof requireOrgAdmin>>,
+  membership: Doc<"memberships">,
+  roles: AppRole[],
+  action: "app_role_set" | "roles_set",
+) {
+  const before = membership.jobRoles ?? [];
+  const next = storageForRoles(roles);
+  const wasAdmin = isAdminView({ isAdmin: membership.role === "admin", jobRoles: before });
+
+  if (wasAdmin && next.role !== "admin") {
+    // Locking yourself out is the easy mistake; another admin can make the change instead.
+    if (membership.userId === org.user._id) {
+      throw new ConvexError("Ask another Admin to change your role.");
+    }
+    const members = await ctx.db
+      .query("memberships")
+      .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
+      .collect();
+    if (!members.some((m) => m._id !== membership._id && isAdminView({ isAdmin: m.role === "admin", jobRoles: m.jobRoles ?? [] }))) {
+      throw new ConvexError("The team needs at least one Admin.");
+    }
+  }
+
+  // Leaving asset_manager while owning units would strand those units; reassign them first.
+  if (before.includes("asset_manager") && !next.jobRoles.includes("asset_manager")) {
+    const owned = await countOwnedBy(ctx, membership.userId);
+    if (owned > 0) throw ownsUnitsError(owned);
+  }
+
+  await ctx.db.patch(membership._id, { role: next.role, jobRoles: next.jobRoles });
+  await writeAudit(ctx, {
+    orgId: org.orgId,
+    entity: "membership",
+    entityId: membership._id,
+    action,
+    actorUserId: org.user._id,
+    from: `${membership.role}:${before.join(",")}`,
+    to: `${next.role}:${next.jobRoles.join(",")}`,
+  });
+}
+
+/**
+ * Sets a member's roles (B31 multi-role): Admin on its own, or any mix of Asset manager,
+ * Technician and Accountant. Admin-only. `roles` arrives as plain strings and is checked by
+ * parseAppRoles, so a missing, unknown or Admin-plus-other selection gets a clear ConvexError.
+ */
+export const setRoles = mutation({
+  args: { membershipId: v.id("memberships"), roles: v.array(v.string()) },
+  handler: async (ctx, args) => {
+    const org = await requireOrgAdmin(ctx);
+    const roles = parseAppRoles(args.roles);
+    const membership = await ctx.db.get(args.membershipId);
+    if (!membership || membership.orgId !== org.orgId) throw new ConvexError("Member not found.");
+    await writeMemberRoles(ctx, org, membership, roles, "roles_set");
+  },
+});
+
+/**
+ * Sets a member's single app role (Admin / Asset manager / Technician / Accountant). Kept for older
+ * callers; the same as setRoles with one role. Admin-only. appRole arrives as a plain string and is
+ * checked by parseAppRole for a clear ConvexError.
  */
 export const setAppRole = mutation({
   args: { userId: v.id("users"), appRole: v.string() },
@@ -303,41 +374,7 @@ export const setAppRole = mutation({
       .withIndex("by_user", (q) => q.eq("userId", args.userId))
       .first();
     if (!membership || membership.orgId !== org.orgId) throw new ConvexError("Member not found.");
-
-    const before = membership.jobRoles ?? [];
-    const next = jobRolesFor(appRole);
-    const wasAdmin = isAdminView({ isAdmin: membership.role === "admin", jobRoles: before });
-
-    if (wasAdmin && next.role !== "admin") {
-      // Locking yourself out is the easy mistake; another admin can make the change instead.
-      if (membership.userId === org.user._id) {
-        throw new ConvexError("Ask another Admin to change your role.");
-      }
-      const members = await ctx.db
-        .query("memberships")
-        .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
-        .collect();
-      if (!members.some((m) => m._id !== membership._id && isAdminView({ isAdmin: m.role === "admin", jobRoles: m.jobRoles ?? [] }))) {
-        throw new ConvexError("The team needs at least one Admin.");
-      }
-    }
-
-    // Leaving asset_manager while owning units would strand those units; reassign them first.
-    if (before.includes("asset_manager") && !next.jobRoles.includes("asset_manager")) {
-      const owned = await countOwnedBy(ctx, args.userId);
-      if (owned > 0) throw ownsUnitsError(owned);
-    }
-
-    await ctx.db.patch(membership._id, { role: next.role, jobRoles: next.jobRoles });
-    await writeAudit(ctx, {
-      orgId: org.orgId,
-      entity: "membership",
-      entityId: membership._id,
-      action: "app_role_set",
-      actorUserId: org.user._id,
-      from: `${membership.role}:${before.join(",")}`,
-      to: `${next.role}:${next.jobRoles.join(",")}`,
-    });
+    await writeMemberRoles(ctx, org, membership, [appRole], "app_role_set");
   },
 });
 
@@ -560,6 +597,9 @@ export const invite = action({
     // Preferred: when given, role and jobRoles above are ignored and derived from it. A plain
     // string so parseAppRole can reject a bad value with a clear ConvexError.
     appRole: v.optional(v.string()),
+    // Multi-role (B31), preferred over appRole: Admin alone, or any mix of the other three.
+    // Plain strings so parseAppRoles can reject a bad selection with a clear ConvexError.
+    appRoles: v.optional(v.array(v.string())),
     phone: v.optional(v.string()),
     fullName: v.optional(v.string()),
   },
@@ -567,6 +607,7 @@ export const invite = action({
     await createAndSendInvite(ctx, {
       ...args,
       appRole: args.appRole === undefined ? undefined : parseAppRole(args.appRole),
+      appRoles: args.appRoles === undefined ? undefined : parseAppRoles(args.appRoles),
     }),
 });
 
@@ -582,6 +623,8 @@ export async function createAndSendInvite(
     role?: "admin" | "member";
     jobRoles?: JobRole[];
     appRole?: AppRole;
+    // Checked role selection (parseAppRoles); wins over appRole and jobRoles.
+    appRoles?: AppRole[];
     phone?: string;
     fullName?: string;
   },
@@ -591,7 +634,11 @@ export async function createAndSendInvite(
   const { orgId, userId } = inviter;
   const phone = args.phone?.trim() ? assertE164(args.phone) : undefined;
 
-  const derived = args.appRole ? jobRolesFor(args.appRole) : null;
+  const derived = args.appRoles
+    ? storageForRoles(args.appRoles)
+    : args.appRole
+      ? jobRolesFor(args.appRole)
+      : null;
   const jobRoles = derived ? derived.jobRoles : [...new Set(args.jobRoles ?? [])];
   if (jobRoles.length === 0) throw new ConvexError("Pick a role for this person.");
   // An admin invite must carry an admin-flavoured job role, so they land in the admin view.

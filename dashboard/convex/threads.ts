@@ -9,7 +9,7 @@ import {
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import * as twilio from "./twilioApi";
-import { currentOrg, requireAdminView, requireAdminViewId, tenantOrgId, viewFor } from "./authz";
+import { currentOrg, isAdminView, requireAdminView, requireAdminViewId, tenantOrgId } from "./authz";
 import type { QueryCtx } from "./_generated/server";
 
 /**
@@ -19,7 +19,7 @@ import type { QueryCtx } from "./_generated/server";
  */
 async function adminOrgOrNull(ctx: QueryCtx) {
   const org = await currentOrg(ctx);
-  if (!org || viewFor(org.isAdmin, org.jobRoles) !== "admin") return null;
+  if (!org || !isAdminView(org)) return null;
   return org;
 }
 

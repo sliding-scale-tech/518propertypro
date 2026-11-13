@@ -111,7 +111,7 @@ _Created 2026-10-28 from a full audit of the `staging` branch. Handover target: 
 - [ ] **B21 Small feature gaps:** Resident calls route to / owner / close with reason; Leads staff status dropdown; decide whether AMs see only their own leads; Sarah config "Send test alert"; portal-login email field on `log_tenant_issue`.
 - [ ] **B22 Knowledge base:** replace leftover demo content with 518 content.
 - [ ] **B23 External setup:** Twilio A2P 10DLC registration; Google OAuth verification.
-- [ ] **B31 Multi-role members (check before onboarding Delia).** Raised by the user on 2026-11-02. `viewFor()` (`convex/authz.ts:121`) picks ONE view by priority: admin / simplr_admin / executive / maintenance_lead → admin, then asset_manager, then technician, then accountant. Delia (Make Up asset manager and the accountant) would hold `jobRoles ["asset_manager", "accountant"]`, so she gets only the asset-manager view. To do: list which accountant features exist only on the accountant view and which check `jobRoles` directly. Then the user decides: merge the views (AM view plus the accountant sections for multi-role members) or add a view switcher. Not decided; record only.
+- [x] **B31 Multi-role members.** Done 2026-11-13: Admin (exclusive) or any mix of Asset manager / Technician / Accountant; permissions, sidebar and dashboard are the union of roles held (`convex/roleSet.ts`, `team.setRoles`, matrix test `scripts/probes/roles_multi.test.mjs`).
 
 ## P2: finance (after Nov 1 unless agreed in writing)
 - [ ] **B24 Owner statements (ROS).** Ledger, income statement, 5% management fee, security deposits held, owner draw, prefill from work orders. The sample is now in `docs/context/`.

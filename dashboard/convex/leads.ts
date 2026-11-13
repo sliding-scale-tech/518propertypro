@@ -3,7 +3,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { internalMutation, mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { writeAudit } from "./audit";
-import { currentOrg, viewFor } from "./authz";
+import { currentOrg, hasAnyRole, isAdminView } from "./authz";
 import type { OrgContext } from "./authz";
 import { callbacksView, countByStatus, pageOf } from "./tenantViews";
 import { scheduleEmergencyAlert, scheduleNotify, staffRecipientIds } from "./notify";
@@ -517,10 +517,9 @@ export const logUnmatchedCaller = internalMutation({
  * asset manager only the ones assigned to them. null = this view has no access.
  */
 async function readableCallbacks(ctx: QueryCtx, org: OrgContext) {
-  const view = viewFor(org.isAdmin, org.jobRoles);
-  if (view !== "admin" && view !== "asset_manager") return null;
+  if (!hasAnyRole(org, "admin", "asset_manager")) return null;
   let rows: Doc<"callbackContacts">[];
-  if (view === "admin") {
+  if (isAdminView(org)) {
     rows = await ctx.db
       .query("callbackContacts")
       .withIndex("by_org_and_created", (q) => q.eq("orgId", org.orgId))
@@ -606,7 +605,7 @@ export const setCallbackStatus = mutation({
     const org = await currentOrg(ctx);
     if (!org) throw new ConvexError("No team found for this account. Try signing in again.");
     const row = await ctx.db.get(args.id);
-    const admin = viewFor(org.isAdmin, org.jobRoles) === "admin";
+    const admin = isAdminView(org);
     if (!row || row.orgId !== org.orgId || (!admin && row.assignedUserId !== org.user._id)) {
       throw new ConvexError("Callback not found.");
     }

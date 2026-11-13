@@ -6,7 +6,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { RequireView } from "@/components/require-view";
+import { RequireView, rolesOfAccess } from "@/components/require-view";
 import { Kanban, StatusChips, WorkOrderTable, type ItemRef } from "@/components/board/board";
 import { DesignSelect } from "@/components/board/design-select";
 import { ExceptionsDrawer } from "@/components/board/exceptions-drawer";
@@ -44,8 +44,10 @@ function WorkOrdersInner() {
   const params = useSearchParams();
 
   const access = useQuery(api.team.myAccess);
-  const isAdmin = access?.view === "admin";
-  const isAm = access?.view === "asset_manager";
+  // Role set (B31): anyone holding asset manager gets the AM board, whatever else they hold.
+  const roles = rolesOfAccess(access);
+  const isAdmin = roles.includes("admin");
+  const isAm = roles.includes("asset_manager");
   const canCreate = isAdmin || isAm;
   const noBoard = access !== undefined && !canCreate;
   const team = useQuery(api.team.overview);
@@ -113,7 +115,7 @@ function WorkOrdersInner() {
     setParam("view", v);
   };
 
-  const technicians = (team?.members ?? []).filter((m) => m.appRole === "technician");
+  const technicians = (team?.members ?? []).filter((m) => m.appRoles.includes("technician"));
   const filters = {
     search: search || undefined,
     priority: priority === "all" ? undefined : priority,

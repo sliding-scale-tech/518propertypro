@@ -2,7 +2,7 @@ import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { mutation, query } from "./_generated/server";
-import { currentOrg, requireOrg, viewFor } from "./authz";
+import { currentOrg, hasRole, isAdminView as isAdminRole, requireOrg } from "./authz";
 import type { OrgContext } from "./authz";
 import { amScope, canSeeUnit, EMPTY_AM_SCOPE } from "./amScope";
 import type { AmScope } from "./amScope";
@@ -20,7 +20,7 @@ import { checkStorageUsable } from "./maintenance";
 type TaskCtx = QueryCtx | MutationCtx;
 
 async function scopeOf(ctx: TaskCtx, org: OrgContext): Promise<AmScope> {
-  return viewFor(org.isAdmin, org.jobRoles) === "asset_manager" ? await amScope(ctx, org) : EMPTY_AM_SCOPE;
+  return hasRole(org, "asset_manager") ? await amScope(ctx, org) : EMPTY_AM_SCOPE;
 }
 
 /** The unit a task is tied to: its own link, else its request's or work order's unit. */
@@ -46,14 +46,14 @@ function isOwnTask(org: OrgContext, task: Doc<"tasks">): boolean {
 
 async function canReadTask(ctx: TaskCtx, org: OrgContext, scope: AmScope, task: Doc<"tasks">): Promise<boolean> {
   if (task.orgId !== org.orgId) return false;
-  if (viewFor(org.isAdmin, org.jobRoles) === "admin") return true;
+  if (isAdminRole(org)) return true;
   if (isOwnTask(org, task)) return true;
   return canSeeUnit(scope, await linkedUnitId(ctx, task));
 }
 
 async function canWriteTask(ctx: TaskCtx, org: OrgContext, scope: AmScope, task: Doc<"tasks">): Promise<boolean> {
   if (task.orgId !== org.orgId) return false;
-  if (viewFor(org.isAdmin, org.jobRoles) === "admin") return true;
+  if (isAdminRole(org)) return true;
   if (isOwnTask(org, task)) return true;
   const unitId = await linkedUnitId(ctx, task);
   return unitId !== undefined && scope.managed.has(unitId);
@@ -87,7 +87,7 @@ async function checkLinks(
     if (!membership || membership.orgId !== org.orgId) throw new ConvexError("Assignee not found.");
   }
   // Admin view may link anything in the team; everyone else only records in their own scope.
-  const admin = viewFor(org.isAdmin, org.jobRoles) === "admin";
+  const admin = isAdminRole(org);
   const scope = admin ? EMPTY_AM_SCOPE : await scopeOf(ctx, org);
   if (links.unitId) {
     const unit = await ctx.db.get(links.unitId);
@@ -118,7 +118,7 @@ async function checkLinks(
 }
 
 function isAdminView(org: OrgContext): boolean {
-  return viewFor(org.isAdmin, org.jobRoles) === "admin";
+  return isAdminRole(org);
 }
 
 /**
@@ -151,7 +151,7 @@ export const list = query({
       .order("desc")
       .collect();
     if (args.mine) return rows.filter((t) => isOwnTask(org, t));
-    if (viewFor(org.isAdmin, org.jobRoles) === "admin") return rows;
+    if (isAdminRole(org)) return rows;
     const scope = await scopeOf(ctx, org);
     const out: Doc<"tasks">[] = [];
     for (const t of rows) {

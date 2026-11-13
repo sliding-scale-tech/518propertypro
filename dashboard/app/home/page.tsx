@@ -6,27 +6,32 @@ import { Loader2, LogOut, Lock } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 import { api } from "@/convex/_generated/api";
+import type { AppRole } from "@/convex/roleSet";
+import { rolesOfAccess } from "@/components/require-view";
 
-const DESTINATION = {
-  admin: "/dashboard",
-  asset_manager: "/dashboard",
-  technician: "/tech",
-  accountant: "/dashboard",
-} as const;
+/**
+ * Where a person lands: the dashboard for anyone holding Admin, Asset manager or Accountant (a
+ * multi-role person sees a section per role there); the technician app only for someone whose
+ * ONLY role is Technician. null = no role yet.
+ */
+function destinationFor(roles: ReadonlyArray<AppRole>): string | null {
+  if (roles.length === 0) return null;
+  return roles.every((r) => r === "technician") ? "/tech" : "/dashboard";
+}
 
-/** Where everyone lands after sign-in: routes each person to the view their role gives them. */
+/** Where everyone lands after sign-in: routes each person to the view their roles give them. */
 export default function HomePage() {
   const router = useRouter();
   const { signOut } = useClerk();
   const access = useQuery(api.team.myAccess);
-  const view = access?.view;
+  const destination = access ? destinationFor(rolesOfAccess(access)) : null;
 
   useEffect(() => {
-    if (view && view !== "none") router.replace(DESTINATION[view]);
-  }, [view, router]);
+    if (destination) router.replace(destination);
+  }, [destination, router]);
 
   // undefined = loading. null = no team, which TeamGate explains before this ever renders.
-  if (access && access.view === "none") {
+  if (access && destination === null) {
     return (
       <div className="flex min-h-[70dvh] items-center justify-center px-4">
         <div className="w-full max-w-md rounded-2xl border border-border bg-card p-6 text-center shadow-sm">

@@ -5,7 +5,7 @@ import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { isOtlpPayload, parseOtlp } from "./otlp";
 import { computeLeadScore } from "./leadScoring";
-import { currentOrg, requireAdminView, viewFor } from "./authz";
+import { currentOrg, hasAnyRole, hasRole, isAdminView, requireAdminView } from "./authz";
 import { amScope, canSeeUnit } from "./amScope";
 import type { QueryCtx, MutationCtx } from "./_generated/server";
 import type { Doc } from "./_generated/dataModel";
@@ -90,9 +90,8 @@ export async function canReadConversation(
   if (!conv.orgId) return conv.channel === "browser";
   const org = await currentOrg(ctx);
   if (!org || org.orgId !== conv.orgId) return false;
-  const view = viewFor(org.isAdmin, org.jobRoles);
-  if (view === "admin") return true;
-  if (view !== "asset_manager") return false;
+  if (isAdminView(org)) return true;
+  if (!hasRole(org, "asset_manager")) return false;
 
   const elId = conv.elevenLabsConversationId;
   const requests = elId
@@ -134,7 +133,7 @@ async function canWriteConversation(
   if (!org || org.orgId !== conv.orgId) return false;
   // Within the team: the admin view, or the person who started this call. Any other member
   // knowing the id must not be able to append to, end, or re-point someone else's call.
-  return viewFor(org.isAdmin, org.jobRoles) === "admin" || conv.userId === org.user._id;
+  return isAdminView(org) || conv.userId === org.user._id;
 }
 
 // --- Reads ----------------------------------------------------------------
@@ -163,8 +162,7 @@ export const history = query({
       return { page: [], isDone: true, continueCursor: "" };
     }
     // Lead history is not for technicians or accountants.
-    const view = viewFor(org.isAdmin, org.jobRoles);
-    if (view !== "admin" && view !== "asset_manager") {
+    if (!hasAnyRole(org, "admin", "asset_manager")) {
       return { page: [], isDone: true, continueCursor: "" };
     }
 
@@ -426,8 +424,7 @@ export const funnel = query({
   handler: async (ctx) => {
     const org = await currentOrg(ctx);
     if (!org) return { callsAnswered: 0, leadsQualified: 0, toursBooked: 0 };
-    const view = viewFor(org.isAdmin, org.jobRoles);
-    if (view !== "admin" && view !== "asset_manager") {
+    if (!hasAnyRole(org, "admin", "asset_manager")) {
       return { callsAnswered: 0, leadsQualified: 0, toursBooked: 0 };
     }
 
@@ -914,7 +911,7 @@ export const needsFollowUp = query({
   args: {},
   handler: async (ctx) => {
     const org = await currentOrg(ctx);
-    if (!org || viewFor(org.isAdmin, org.jobRoles) !== "admin") return [];
+    if (!org || !isAdminView(org)) return [];
     const rows = await ctx.db
       .query("conversations")
       .withIndex("by_org_and_started", (q) => q.eq("orgId", org.orgId))

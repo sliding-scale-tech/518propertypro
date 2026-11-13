@@ -373,7 +373,7 @@ function DrawerBody({
   const requestId = (isRequest ? d.id : d.linkedRequest?.id) as Id<"maintenanceRequests"> | undefined;
   const reqFull = useQuery(api.maintenance.get, requestId ? { requestId } : "skip");
   const team = useQuery(api.team.overview);
-  const technicians = (team?.members ?? []).filter((m) => m.appRole === "technician");
+  const technicians = (team?.members ?? []).filter((m) => m.appRoles.includes("technician"));
 
   const statusKey = d.statusKey as StatusKey;
   const f = d.flags;

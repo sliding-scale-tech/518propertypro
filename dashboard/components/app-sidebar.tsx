@@ -31,6 +31,8 @@ import { useEffect, useState } from "react";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { AppView } from "@/convex/authz";
+import type { AppRole } from "@/convex/roleSet";
+import { holdsAnyOf, useMyRoles } from "@/components/require-view";
 
 type NavLeaf = {
   href: string;
@@ -147,6 +149,9 @@ const NAV: NavEntry[] = [
   { href: "/call", label: "Call", icon: Phone, views: ["admin"] },
   { href: "/sarah", label: "Sarah config", icon: Sparkles, views: ["admin"] },
   { href: "/profile", label: "Profile", icon: CircleUser, views: ["asset_manager"] },
+  // The technician app (its own mobile layout). Technician-only people land there from /home; this
+  // link is how someone who is a technician AND holds another role (B31) gets to their jobs.
+  { href: "/tech", label: "My jobs", icon: HardHat, views: ["technician"] },
   // The roster: hidden from asset managers, who manage themselves on /profile. The page hides
   // every control a viewer cannot use, and convex/team.ts re-checks the role on every write.
   { href: "/team", label: "Team", icon: Users, views: ["admin", "accountant", "technician"] },
@@ -162,16 +167,17 @@ const BOTTOM_NAV_ORDER = ["/dashboard", "/work-orders", "/leads", "/properties"]
 const BOTTOM_NAV_SLOTS = 3;
 
 /**
- * Narrows a nav entry list to what `view` may see; groups left empty drop out.
+ * Narrows a nav entry list to what the person's roles may see (the UNION of every role held, each
+ * link once); groups left empty drop out.
  *
  * The role-restricted links are the nav's job, not its security: the server re-checks every
- * query and mutation. `view` is undefined while the query is in flight, and null for someone
+ * query and mutation. `roles` is undefined while the query is in flight, and null for someone
  * with no team — neither sees any link, so a restricted tab never flashes into view before we
- * know it belongs there.
+ * know it belongs there. No role at all: no links either.
  */
-function entriesFor(view: AppView | undefined): NavEntry[] {
-  if (!view) return [];
-  const allowed = (link: NavLeaf) => !link.views || link.views.includes(view);
+function entriesFor(roles: AppRole[] | null | undefined): NavEntry[] {
+  if (!roles || roles.length === 0) return [];
+  const allowed = (link: NavLeaf) => !link.views || holdsAnyOf(roles, link.views);
   return NAV.flatMap((entry): NavEntry[] => {
     if (!isGroup(entry)) return allowed(entry) ? [entry] : [];
     const items = entry.items.filter(allowed);
@@ -184,10 +190,13 @@ function leavesOf(entries: NavEntry[]): NavLeaf[] {
   return entries.flatMap((entry) => (isGroup(entry) ? entry.items : [entry]));
 }
 
-/** The signed-in person's view, or undefined while loading / when they have no team. */
-function useAppView(): AppView | undefined {
-  return useQuery(api.team.myAccess)?.view;
-}
+/** Labels for the profile chip, in role order. */
+const ROLE_LABEL: Record<AppRole, string> = {
+  admin: "Admin",
+  asset_manager: "Asset Manager",
+  technician: "Technician",
+  accountant: "Accountant",
+};
 
 function NavBadge() {
   const counts = useQuery(api.board.counts);
@@ -358,12 +367,12 @@ function useClosedGroups(): [Record<string, boolean>, (group: string) => void] {
 function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
   const search = useLocationSearch(pathname);
-  const view = useAppView();
+  const roles = useMyRoles();
   const [closed, toggleGroup] = useClosedGroups();
 
   return (
     <nav aria-label="Main" className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto">
-      {entriesFor(view).map((entry) => {
+      {entriesFor(roles).map((entry) => {
         if (isGroup(entry)) {
           return (
             <NavGroup
@@ -415,7 +424,7 @@ function initialsOf(name: string) {
 function UserProfile({ compact = false }: { compact?: boolean }) {
   const { user, isSignedIn } = useUser();
   const { signOut } = useClerk();
-  const view = useAppView();
+  const roles = useMyRoles();
   const [open, setOpen] = useState(false);
 
   if (!isSignedIn || !user) return null;
@@ -428,16 +437,8 @@ function UserProfile({ compact = false }: { compact?: boolean }) {
   const email = user.primaryEmailAddress?.emailAddress;
   const logout = () => void signOut({ redirectUrl: "/" });
 
-  const roleLabel =
-    view === "admin"
-      ? "Admin"
-      : view === "asset_manager"
-        ? "Asset Manager"
-        : view === "accountant"
-          ? "Accountant"
-          : view === "technician"
-            ? "Technician"
-            : "Member";
+  // Every role held, e.g. "Asset Manager · Accountant"; "Member" with none.
+  const roleLabel = roles && roles.length > 0 ? roles.map((r) => ROLE_LABEL[r]).join(" · ") : "Member";
 
   const avatar = (
     <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-[#2563eb] text-[12px] font-bold tracking-[0.3px] text-white">
@@ -510,8 +511,8 @@ function UserProfile({ compact = false }: { compact?: boolean }) {
 export function AppSidebar() {
   const [moreOpen, setMoreOpen] = useState(false);
   const pathname = usePathname();
-  const view = useAppView();
-  const leaves = leavesOf(entriesFor(view));
+  const roles = useMyRoles();
+  const leaves = leavesOf(entriesFor(roles));
   const bottomLinks = BOTTOM_NAV_ORDER.flatMap((href) => leaves.filter((l) => l.href === href)).slice(
     0,
     BOTTOM_NAV_SLOTS,

@@ -1,7 +1,7 @@
 import { ConvexError, v } from "convex/values";
 import { query } from "./_generated/server";
 import type { Doc } from "./_generated/dataModel";
-import { currentOrg, requireOrg, viewFor as viewOf } from "./authz";
+import { currentOrg, hasAnyRole, hasRole, isAdminView, requireOrg } from "./authz";
 import { managedUnitIds } from "./amScope";
 import type { Id } from "./_generated/dataModel";
 import { maintenanceOverview, scopedByStatus } from "./maintenance";
@@ -81,8 +81,7 @@ export const overview = query({
 
     // Leads, calls and tours are for the admin view and asset managers only. Technician,
     // accountant and role-less viewers get none of it (empty / zero).
-    const viewerView = viewOf(org.isAdmin, org.jobRoles);
-    const leadsVisible = viewerView === "admin" || viewerView === "asset_manager";
+    const leadsVisible = hasAnyRole(org, "admin", "asset_manager");
 
     // --- Stat cards: this week against the one before it ---------------------
     const fortnight = leadsVisible
@@ -147,12 +146,12 @@ export const overview = query({
     // months out, so the "booked" counts below look at createdAt, which no index covers.
     // Admin: the team's tours. Asset manager: only tours assigned to them. Others: none.
     const allTours =
-      viewerView === "admin"
+      isAdminView(org)
         ? await ctx.db
             .query("tours")
             .withIndex("by_org_and_start", (q) => q.eq("orgId", org.orgId))
             .collect()
-        : viewerView === "asset_manager"
+        : hasRole(org, "asset_manager")
           ? (
               await ctx.db
                 .query("tours")
@@ -534,7 +533,7 @@ export const amOverview = query({
   args: { fallbackTimeZone: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const org = await requireOrg(ctx);
-    if (viewOf(org.isAdmin, org.jobRoles) !== "asset_manager") throw new ConvexError("You don't have access to that.");
+    if (!hasRole(org, "asset_manager")) throw new ConvexError("You don't have access to that.");
 
     const organization = await ctx.db.get(org.orgId);
     const timeZone =

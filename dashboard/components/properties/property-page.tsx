@@ -12,6 +12,7 @@ import { Dialog } from "@/components/properties/dialog";
 import { PropertyForm, type PropertyFormValue } from "@/components/properties/property-form";
 import { PropertyList } from "@/components/properties/property-list";
 import { errorMessage, useToast } from "@/components/toast";
+import { rolesOfAccess } from "@/components/require-view";
 import { UnitInventory } from "@/components/units/unit-inventory";
 import { useManagers } from "@/components/units/use-managers";
 import { Avatar, Btn, Card, CardHead, IconTile, KeyValue, PageHeader, Pill, Seg, Select } from "@/components/ui";
@@ -33,9 +34,11 @@ export function PropertyPage() {
   const properties = useProperties();
   const managers = useManagers();
   const create = useMutation(api.properties.create);
-  const isAdmin = access?.view === "admin";
-  const isAm = access?.view === "asset_manager";
-  const isAccountant = access?.view === "accountant";
+  // Every role held (B31): an asset manager who is also the accountant gets both sets of controls.
+  const roles = rolesOfAccess(access);
+  const isAdmin = roles.includes("admin");
+  const isAm = roles.includes("asset_manager");
+  const isAccountant = roles.includes("accountant");
 
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -258,7 +261,7 @@ function PropertyBody({
               </p>
             ) : null}
             <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-muted-foreground">
-              {!isAm ? <span>Owner: {ownerLinks ?? <span className="text-faint">not linked</span>}</span> : null}
+              {!isAm || canFinance ? <span>Owner: {ownerLinks ?? <span className="text-faint">not linked</span>}</span> : null}
               <span className="tabular-nums">
                 {isAm
                   ? `${property.yourUnits} of ${property.unitCount} units yours`
@@ -314,7 +317,7 @@ function PropertyBody({
             />
           </Card>
 
-          {!isAm ? (
+          {!isAm || canFinance ? (
             <Card>
               <CardHead
                 title="Owner"

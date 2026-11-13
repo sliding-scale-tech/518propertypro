@@ -1,8 +1,10 @@
 "use client";
 
 import { useClerk, useUser } from "@clerk/nextjs";
-import { LogOut } from "lucide-react";
+import { LayoutDashboard, LogOut } from "lucide-react";
+import Link from "next/link";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useMyRoles } from "@/components/require-view";
 
 function initialsOf(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -19,6 +21,9 @@ export default function TechLayout({ children }: { children: ReactNode }) {
   const { signOut } = useClerk();
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  // A technician who also holds another role (B31) can get back to the rest of the app.
+  const roles = useMyRoles();
+  const otherRoles = (roles ?? []).filter((r) => r !== "technician");
   const name =
     user?.fullName?.trim() ||
     [user?.firstName, user?.lastName].filter(Boolean).join(" ").trim() ||
@@ -68,6 +73,17 @@ export default function TechLayout({ children }: { children: ReactNode }) {
                 <p className="break-words text-sm font-medium">{name}</p>
                 <p className="text-xs text-muted-foreground">Technician</p>
               </div>
+              {otherRoles.length > 0 ? (
+                <Link
+                  href="/dashboard"
+                  role="menuitem"
+                  onClick={() => setOpen(false)}
+                  className="flex h-11 w-full items-center gap-2 rounded-[8px] px-3 text-sm font-medium hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
+                >
+                  <LayoutDashboard aria-hidden className="h-4 w-4" />
+                  Dashboard
+                </Link>
+              ) : null}
               <button
                 type="button"
                 role="menuitem"

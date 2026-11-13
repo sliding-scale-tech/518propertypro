@@ -3,7 +3,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { internalQuery, mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { writeAudit } from "./audit";
-import { currentOrg, requireAdminView, viewFor } from "./authz";
+import { currentOrg, hasAnyRole, hasRole, requireAdminView } from "./authz";
 import type { OrgContext } from "./authz";
 import { amScope, canSeeUnit } from "./amScope";
 import { requireE164, toE164 } from "./phone";
@@ -63,9 +63,9 @@ async function readable(
   if (!resident || resident.orgId !== org.orgId) return null;
   const unit = await ctx.db.get(resident.unitId);
   if (!unit) return null;
-  const view = viewFor(org.isAdmin, org.jobRoles);
-  if (view === "admin" || view === "accountant") return { resident, unit };
-  if (view === "asset_manager" && canSeeUnit(await amScope(ctx, org), unit._id)) return { resident, unit };
+  // Union of the roles held: admin / accountant read everyone, an AM their managed or covered units.
+  if (hasAnyRole(org, "admin", "accountant")) return { resident, unit };
+  if (hasRole(org, "asset_manager") && canSeeUnit(await amScope(ctx, org), unit._id)) return { resident, unit };
   return null;
 }
 
@@ -102,18 +102,14 @@ async function present(ctx: QueryCtx, rows: Array<{ resident: Doc<"residents">; 
  * manager only residents of units they manage or cover (read-only), taken from the session user
  * and never from a client-supplied id.
  */
-async function readableResidents(
-  ctx: QueryCtx,
-  org: OrgContext,
-  view: ReturnType<typeof viewFor>,
-): Promise<Doc<"residents">[] | null> {
-  if (view === "admin" || view === "accountant") {
+async function readableResidents(ctx: QueryCtx, org: OrgContext): Promise<Doc<"residents">[] | null> {
+  if (hasAnyRole(org, "admin", "accountant")) {
     return await ctx.db
       .query("residents")
       .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
       .collect();
   }
-  if (view === "asset_manager") {
+  if (hasRole(org, "asset_manager")) {
     const scope = await amScope(ctx, org);
     const residents: Doc<"residents">[] = [];
     for (const unitId of [...scope.managed, ...scope.covering]) {
@@ -139,9 +135,7 @@ export const list = query({
   handler: async (ctx, args) => {
     const org = await currentOrg(ctx);
     if (!org) return [];
-    const view = viewFor(org.isAdmin, org.jobRoles);
-
-    const residents = await readableResidents(ctx, org, view);
+    const residents = await readableResidents(ctx, org);
     if (!residents) return [];
 
     const units = new Map<string, Doc<"units">>();
@@ -192,8 +186,7 @@ export const listPage = query({
   },
   handler: async (ctx, args) => {
     const org = await currentOrg(ctx);
-    const view = org ? viewFor(org.isAdmin, org.jobRoles) : null;
-    const residents = org && view ? await readableResidents(ctx, org, view) : null;
+    const residents = org ? await readableResidents(ctx, org) : null;
     if (!org || !residents) {
       return { ...pageOf<ResidentPageRow>([], 1, args.pageSize), showPhones: false, showEmail: false };
     }

@@ -1,18 +1,19 @@
 import { ConvexError } from "convex/values";
 import type { QueryCtx, MutationCtx } from "./_generated/server";
-import { requireOrg, viewFor, type OrgContext } from "./authz";
-import { canUseFinanceView } from "./rosPolicy";
+import { hasAnyRole, requireOrg, type OrgContext } from "./authz";
 
 /**
  * Rental Owner Statement (ROS) access gate (spec section 2). The finance pages are for the admin
  * view (team admin flag, executive, maintenance_lead, simplr_admin) and the accountant view.
- * Asset managers, technicians and people with no role are refused.
+ * Asset managers, technicians and people with no role are refused. Multi-role (B31): anyone who
+ * HOLDS the accountant role passes, whatever else they hold (an asset manager + accountant can use
+ * finance); holding asset manager or technician never grants it.
  */
 
 export const FINANCE_DENIED = "You don't have access to owner statements.";
 
-export function canUseFinance(org: OrgContext): boolean {
-  return canUseFinanceView(viewFor(org.isAdmin, org.jobRoles));
+export function canUseFinance(org: Pick<OrgContext, "isAdmin" | "jobRoles">): boolean {
+  return hasAnyRole(org, "admin", "accountant");
 }
 
 /** First line of every finance query and mutation. */

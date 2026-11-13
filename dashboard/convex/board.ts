@@ -2,7 +2,7 @@ import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import { mutation, query } from "./_generated/server";
 import type { QueryCtx } from "./_generated/server";
-import { canManageMaintenance, currentOrg, requireOrg, viewFor } from "./authz";
+import { canManageMaintenance, currentOrg, hasRole, isAdminView, requireOrg } from "./authz";
 import type { OrgContext } from "./authz";
 import { amScope, canSeeUnit } from "./amScope";
 import type { AmScope } from "./amScope";
@@ -31,6 +31,7 @@ import {
   woFileIsDocument,
   expensesTabFor,
   readable as readableWorkOrder,
+  woReach,
 } from "./workOrders";
 import { writeAudit } from "./audit";
 import { addMonths, localDateKey, monthKeyOf, startOfLocalDay } from "./tourSchedule";
@@ -64,9 +65,13 @@ type Severity = Doc<"maintenanceRequests">["severity"];
 
 const SEVERITY_RANK: Record<Severity, number> = { emergency: 0, urgent: 1, routine: 2, informational: 3 };
 
+/**
+ * The board's scope: the admin view (team), or the asset manager's units for anyone HOLDING the
+ * asset manager role (B31: whatever else they hold); null for everyone else.
+ */
 export function boardViewOf(org: OrgContext): "admin" | "asset_manager" | null {
-  const view = viewFor(org.isAdmin, org.jobRoles);
-  return view === "admin" || view === "asset_manager" ? view : null;
+  if (isAdminView(org)) return "admin";
+  return hasRole(org, "asset_manager") ? "asset_manager" : null;
 }
 
 export function userName(u: Doc<"users"> | null | undefined): string {
@@ -385,7 +390,8 @@ export const lanes = query({
 
     // Accountant: read-only. Only the sign-off lane (completed work) and the closed table, the same
     // finished-work scope workOrders.readable allows. No requests, tenant names, exceptions or leads.
-    if (viewFor(org.isAdmin, org.jobRoles) === "accountant") {
+    // An asset manager + accountant gets the asset manager's board (legacy query, no client uses it).
+    if (hasRole(org, "accountant") && !boardViewOf(org)) {
       const L = makeLookups(ctx);
       const done = await ctx.db
         .query("workOrders")
@@ -1116,6 +1122,9 @@ export const detail = query({
     if (!workOrderId) return null;
     const found = await readableWorkOrder(ctx, org, workOrderId);
     if (!found) return null;
+    // The drawer is the admin / asset-manager view of a work order: only when one of those roles
+    // reaches it. A technician or accountant reach (multi-role, B31) uses workOrders.get instead.
+    if (!(await woReach(ctx, org, found.wo)).full) return null;
     const { wo, unit } = found;
     const scope = await scopeOf(ctx, org);
     const [property, files, time, expenses, notes, auditRaw, request] = await Promise.all([

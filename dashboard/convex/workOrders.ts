@@ -3,8 +3,9 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { writeAudit } from "./audit";
-import { canManageMaintenance, currentOrg, requireOrg, viewFor } from "./authz";
+import { canManageMaintenance, currentOrg, hasRole, isAdminView, requireOrg } from "./authz";
 import { amScope, canSeeUnit } from "./amScope";
+import type { AmScope } from "./amScope";
 import type { OrgContext } from "./authz";
 import { nextNumber } from "./counters";
 import { checkStorageUsable, markWorkOrderCreated } from "./maintenance";
@@ -199,8 +200,44 @@ async function assertTechnician(ctx: QueryCtx | MutationCtx, orgId: string, user
 }
 
 /**
+ * Which of the caller's roles reach this work order. Multi-role (B31): the caller may read it when
+ * ANY role held reaches it, and what they get is the union of what those roles grant.
+ *   full       - admin view, or an asset manager on a unit they manage or cover (covered units are
+ *                read-only: canManageWo stays admin-only).
+ *   accountant - holds accountant and the work is finished (completed / reviewed_closed).
+ *   technician - holds technician and it is their own job.
+ */
+export type WoReach = { full: boolean; accountant: boolean; technician: boolean };
+
+const NO_REACH: WoReach = { full: false, accountant: false, technician: false };
+
+export function anyReach(r: WoReach): boolean {
+  return r.full || r.accountant || r.technician;
+}
+
+/** Pure reach check, given the caller's AM scope (EMPTY for anyone without the AM role). */
+export function reachWith(org: OrgContext, scope: AmScope | null, wo: Doc<"workOrders">): WoReach {
+  if (wo.orgId !== org.orgId) return NO_REACH;
+  if (isAdminView(org)) return { full: true, accountant: false, technician: false };
+  return {
+    full: hasRole(org, "asset_manager") && scope !== null && canSeeUnit(scope, wo.unitId),
+    accountant: hasRole(org, "accountant") && (wo.status === "completed" || wo.status === "reviewed_closed"),
+    technician: hasRole(org, "technician") && wo.technicianUserId === org.user._id,
+  };
+}
+
+/** The AM scope a reach check needs: loaded only for someone holding the asset manager role. */
+async function reachScope(ctx: QueryCtx | MutationCtx, org: OrgContext): Promise<AmScope | null> {
+  return !isAdminView(org) && hasRole(org, "asset_manager") ? await amScope(ctx, org) : null;
+}
+
+export async function woReach(ctx: QueryCtx | MutationCtx, org: OrgContext, wo: Doc<"workOrders">): Promise<WoReach> {
+  return reachWith(org, await reachScope(ctx, org), wo);
+}
+
+/**
  * Read scope. Returns the work order plus its unit when `org` may see it, else null.
- * Accountants see only finished work; technicians only their own jobs.
+ * Accountants see only finished work; technicians only their own jobs; the union for several roles.
  */
 export async function readable(
   ctx: QueryCtx | MutationCtx,
@@ -211,14 +248,8 @@ export async function readable(
   if (!wo || wo.orgId !== org.orgId) return null;
   const unit = await ctx.db.get(wo.unitId);
   if (!unit) return null;
-  const view = viewFor(org.isAdmin, org.jobRoles);
-  if (view === "admin") return { wo, unit };
-  // Managed units, plus units covered while a colleague is out of office (read-only: canManageWo
-  // stays managed-only).
-  if (view === "asset_manager" && canSeeUnit(await amScope(ctx, org), unit._id)) return { wo, unit };
-  if (view === "technician" && wo.technicianUserId === org.user._id) return { wo, unit };
-  if (view === "accountant" && (wo.status === "completed" || wo.status === "reviewed_closed")) return { wo, unit };
-  return null;
+  if (!anyReach(await woReach(ctx, org, wo))) return null;
+  return { wo, unit };
 }
 
 /**
@@ -246,11 +277,14 @@ export function forTechnician(wo: Doc<"workOrders">): TechnicianWorkOrder {
 
 /**
  * Accountants read finished work for the books; when the tenant wanted a visit isn't part of that.
- * Technicians get the work order without its billing keys (forTechnician).
+ * Technicians get the work order without its billing keys (forTechnician). Several roles reaching
+ * the same work order get the union of their fields: the accountant's copy lacks only
+ * tenantPreferredTime, which the technician's copy has, so accountant + technician is the full row.
  */
-function visibleWo(wo: Doc<"workOrders">, view: ReturnType<typeof viewFor>): Doc<"workOrders"> {
-  if (view === "technician") return forTechnician(wo);
-  return view === "accountant" ? { ...wo, tenantPreferredTime: undefined } : wo;
+function visibleWo(wo: Doc<"workOrders">, reach: WoReach): Doc<"workOrders"> {
+  if (reach.full || (reach.accountant && reach.technician)) return wo;
+  if (reach.accountant) return { ...wo, tenantPreferredTime: undefined };
+  return forTechnician(wo) as Doc<"workOrders">;
 }
 
 /**
@@ -287,7 +321,7 @@ export async function workableJob(ctx: MutationCtx, id: Id<"workOrders">) {
   const org = await requireOrg(ctx);
   const found = await readable(ctx, org, id);
   if (!found) throw new ConvexError("Work order not found.");
-  const isTech = found.wo.technicianUserId === org.user._id && viewFor(org.isAdmin, org.jobRoles) === "technician";
+  const isTech = found.wo.technicianUserId === org.user._id && hasRole(org, "technician");
   const manager = canManageWo(org, found.wo, found.unit);
   if (!isTech && !manager) throw new ConvexError("You don't have access to that.");
   if (isTech && !manager && found.wo.status !== "in_progress") {
@@ -307,7 +341,7 @@ export async function workableJob(ctx: MutationCtx, id: Id<"workOrders">) {
  */
 export function canAttachWoMedia(org: OrgContext, wo: Doc<"workOrders">, opts?: { receipt?: boolean }): boolean {
   if (wo.orgId !== org.orgId) return false;
-  if (viewFor(org.isAdmin, org.jobRoles) !== "admin") return false;
+  if (!isAdminView(org)) return false;
   if (opts?.receipt) return ACTIVE.includes(wo.status) || wo.status === "completed";
   return true;
 }
@@ -317,7 +351,7 @@ export async function attachableJob(ctx: MutationCtx, id: Id<"workOrders">, opts
   const org = await requireOrg(ctx);
   const found = await readable(ctx, org, id);
   if (!found) throw new ConvexError("Work order not found.");
-  if (viewFor(org.isAdmin, org.jobRoles) === "admin") {
+  if (isAdminView(org)) {
     if (!canAttachWoMedia(org, found.wo, opts)) throw new ConvexError("This work order is closed.");
     return { org, ...found };
   }
@@ -349,9 +383,8 @@ export function canRemoveWoFile(
   isDocument: boolean,
 ): boolean {
   if (f.orgId !== org.orgId || wo.orgId !== org.orgId || f.workOrderId !== wo._id) return false;
-  const view = viewFor(org.isAdmin, org.jobRoles);
-  if (view === "admin") return !(isDocument && woClosed(wo));
-  if (view === "technician") {
+  if (isAdminView(org)) return !(isDocument && woClosed(wo));
+  if (hasRole(org, "technician")) {
     return (
       wo.technicianUserId === org.user._id &&
       wo.status === "in_progress" &&
@@ -401,7 +434,7 @@ export const removeOwnFile = mutation({
     const found = await readable(ctx, org, args.workOrderId);
     const f = await ctx.db.get(args.fileId);
     if (!found || !f || f.workOrderId !== found.wo._id || f.orgId !== org.orgId) throw new ConvexError("File not found.");
-    if (viewFor(org.isAdmin, org.jobRoles) !== "technician") throw new ConvexError("You don't have access to that.");
+    if (!hasRole(org, "technician")) throw new ConvexError("You don't have access to that.");
     if (!canRemoveWoFile(org, found.wo, f, false)) throw new ConvexError("You can only remove your own photos while the job is in progress.");
     await removeWoFileRow(ctx, org, found.wo, f, "technician");
     return { ok: true };
@@ -463,7 +496,7 @@ export const create = mutation({
         throw new ConvexError("This request already has a work order.");
       }
     } else {
-      const adminView = viewFor(org.isAdmin, org.jobRoles) === "admin";
+      const adminView = isAdminView(org);
       if (!adminView && !canManageMaintenance(org)) {
         if (org.jobRoles.includes("asset_manager")) {
           throw new ConvexError("Asset managers create a request for Pat to review instead.");
@@ -585,56 +618,67 @@ export const list = query({
   handler: async (ctx, args) => {
     const org = await currentOrg(ctx);
     if (!org) return [];
-    const view = viewFor(org.isAdmin, org.jobRoles);
     const statuses = args.status ? [args.status] : ALL_STATUSES;
+    const admin = isAdminView(org);
+    const am = !admin && hasRole(org, "asset_manager");
+    const accountant = !admin && hasRole(org, "accountant");
+    const tech = !admin && hasRole(org, "technician");
+    if (!admin && !am && !accountant && !tech) return [];
+    const scope = await reachScope(ctx, org);
 
-    let rows: Doc<"workOrders">[] = [];
-    if (view === "admin" || view === "accountant") {
+    // The union over the roles held (B31), one row per work order.
+    const byId = new Map<string, Doc<"workOrders">>();
+    const add = (found: Doc<"workOrders">[]) => {
+      for (const w of found) if (!byId.has(w._id)) byId.set(w._id, w);
+    };
+    if (admin || accountant) {
       // Accountants are limited to finished work regardless of the status asked for.
-      const allowed = view === "accountant" ? statuses.filter((s) => s === "completed" || s === "reviewed_closed") : statuses;
+      const allowed = admin ? statuses : statuses.filter((s) => s === "completed" || s === "reviewed_closed");
       for (const s of allowed) {
-        rows.push(
-          ...(await ctx.db
+        add(
+          await ctx.db
             .query("workOrders")
             .withIndex("by_org_and_status", (q) => q.eq("orgId", org.orgId).eq("status", s))
             .order("desc")
-            .take(LIST_CAP)),
+            .take(LIST_CAP),
         );
       }
-    } else if (view === "asset_manager") {
-      const scope = await amScope(ctx, org);
+    }
+    if (am && scope) {
       for (const unitId of [...scope.managed, ...scope.covering]) {
-        rows.push(
-          ...(await ctx.db
+        add(
+          await ctx.db
             .query("workOrders")
             .withIndex("by_unit", (q) => q.eq("unitId", unitId))
             .order("desc")
-            .take(100)),
+            .take(100),
         );
       }
-    } else if (view === "technician") {
+    }
+    if (tech) {
       // The id is the session's, never args.technicianUserId.
       for (const s of statuses) {
-        rows.push(
-          ...(await ctx.db
+        add(
+          await ctx.db
             .query("workOrders")
             .withIndex("by_technician_and_status", (q) =>
               q.eq("technicianUserId", org.user._id).eq("status", s),
             )
             .order("desc")
-            .take(LIST_CAP)),
+            .take(LIST_CAP),
         );
       }
-    } else {
-      return [];
     }
+    // A technician-only caller always gets their own jobs, whatever technicianUserId says.
+    const techOnly = tech && !am && !accountant;
 
-    rows = rows.filter((w) => {
+    let rows = [...byId.values()].filter((w) => {
       if (w.orgId !== org.orgId) return false;
+      if (!anyReach(reachWith(org, scope, w))) return false;
       if (!statuses.includes(w.status)) return false;
       if (args.propertyId && w.propertyId !== args.propertyId) return false;
       if (args.priority && w.priority !== args.priority) return false;
-      if (view !== "technician" && args.technicianUserId && w.technicianUserId !== args.technicianUserId) {
+      if (!techOnly && args.technicianUserId && w.technicianUserId !== args.technicianUserId) {
         return false;
       }
       return true;
@@ -671,9 +715,10 @@ export const list = query({
         }
         technicianName = users.get(w.technicianUserId);
       }
-      const request = w.requestId && view !== "technician" ? await ctx.db.get(w.requestId) : null;
+      const reach = reachWith(org, scope, w);
+      const request = w.requestId && (reach.full || reach.accountant) ? await ctx.db.get(w.requestId) : null;
       const actionRequired =
-        view === "technician" && ACTIVE.includes(w.status)
+        reach.technician && ACTIVE.includes(w.status)
           ? await actionRequiredFor(
               ctx,
               w,
@@ -685,7 +730,7 @@ export const list = query({
             )
           : null;
       out.push({
-        ...visibleWo(w, view),
+        ...visibleWo(w, reach),
         unitNumber: units.get(w.unitId),
         propertyName: properties.get(w.propertyId)?.name,
         // Street address for the technician's maps link; undefined when the property has none.
@@ -790,7 +835,8 @@ export const get = query({
     const found = await readable(ctx, org, args.workOrderId);
     if (!found) return null;
     const { wo, unit } = found;
-    const view = viewFor(org.isAdmin, org.jobRoles);
+    // What each role held grants on THIS work order (B31: the union).
+    const reach = await woReach(ctx, org, wo);
 
     const [property, fileRows, time, expenses, notes, technician, request] = await Promise.all([
       ctx.db.get(wo.propertyId),
@@ -799,11 +845,11 @@ export const get = query({
       ctx.db.query("workOrderExpenses").withIndex("by_work_order", (q) => q.eq("workOrderId", wo._id)).take(200),
       ctx.db.query("workOrderNotes").withIndex("by_work_order", (q) => q.eq("workOrderId", wo._id)).take(200),
       wo.technicianUserId ? ctx.db.get(wo.technicianUserId) : null,
-      wo.requestId && view !== "technician" && view !== "accountant" ? ctx.db.get(wo.requestId) : null,
+      wo.requestId && reach.full ? ctx.db.get(wo.requestId) : null,
     ]);
     // Technicians get the job, not the tenant file or the internal history.
     const audit =
-      view === "admin" || view === "asset_manager"
+      reach.full
         ? (
             await ctx.db
               .query("auditEvents")
@@ -814,7 +860,7 @@ export const get = query({
         : [];
 
     return {
-      workOrder: visibleWo(wo, view),
+      workOrder: visibleWo(wo, reach),
       unit: { _id: unit._id, unitNumber: unit.unitNumber, floor: unit.floor },
       property: property ? { _id: property._id, name: property.name, address: property.address } : null,
       technicianName: technician
@@ -841,10 +887,10 @@ export const get = query({
       time,
       expenses,
       notes,
-      actionRequired: view === "technician" ? await actionRequiredFor(ctx, wo, notes) : null,
-      expensesTab: view === "technician" ? null : await expensesTabFor(ctx, wo, fileRows, time, expenses, notes, org),
-      // Bill, cost and account are staff-only: technicians get null (and a stripped workOrder).
-      billing: view === "technician" ? null : await billingView(ctx, org, wo),
+      actionRequired: reach.technician ? await actionRequiredFor(ctx, wo, notes) : null,
+      expensesTab: reach.full || reach.accountant ? await expensesTabFor(ctx, wo, fileRows, time, expenses, notes, org) : null,
+      // Bill, cost and account are staff-only: a technician-only reach gets null (and a stripped workOrder).
+      billing: reach.full || reach.accountant ? await billingView(ctx, org, wo) : null,
       totals: {
         hours: time.reduce((sum, t) => sum + t.hours, 0),
         expenseCents: expenses.reduce((sum, e) => sum + e.amountCents, 0),
@@ -855,8 +901,7 @@ export const get = query({
         attach: canAttachWoMedia(org, wo),
         review: canManageMaintenance(org) && wo.status === "completed",
         work:
-          wo.technicianUserId === org.user._id &&
-          view === "technician" &&
+          reach.technician &&
           (wo.status === "assigned" || wo.status === "in_progress"),
       },
     };

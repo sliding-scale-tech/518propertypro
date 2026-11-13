@@ -3,7 +3,7 @@ import { internalMutation, internalQuery, mutation, query } from "./_generated/s
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { writeAudit } from "./audit";
-import { currentOrg, requireAdminView, viewFor } from "./authz";
+import { currentOrg, hasAnyRole, hasRole, requireAdminView } from "./authz";
 import { requireE164 } from "./phone";
 import { propertyAddressValidator } from "./placesApi";
 import { amScope } from "./amScope";
@@ -166,10 +166,12 @@ export const list = query({
   handler: async (ctx) => {
     const org = await currentOrg(ctx);
     if (!org) return [];
-    const view = viewFor(org.isAdmin, org.jobRoles);
-    if (view === "technician") return [];
-    // An asset manager sees only buildings holding a unit they manage or cover.
-    const scope = view === "asset_manager" ? await amScope(ctx, org) : null;
+    // Admin, asset manager and accountant only (a technician only sees jobs; no role, nothing).
+    if (!hasAnyRole(org, "admin", "asset_manager", "accountant")) return [];
+    // An asset manager sees only buildings holding a unit they manage or cover, unless they also
+    // hold the accountant role, which reads every building (permissions are the union).
+    const amUnits = hasRole(org, "asset_manager") ? await amScope(ctx, org) : null;
+    const scope = amUnits && !hasRole(org, "accountant") ? amUnits : null;
     const rows = await ctx.db
       .query("properties")
       .withIndex("by_org", (q) => q.eq("orgId", org.orgId))
@@ -188,8 +190,8 @@ export const list = query({
     const out = [];
     for (const p of rows) {
       const units = unitsByProperty.get(p._id) ?? [];
-      const yourUnits = scope
-        ? units.filter((u) => scope.managed.has(u._id) || scope.covering.has(u._id)).length
+      const yourUnits = amUnits
+        ? units.filter((u) => amUnits.managed.has(u._id) || amUnits.covering.has(u._id)).length
         : units.length;
       if (scope && yourUnits === 0) continue;
       out.push({

@@ -4,7 +4,8 @@ import { internalQuery } from "./_generated/server";
 import type { ActionCtx, QueryCtx, MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { JOB_ROLES } from "./jobRoles";
-import type { JobRole } from "./jobRoles";
+import type { AppRole, JobRole } from "./jobRoles";
+import { primaryView, rolesFor } from "./roleSet";
 
 /**
  * Every dashboard tab (Leads, Tenants, Knowledge, Property, Agent) is scoped by this one
@@ -78,6 +79,20 @@ export { JOB_ROLES };
 export type { JobRole };
 export type { AppRole } from "./jobRoles";
 
+// --- Role set (B31 multi-role members) --------------------------------------------------
+//
+// Permissions are the UNION of the roles a person holds: Admin (exclusive), or any mix of
+// asset_manager, technician and accountant. Every capability check asks the role set
+// (hasRole / hasAnyRole / isAdminView), never "the one view": viewFor below is only the UI's
+// default landing view. The pure rules live in roleSet.ts (shared with the client and tests).
+
+export { rolesFor, hasRole, hasAnyRole } from "./roleSet";
+
+/** The role set of an org context (or any { isAdmin, jobRoles }). */
+export function rolesOf(org: { isAdmin: boolean; jobRoles?: ReadonlyArray<string> | null }): ReadonlySet<AppRole> {
+  return rolesFor(org.isAdmin, org.jobRoles);
+}
+
 /**
  * THE one authorization rule: an Admin is anyone whose view is "admin" (team admin flag, or the
  * executive / maintenance_lead / simplr_admin job role). There is no "team admin" tier above that.
@@ -85,8 +100,8 @@ export type { AppRole } from "./jobRoles";
  * canManageMaintenance, hasJobRole, requireJobRole) reduces to this. An Admin by membership flag
  * with empty jobRoles still passes (viewFor checks isAdmin first).
  */
-export function isAdminView(org: { jobRoles?: JobRole[] | null; isAdmin: boolean }): boolean {
-  return viewFor(org.isAdmin, org.jobRoles ?? []) === "admin";
+export function isAdminView(org: { jobRoles?: ReadonlyArray<string> | null; isAdmin: boolean }): boolean {
+  return rolesFor(org.isAdmin, org.jobRoles).has("admin");
 }
 
 /**
@@ -115,22 +130,13 @@ export async function requireJobRole(
 export type AppView = "admin" | "asset_manager" | "technician" | "accountant" | "none";
 
 /**
- * Pure: the team admin flag and the three admin-flavoured job roles get the admin view; otherwise the
- * first of asset_manager, technician, accountant they hold; otherwise none.
+ * Pure: the person's DEFAULT view, for the UI only (home redirect, default screen). The team admin
+ * flag and the three admin-flavoured job roles give "admin"; otherwise the first of asset_manager,
+ * technician, accountant they hold; otherwise none. A multi-role person holds more than this one
+ * view, so no permission may be decided from it: use rolesOf / hasRole / hasAnyRole.
  */
-export function viewFor(isAdmin: boolean, jobRoles: JobRole[]): AppView {
-  if (
-    isAdmin ||
-    jobRoles.includes("simplr_admin") ||
-    jobRoles.includes("executive") ||
-    jobRoles.includes("maintenance_lead")
-  ) {
-    return "admin";
-  }
-  if (jobRoles.includes("asset_manager")) return "asset_manager";
-  if (jobRoles.includes("technician")) return "technician";
-  if (jobRoles.includes("accountant")) return "accountant";
-  return "none";
+export function viewFor(isAdmin: boolean, jobRoles: ReadonlyArray<string>): AppView {
+  return primaryView(rolesFor(isAdmin, jobRoles));
 }
 
 /** Server-side gate on the admin view, the query/mutation counterpart of requireOrgAdmin. */

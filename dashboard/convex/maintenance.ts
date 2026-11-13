@@ -3,7 +3,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { writeAudit } from "./audit";
-import { canManageMaintenance, currentOrg, requireAdminView, requireOrg, viewFor } from "./authz";
+import { canManageMaintenance, currentOrg, hasAnyRole, hasRole, isAdminView, requireAdminView, requireOrg } from "./authz";
 import type { OrgContext } from "./authz";
 import { amScope, canSeeUnit, EMPTY_AM_SCOPE } from "./amScope";
 import type { AmScope } from "./amScope";
@@ -108,7 +108,7 @@ export function isAssetManager(org: OrgContext): boolean {
 
 /** The viewer's unit scope: loaded only for an asset manager, empty for everyone else. */
 export async function scopeOf(ctx: QueryCtx, org: OrgContext): Promise<AmScope> {
-  return viewFor(org.isAdmin, org.jobRoles) === "asset_manager" ? await amScope(ctx, org) : EMPTY_AM_SCOPE;
+  return hasRole(org, "asset_manager") ? await amScope(ctx, org) : EMPTY_AM_SCOPE;
 }
 
 /**
@@ -117,7 +117,7 @@ export async function scopeOf(ctx: QueryCtx, org: OrgContext): Promise<AmScope> 
  */
 export function canRead(org: OrgContext, req: Doc<"maintenanceRequests">, scope: AmScope): boolean {
   if (req.orgId !== org.orgId) return false;
-  if (viewFor(org.isAdmin, org.jobRoles) === "admin") return true;
+  if (isAdminView(org)) return true;
   if (!isAssetManager(org)) return false;
   return req.assignedAssetManagerUserId === org.user._id || canSeeUnit(scope, req.unitId);
 }
@@ -138,7 +138,7 @@ export function canAct(org: OrgContext, req: Doc<"maintenanceRequests">, scope: 
  */
 export function canAttachMedia(org: OrgContext, req: Doc<"maintenanceRequests">, scope: AmScope): boolean {
   if (req.orgId !== org.orgId) return false;
-  if (viewFor(org.isAdmin, org.jobRoles) === "admin") return true;
+  if (isAdminView(org)) return true;
   return canAct(org, req, scope);
 }
 
@@ -156,7 +156,7 @@ export function canRemoveRequestMedia(
 ): boolean {
   if (m.orgId !== org.orgId || m.requestId !== req._id) return false;
   if (!canAttachMedia(org, req, scope)) return false;
-  if (viewFor(org.isAdmin, org.jobRoles) === "admin") return true;
+  if (isAdminView(org)) return true;
   return m.uploadedBy === "staff" && m.uploadedByUserId === org.user._id && canAct(org, req, scope);
 }
 
@@ -897,7 +897,7 @@ export const createManual = mutation({
     //    read-only, so this checks the unit's own AM and never amScope.covering.
     // WHERE IT GOES: an AM's request ALWAYS lands in Pat's review (forwarded_to_pat, "Waiting on
     // Pat"); it never reaches a technician or becomes a work order from here.
-    const adminView = viewFor(org.isAdmin, org.jobRoles) === "admin";
+    const adminView = isAdminView(org);
     const ownAm = isAssetManager(org) && unit.assetManagerUserId === org.user._id;
     if (!adminView && !ownAm) throw new ConvexError("You don't have access to that.");
 
@@ -987,15 +987,14 @@ export async function scopedByStatus(
   limit: number,
   scope?: AmScope,
 ): Promise<Doc<"maintenanceRequests">[]> {
-  const view = viewFor(org.isAdmin, org.jobRoles);
-  if (view === "admin") {
+  if (isAdminView(org)) {
     return await ctx.db
       .query("maintenanceRequests")
       .withIndex("by_org_and_status", (q) => q.eq("orgId", org.orgId).eq("status", status))
       .order("desc")
       .take(limit);
   }
-  if (view === "asset_manager") {
+  if (hasRole(org, "asset_manager")) {
     // Requests are assigned to their unit's AM, so the viewer's own queue plus the queues of
     // the out-of-office colleagues they cover, narrowed to the units amScope allows.
     const sc = scope ?? (await amScope(ctx, org));
@@ -1079,8 +1078,8 @@ export const list = query({
   handler: async (ctx, args) => {
     const org = await currentOrg(ctx);
     if (!org) return [];
-    const view = viewFor(org.isAdmin, org.jobRoles);
-    if (view !== "admin" && view !== "asset_manager") return [];
+    if (!hasAnyRole(org, "admin", "asset_manager")) return [];
+    const adminView = isAdminView(org);
 
     const scope = await scopeOf(ctx, org);
     let rows: Doc<"maintenanceRequests">[] = [];
@@ -1091,7 +1090,7 @@ export const list = query({
       if (args.severity && r.severity !== args.severity) return false;
       if (args.propertyId && r.propertyId !== args.propertyId) return false;
       if (args.unitId && r.unitId !== args.unitId) return false;
-      if (view === "admin" && args.assetManagerUserId && r.assignedAssetManagerUserId !== args.assetManagerUserId) {
+      if (adminView && args.assetManagerUserId && r.assignedAssetManagerUserId !== args.assetManagerUserId) {
         return false;
       }
       return true;
@@ -1333,8 +1332,7 @@ export const counts = query({
     const zero = { new: 0, waiting: 0, forwarded: 0, closed7d: 0, exceptions: 0, emergencies: 0, unread: 0 };
     const org = await currentOrg(ctx);
     if (!org) return zero;
-    const view = viewFor(org.isAdmin, org.jobRoles);
-    if (view !== "admin" && view !== "asset_manager") return zero;
+    if (!hasAnyRole(org, "admin", "asset_manager")) return zero;
 
     const cap = 500;
     const scope = await scopeOf(ctx, org);
@@ -1355,7 +1353,7 @@ export const counts = query({
       waiting: waiting.length,
       forwarded: forwarded.length,
       closed7d,
-      exceptions: view === "admin" ? open.filter((r) => r.inExceptionQueue).length : 0,
+      exceptions: isAdminView(org) ? open.filter((r) => r.inExceptionQueue).length : 0,
       emergencies: open.filter((r) => r.severity === "emergency").length,
       unread: open.filter((r) => r.firstViewedAt === undefined).length,
     };
@@ -2286,7 +2284,10 @@ export const publicAttach = mutation({
  * only completed work. Everyone else gets zeros.
  */
 export async function maintenanceOverview(ctx: QueryCtx, org: OrgContext) {
-  const view = viewFor(org.isAdmin, org.jobRoles);
+  const admin = isAdminView(org);
+  const am = hasRole(org, "asset_manager");
+  const tech = hasRole(org, "technician");
+  const accountant = hasRole(org, "accountant");
   const now = Date.now();
   const weekAgo = now - 7 * DAY_MS;
 
@@ -2301,17 +2302,23 @@ export async function maintenanceOverview(ctx: QueryCtx, org: OrgContext) {
     overdue: 0,
     recent: [] as Awaited<ReturnType<typeof enrich>>,
   };
+  if (!admin && !am && !tech && !accountant) return empty;
 
   // Requests
   const scope = await scopeOf(ctx, org);
   let open: Doc<"maintenanceRequests">[] = [];
-  if (view === "admin" || view === "asset_manager") {
+  if (admin || am) {
     for (const s of OPEN) open.push(...(await scopedByStatus(ctx, org, s, 500, scope)));
   }
   open = open.sort((a, b) => b.createdAt - a.createdAt);
 
-  // Work orders in scope
-  let wos: Doc<"workOrders">[] = [];
+  // Work orders in scope: the UNION over the roles held (B31), one row per work order. Rows a
+  // wider role grants are added first, so a technician's stripped copy (forTechnician) is used
+  // only for jobs no other role held reaches.
+  const woById = new Map<string, Doc<"workOrders">>();
+  const add = (rows: Doc<"workOrders">[]) => {
+    for (const w of rows) if (!woById.has(w._id)) woById.set(w._id, w);
+  };
   const woStatuses: Array<Doc<"workOrders">["status"]> = [
     "created",
     "assigned",
@@ -2319,50 +2326,51 @@ export async function maintenanceOverview(ctx: QueryCtx, org: OrgContext) {
     "completed",
     "reviewed_closed",
   ];
-  if (view === "admin") {
+  if (admin) {
     for (const s of woStatuses) {
-      wos.push(
-        ...(await ctx.db
+      add(
+        await ctx.db
           .query("workOrders")
           .withIndex("by_org_and_status", (q) => q.eq("orgId", org.orgId).eq("status", s))
           .order("desc")
-          .take(500)),
+          .take(500),
       );
     }
-  } else if (view === "asset_manager") {
+  }
+  if (am) {
     for (const unitId of [...scope.managed, ...scope.covering]) {
-      wos.push(
-        ...(await ctx.db
+      add(
+        await ctx.db
           .query("workOrders")
           .withIndex("by_unit", (q) => q.eq("unitId", unitId))
-          .take(100)),
+          .take(100),
       );
     }
-  } else if (view === "technician") {
+  }
+  if (accountant) {
+    for (const s of ["completed", "reviewed_closed"] as const) {
+      add(
+        await ctx.db
+          .query("workOrders")
+          .withIndex("by_org_and_status", (q) => q.eq("orgId", org.orgId).eq("status", s))
+          .order("desc")
+          .take(500),
+      );
+    }
+  }
+  if (tech) {
     for (const s of woStatuses) {
-      wos.push(
-        ...(
+      add(
+        (
           await ctx.db
             .query("workOrders")
             .withIndex("by_technician_and_status", (q) => q.eq("technicianUserId", org.user._id).eq("status", s))
             .take(200)
-        ).map(forTechnician), // never bill / cost / billed keys for a technician
-      );
-    }
-  } else if (view === "accountant") {
-    for (const s of ["completed", "reviewed_closed"] as const) {
-      wos.push(
-        ...(await ctx.db
-          .query("workOrders")
-          .withIndex("by_org_and_status", (q) => q.eq("orgId", org.orgId).eq("status", s))
-          .order("desc")
-          .take(500)),
+        ).map(forTechnician) as Doc<"workOrders">[], // never bill / cost / billed keys for a technician
       );
     }
   }
-  wos = wos.filter((w) => w.orgId === org.orgId);
-
-  if (view === "none") return empty;
+  const wos = [...woById.values()].filter((w) => w.orgId === org.orgId);
 
   const activeWo = (w: Doc<"workOrders">) => ["created", "assigned", "in_progress"].includes(w.status);
   return {
@@ -2373,7 +2381,7 @@ export async function maintenanceOverview(ctx: QueryCtx, org: OrgContext) {
       (w) => (w.status === "completed" || w.status === "reviewed_closed") && (w.completedAt ?? 0) >= weekAgo,
     ).length,
     awaitingReview: wos.filter((w) => w.status === "completed").length,
-    exceptions: view === "admin" ? open.filter((r) => r.inExceptionQueue).length : 0,
+    exceptions: admin ? open.filter((r) => r.inExceptionQueue).length : 0,
     stuckNew: open.filter((r) => r.status === "new" && r.createdAt < now - STUCK_NEW_MS).length,
     overdue: wos.filter((w) => activeWo(w) && w.dueDate !== undefined && w.dueDate < now).length,
     recent: await enrich(ctx, open.slice(0, 5)),

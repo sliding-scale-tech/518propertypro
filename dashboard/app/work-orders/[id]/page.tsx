@@ -156,7 +156,7 @@ function WorkOrderDetailInner() {
       </div>
     );
   }
-  return <View data={data} technicians={(team?.members ?? []).filter((m) => m.appRole === "technician")} />;
+  return <View data={data} technicians={(team?.members ?? []).filter((m) => m.appRoles.includes("technician"))} />;
 }
 
 function View({

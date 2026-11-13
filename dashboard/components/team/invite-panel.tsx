@@ -1,48 +1,77 @@
 "use client";
 
-import { useAction, useQuery } from "convex/react";
-import { Mail, UserPlus } from "lucide-react";
-import { useState } from "react";
+import { useAction } from "convex/react";
+import { Mail } from "lucide-react";
+import { useId, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import { errorMessage, useToast } from "@/components/toast";
-import { APP_ROLE_OPTIONS, E164 } from "@/components/team/member-details";
+import { APP_ROLE_OPTIONS, E164, RoleChips, appRolesLabel, roleSelectionError } from "@/components/team/member-details";
 import type { AppRole } from "@/convex/jobRoles";
-import { Btn, Card, CardHead, Field, Input, Select } from "@/components/ui";
+import { Btn, Field, Input, Modal, cx } from "@/components/ui";
 
 // Simple on purpose: the server is the authority, this only catches typos before a round trip.
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-export function InvitePanel() {
-  const access = useQuery(api.team.myAccess);
+type InviteErrors = { email?: string; phone?: string; roles?: string };
+
+/**
+ * "Invite member" dialog (admins only; the page only offers the button to them and team.invite
+ * checks again on the server). The form lives inside, so it starts empty every time it opens.
+ */
+export function InviteDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  if (!open) return null;
+  return <InviteForm onClose={onClose} />;
+}
+
+function InviteForm({ onClose }: { onClose: () => void }) {
   const invite = useAction(api.team.invite);
   const toast = useToast();
+  const formId = useId();
 
-  const [role, setRole] = useState<AppRole>("technician");
+  const [roles, setRoles] = useState<AppRole[]>(["technician"]);
   const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [busy, setBusy] = useState(false);
-
-  // Non-admins get no invite UI at all.
-  if (!access?.isAdmin) return null;
+  // Field errors from the last Send attempt (cleared as the field is fixed).
+  const [errors, setErrors] = useState<InviteErrors>({});
 
   const trimmedEmail = email.trim();
+  const trimmedName = name.trim();
   const trimmedPhone = phone.trim();
-  const emailBad = trimmedEmail !== "" && !EMAIL.test(trimmedEmail);
   const phoneBad = trimmedPhone !== "" && !E164.test(trimmedPhone);
-  const canSend = !busy && EMAIL.test(trimmedEmail) && !phoneBad;
+  const isTechnician = roles.includes("technician");
+  const adminOnly = roles.length === 1 && roles[0] === "admin";
+
+  const validate = (): InviteErrors => {
+    const next: InviteErrors = {};
+    if (trimmedEmail === "") next.email = "Enter the email address to send the invite to.";
+    else if (!EMAIL.test(trimmedEmail)) next.email = "That doesn't look like an email address.";
+    if (phoneBad) next.phone = "Use international format, like +15185550123.";
+    const roleProblem = roleSelectionError(roles);
+    if (roleProblem) next.roles = roleProblem;
+    return next;
+  };
 
   const send = async () => {
-    if (!canSend) return;
+    if (busy) return;
+    const found = validate();
+    setErrors(found);
+    const first = found.email ?? found.roles ?? found.phone;
+    if (first) {
+      toast(first, "error");
+      return;
+    }
     setBusy(true);
     try {
       await invite({
         email: trimmedEmail,
-        appRole: role,
+        appRoles: roles,
         phone: trimmedPhone || undefined,
+        fullName: trimmedName || undefined,
       });
       toast(`Invite sent to ${trimmedEmail}`);
-      setEmail("");
-      setPhone("");
+      onClose();
     } catch (err) {
       toast(errorMessage(err, "That didn't work."), "error");
     } finally {
@@ -50,11 +79,32 @@ export function InvitePanel() {
     }
   };
 
+  const blurbs = roles
+    .map((r) => APP_ROLE_OPTIONS.find((o) => o.value === r)?.blurb)
+    .filter(Boolean)
+    .join(". ");
+
   return (
-    <Card>
-      <CardHead title="Invite someone" icon={<UserPlus />} />
+    <Modal
+      title="Invite member"
+      eyebrow="Team"
+      onClose={onClose}
+      footer={
+        <>
+          <Btn onClick={onClose} disabled={busy}>
+            Cancel
+          </Btn>
+          <Btn type="submit" form={formId} variant="pri" disabled={busy}>
+            <Mail className="h-4 w-4" />
+            {busy ? "Sending…" : "Send invite"}
+          </Btn>
+        </>
+      }
+    >
       <form
-        className="grid items-end gap-3 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_auto]"
+        id={formId}
+        noValidate
+        className="space-y-4"
         onSubmit={(e) => {
           e.preventDefault();
           void send();
@@ -63,51 +113,73 @@ export function InvitePanel() {
         <Field label="Email">
           <Input
             value={email}
-            onChange={(event) => setEmail(event.target.value)}
+            onChange={(event) => {
+              setEmail(event.target.value);
+              if (errors.email) setErrors((x) => ({ ...x, email: undefined }));
+            }}
             placeholder="teammate@company.com"
             type="email"
+            autoFocus
             aria-label="Email"
-            aria-invalid={emailBad}
+            aria-invalid={!!errors.email}
+            className={cx(errors.email && "!border-danger-ink")}
+          />
+          {errors.email ? <p className="text-xs text-danger-ink">{errors.email}</p> : null}
+        </Field>
+
+        <Field label="Name (optional)">
+          <Input
+            value={name}
+            maxLength={80}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="Jordan Smith"
+            aria-label="Name"
           />
         </Field>
-        <Field label="Role">
-          <Select value={role} onChange={(e) => setRole(e.target.value as AppRole)} aria-label="Role">
-            {APP_ROLE_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </Select>
-        </Field>
-        <Field label={role === "admin" ? "Phone (optional)" : "Phone (recommended)"}>
+
+        <div className="flex flex-col gap-[5px]">
+          <span className="text-[12.5px] font-medium text-muted-foreground">Roles</span>
+          <RoleChips
+            value={roles}
+            onChange={(next) => {
+              setRoles(next);
+              if (errors.roles) setErrors((x) => ({ ...x, roles: roleSelectionError(next) ?? undefined }));
+            }}
+            disabled={busy}
+            label="Roles"
+            error={errors.roles}
+          />
+          <p className="text-xs text-muted-foreground">
+            Admin on its own, or any mix of Asset manager, Technician and Accountant.
+          </p>
+        </div>
+
+        <Field label={adminOnly ? "Phone (optional)" : "Phone (recommended)"}>
           <Input
             value={phone}
-            onChange={(event) => setPhone(event.target.value)}
+            onChange={(event) => {
+              setPhone(event.target.value);
+              if (errors.phone) setErrors((x) => ({ ...x, phone: undefined }));
+            }}
             placeholder="+15185550123"
             inputMode="tel"
             aria-label="Phone"
-            aria-invalid={phoneBad}
+            aria-invalid={phoneBad || !!errors.phone}
+            className={cx((phoneBad || errors.phone) && "!border-danger-ink")}
           />
+          {phoneBad ? <p className="text-xs text-danger-ink">Use international format, like +15185550123.</p> : null}
+          {isTechnician && trimmedPhone === "" ? (
+            <p className="text-xs text-warning-ink">
+              Without a phone number this technician won&apos;t get job alerts by SMS. You can still send the invite.
+            </p>
+          ) : null}
         </Field>
-        <Btn type="submit" variant="pri" disabled={!canSend}>
-          <Mail className="h-4 w-4" />
-          Send invite
-        </Btn>
-      </form>
-      {emailBad ? <p className="mt-2 text-xs text-warning-ink">That doesn&apos;t look like an email address.</p> : null}
-      {phoneBad ? (
-        <p className="mt-2 text-xs text-warning-ink">Use international format, like +15185550123.</p>
-      ) : null}
-      {role === "technician" && trimmedPhone === "" ? (
-        <p className="mt-2 text-xs text-warning-ink">
-          Without a phone number this technician won&apos;t get job alerts by SMS. You can still send the invite.
+
+        <p className="text-xs text-muted-foreground">
+          {blurbs ? `${blurbs}. ` : ""}They get an email with a link that expires in 7 days and works once.
         </p>
-      ) : null}
-      <p className="mt-3 text-xs text-muted-foreground">
-        {APP_ROLE_OPTIONS.find((o) => o.value === role)?.blurb}. They get an email with a link that expires in 7
-        days and works once.
-      </p>
-    </Card>
+      </form>
+    </Modal>
   );
 }
 
@@ -136,13 +208,14 @@ export function parseRoleFilter(raw: string | null): RoleFilter {
   return ROLE_FILTERS.some((f) => f.value === value) ? (value as RoleFilter) : "all";
 }
 
-export function matchesRoleFilter(filter: RoleFilter, m: { appRole: AppRole | null }): boolean {
+/** A member counts under EVERY role they hold (B31), so a multi-role person shows under each chip. */
+export function matchesRoleFilter(filter: RoleFilter, m: { appRoles: ReadonlyArray<AppRole> }): boolean {
   if (filter === "all") return true;
-  if (filter === "none") return m.appRole === null;
-  return m.appRole === filter;
+  if (filter === "none") return m.appRoles.length === 0;
+  return m.appRoles.includes(filter);
 }
 
-/** Pending-invite label: Admin / Asset manager / Technician / Accountant, from the invite's app role. */
-export function inviteTypeLabel(inv: { appRole: AppRole | null }): string {
-  return APP_ROLE_OPTIONS.find((o) => o.value === inv.appRole)?.label ?? "No role yet";
+/** Pending-invite label: every role on the invite, e.g. "Asset manager, Accountant". */
+export function inviteTypeLabel(inv: { appRoles: ReadonlyArray<AppRole> }): string {
+  return appRolesLabel(inv.appRoles);
 }

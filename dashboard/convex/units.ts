@@ -3,7 +3,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { internalQuery, mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { writeAudit } from "./audit";
-import { isAdminView, requireAdminView, requireOrg, requireOrgAdmin, viewFor } from "./authz";
+import { isAdminView, requireAdminView, requireOrg, requireOrgAdmin, hasAnyRole, hasRole } from "./authz";
 import type { OrgContext } from "./authz";
 import { amScope } from "./amScope";
 import { scheduleNotify } from "./notify";
@@ -142,12 +142,11 @@ async function assertNoDuplicate(
 // --- Reads ----------------------------------------------------------------
 
 /**
- * Units are visible to everyone on the team except a pure technician, who only needs the jobs
- * assigned to them. A member with no job role yet (not backfilled) is not locked out.
+ * Units are visible to an admin, an asset manager or an accountant (any mix of them). A pure
+ * technician, who only needs the jobs assigned to them, and a member with no role are refused.
  */
 function canViewUnits(org: OrgContext): boolean {
-  const view = viewFor(org.isAdmin, org.jobRoles);
-  return view !== "technician" && view !== "none";
+  return hasAnyRole(org, "admin", "asset_manager", "accountant");
 }
 
 async function withManagers(
@@ -175,13 +174,15 @@ async function withManagers(
 
 /**
  * An asset manager sees only the units they manage plus the ones they cover (amScope); every
- * other role keeps the team-wide list. Returns the units to show and the covered ids.
+ * other role keeps the team-wide list, and an asset manager who is also an accountant sees every
+ * unit (the covered ids still mark their read-only ones). Returns the units to show and the covered ids.
  */
 async function scopeForViewer(ctx: QueryCtx, org: OrgContext, units: Doc<"units">[]) {
-  if (viewFor(org.isAdmin, org.jobRoles) !== "asset_manager") {
+  if (!hasRole(org, "asset_manager")) {
     return { units, coveringIds: new Set<Id<"units">>() };
   }
   const scope = await amScope(ctx, org);
+  if (hasRole(org, "accountant")) return { units, coveringIds: scope.covering };
   return {
     units: units.filter((u) => scope.managed.has(u._id) || scope.covering.has(u._id)),
     coveringIds: scope.covering,

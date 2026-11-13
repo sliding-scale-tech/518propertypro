@@ -119,7 +119,7 @@ function Form({ initial }: { initial: Initial }) {
   const suggestion = useQuery(api.workOrders.suggestTechnician, { issueType });
   // Preselect the suggestion until Pat picks someone (or "Assign later") themselves.
   const technicianValue = techTouched ? technician : (suggestion?.userId ?? "");
-  const technicians = (team?.members ?? []).filter((m) => m.appRole === "technician");
+  const technicians = (team?.members ?? []).filter((m) => m.appRoles.includes("technician"));
   // The server enforces ownership; this only keeps the picker honest for asset managers.
   const unitOptions = (units ?? []).filter((u) => access?.view === "admin" || u.isMine);
   const lockedUnit = !!initial.requestId && !!initial.unitId;

@@ -4,7 +4,7 @@ import { useQuery } from "convex/react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense } from "react";
 import { api } from "@/convex/_generated/api";
-import { RequireView } from "@/components/require-view";
+import { RequireView, rolesOfAccess } from "@/components/require-view";
 import { CallbacksList } from "@/components/residents/callbacks-list";
 import { ResidentCalls } from "@/components/residents/resident-calls";
 import { ResidentsList } from "@/components/residents/residents-list";
@@ -17,7 +17,8 @@ function TenantsInner() {
   const params = useSearchParams();
   const access = useQuery(api.team.myAccess);
   // Resident-call detail: admin and (scoped) asset manager; the server returns nothing for other views.
-  const canSeeCalls = access?.view === "admin" || access?.view === "asset_manager";
+  const roles = rolesOfAccess(access);
+  const canSeeCalls = roles.includes("admin") || roles.includes("asset_manager");
   const requested = params.get("tab");
   const tab: Tab = canSeeCalls ? (requested === "residents" ? "residents" : requested === "callbacks" ? "callbacks" : "calls") : "residents";
 

@@ -2,7 +2,7 @@ import { v } from "convex/values";
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { clampSeverity } from "./severity";
 import { realValue, realPhone } from "./sanitize";
-import { currentOrg, requireAdminView, requireOrgAdmin, viewFor } from "./authz";
+import { currentOrg, hasAnyRole, hasRole, requireAdminView, requireOrgAdmin } from "./authz";
 import type { OrgContext } from "./authz";
 import type { QueryCtx } from "./_generated/server";
 import type { Doc } from "./_generated/dataModel";
@@ -28,7 +28,7 @@ const CLOSED_STATUS_KEYS = new Set<StatusKey>(["completed", "closed", "rejected"
  * and is never used for scoping. Everyone else sees the team's calls as before.
  */
 async function loadCallRows(ctx: QueryCtx, org: OrgContext) {
-  const isAm = viewFor(org.isAdmin, org.jobRoles) === "asset_manager";
+  const isAm = hasRole(org, "asset_manager");
   const scope = isAm ? await amScope(ctx, org) : null;
 
   const visibleByPhone = async (unitId: Doc<"units">["_id"] | undefined, callerNumber?: string) => {
@@ -170,8 +170,7 @@ export const issues = query({
     const org = await currentOrg(ctx);
     if (!org) return [];
     // Resident-call detail is not for technicians or accountants.
-    const view = viewFor(org.isAdmin, org.jobRoles);
-    if (view !== "admin" && view !== "asset_manager") return [];
+    if (!hasAnyRole(org, "admin", "asset_manager")) return [];
     const rows = await loadCallRows(ctx, org);
     return rows.sort((a, b) => b.severity - a.severity || b.createdAt - a.createdAt);
   },
@@ -198,9 +197,8 @@ export const issuesPage = query({
   },
   handler: async (ctx, args) => {
     const org = await currentOrg(ctx);
-    const view = org ? viewFor(org.isAdmin, org.jobRoles) : null;
-    // Resident-call detail is not for technicians or accountants.
-    if (!org || (view !== "admin" && view !== "asset_manager")) {
+    // Resident-call detail is not for technicians or accountants (unless they also hold admin / AM).
+    if (!org || !hasAnyRole(org, "admin", "asset_manager")) {
       return { ...pageOf<CallRow>([], 1, args.pageSize), types: [] as string[], overall: 0 };
     }
     const rows = await loadCallRows(ctx, org);
@@ -226,8 +224,7 @@ export const stats = query({
     const org = await currentOrg(ctx);
     const none = { openIssues: 0, highSeverityOpen: 0, resolvedIssues: 0 };
     if (!org) return none;
-    const view = viewFor(org.isAdmin, org.jobRoles);
-    if (view !== "admin" && view !== "asset_manager") return none;
+    if (!hasAnyRole(org, "admin", "asset_manager")) return none;
     const rows = await loadCallRows(ctx, org);
     const open = rows.filter((r) => r.status === "open");
     return {

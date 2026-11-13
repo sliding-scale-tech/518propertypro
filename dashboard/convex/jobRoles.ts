@@ -1,4 +1,6 @@
 import { ConvexError, v } from "convex/values";
+import { APP_ROLES, appRolesOf, checkRoles } from "./roleSet";
+import type { AppRole } from "./roleSet";
 
 /**
  * Job roles live in their own dependency-free module so schema.ts (which cannot import authz,
@@ -29,9 +31,8 @@ export const jobRoleValidator = v.union(
  * The four user types the UI shows. Each maps onto a membership role plus job roles, which the
  * backend keeps using; the mapping lives here (pure, no server imports) so the UI can share it.
  */
-export type AppRole = "admin" | "asset_manager" | "technician" | "accountant";
-
-export const APP_ROLES: ReadonlyArray<AppRole> = ["admin", "asset_manager", "technician", "accountant"];
+export type { AppRole } from "./roleSet";
+export { APP_ROLES } from "./roleSet";
 
 export const appRoleValidator = v.union(
   v.literal("admin"),
@@ -54,15 +55,22 @@ export function parseAppRole(value: string | null | undefined): AppRole {
   return trimmed as AppRole;
 }
 
-const ADMIN_JOB_ROLES: ReadonlyArray<string> = ["executive", "maintenance_lead", "simplr_admin"];
+/**
+ * Server-side check for a multi-role selection (B31). Same rules and wording as the client
+ * (roleSet.checkRoles): at least one role, only known roles, Admin not combined with another.
+ */
+export function parseAppRoles(values: unknown): AppRole[] {
+  const checked = checkRoles(values);
+  if (!checked.ok) throw new ConvexError(checked.error);
+  return checked.roles;
+}
 
-/** Reverse mapping, for display and filtering. null means no role has been assigned yet. */
+/**
+ * The person's PRIMARY role, for display and old single-role callers. null means no role has
+ * been assigned yet. Every role held: appRolesOf (roleSet.ts).
+ */
 export function appRoleOf(role: string, jobRoles: ReadonlyArray<string>): AppRole | null {
-  if (role === "admin" || jobRoles.some((r) => ADMIN_JOB_ROLES.includes(r))) return "admin";
-  if (jobRoles.includes("asset_manager")) return "asset_manager";
-  if (jobRoles.includes("technician")) return "technician";
-  if (jobRoles.includes("accountant")) return "accountant";
-  return null;
+  return appRolesOf(role, jobRoles)[0] ?? null;
 }
 
 /** Forward mapping: the membership role and job roles an app role is stored as. */
