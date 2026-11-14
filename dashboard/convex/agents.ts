@@ -452,7 +452,7 @@ export const current = query({
     const org = await currentOrg(ctx);
     if (!org) {
       const identity = await ctx.auth.getUserIdentity();
-      if (identity) return null; // signed in, just no team resolved yet
+      if (identity) return null; // signed in, user row not synced yet (no team = INVITE_REQUIRED above)
       return ctx.db.query("agents").first();
     }
     return ctx.db
@@ -1986,7 +1986,7 @@ export const mintToken = action({
 
 /**
  * Public entry point for the setup below. The Knowledge tab calls it when it finds no docs.
- * Normally a no-op — sign-up already schedules ensure (team.ensureTeamForUser) — so it only
+ * Normally a no-op — an admin's sign-in already schedules ensure (team.ensureTeamForUser) — so it only
  * matters for a team whose setup failed or that predates sign-up doing it.
  */
 export const ensureSeeded = action({

@@ -46,7 +46,7 @@ The steps to stand up production, in order. Do them top to bottom: each one assu
 ## 2. Clerk production instance
 
 1. In Clerk, create the **production** instance for this application and add the production domain (Clerk shows the DNS records to add).
-2. **Sign-up mode: Restricted.** Accounts are created by the seed (step 4). An open sign-up page would let anyone create an account. It would join the team with no role ("Waiting for access") and see nothing, but it should not exist at all.
+2. **Sign-up mode: Public (leave it open).** Clerk's Restricted/invite-only mode would block our own invitees, who sign themselves up after clicking the emailed link. Access is invite-only in Convex instead (`convex/inviteGate.ts`): a sign-up that did not redeem an invite to its own email, and was not seeded, gets no membership, no role and no team, and sees only "You need an invite from 518 Property Pro". Do **not** set `ALLOW_OPEN_SIGNUP` on prod.
 3. **Password settings**: keep password sign-in on. Note the minimum length; the change-password page reads it from Clerk.
 4. **JWT template for Convex**: create a template named exactly `convex`, audience/`aud` = `convex`. Add this claim, which the password gate reads:
    ```json
@@ -107,9 +107,34 @@ Shape: 2 admins, 3 asset managers (Gold, Silver, Make Up; the Make Up one is als
 Production data comes **from the live Google Sheet**, never copied from dev.
 
 1. Download the current sheet to `docs/rosters/518-unit-rosters-normalized.xlsx` (the importer's local mirror), so the import is the sheet as it is today.
-2. Importer: `scripts/roster/import_roster.py` (mapping in `convex/rosterMapping.ts`). It runs one tab at a time, with the team id from step 4 as `--org` and that team's asset manager's users id as `--asset-manager`: Gold → Nina, Silver → Nikki, Make Up → Delia. Do `dry-run`, then `apply`, then `verify` for each tab.
-3. Owners: `scripts/owners/import_owners.mjs` (`dry-run`, then `apply`). Owners come from the roster columns (`properties.ownerName` / `ownerEmails`), never from the Rental Owners PDF.
-4. **Blocker:** both importers deliberately refuse anything but the dev deployment in `.env.local` and never pass `--prod`. Running them on prod needs a guarded prod mode added on purpose (see the open question in the hand-off). Do not edit `.env.local` to trick them.
+2. Deploy the code to production first (`npx convex deploy`, or the normal release), so `importPreflight` and the `compact` dry run in `rosterImport` exist there. The importers' production mode is `--target prod`; without it they behave exactly as before and refuse anything but the dev deployment in `.env.local`. Never edit `.env.local` to point them at prod.
+3. Find the ids (read-only, writes nothing): `npx convex run --prod importPreflight:assetManagers '{}'` prints the team's id (`orgId`) and every asset manager's `userId` with first name and email (the seed in step 4 also printed them). Gold is Nina, Silver is Nikki, Make Up is Delia. The first `deployment` line must say `dependable-crab-872`.
+4. **Dry run first** (nothing is written; `--dry-run` also works with `apply`). From `dashboard/`:
+   ```sh
+   python3 -I scripts/roster/import_roster.py dry-run --target prod --confirm-prod dependable-crab-872 \
+     --category all --org <orgId> \
+     --asset-manager-gold <ninaUserId> --asset-manager-silver <nikkiUserId> --asset-manager-make-up <deliaUserId>
+   ```
+   What it does, in order: refuses unless `--confirm-prod` is exactly `dependable-crab-872`; reads the sheet and re-checks the pinned "available units" rule; runs a read-only check on prod (the deployment that answers is `dependable-crab-872`, the team exists, each asset manager exists, is on that team and has the asset_manager role; it prints each team's manager's first name, so check Gold -> Nina, Silver -> Nikki, Make Up -> Delia); then dry-runs each tab in one rolled-back transaction and prints counts per team (properties, units, residents, source rows created/updated/unchanged, rule-available units, rent "-" rows, lease end 2026-10-31 rows). It stops if the second pass would still change anything or if any cell would not read back as the sheet has it. Tenant names are never printed. On a fresh prod expect all "created", no "updated".
+   Expected from the current sheet: Gold 205 rows / 59 properties, Silver 275 / 56, Make Up 101 / 32; rent "-" rows 12 + 21 + 2 = 35; 7 Silver leases ending 2026-10-31; Gold 33, Silver 9, Make Up 9 rule-available units. M-045 (Make Up) is imported as the Office unit with rent "-", as in dev. The importer applies the same data rules as in dev; prod mode changes none of them.
+5. **Real import** (repeats the same checks and dry-run summary, then writes; safe to re-run, it creates nothing twice because every roster row is keyed by its Row ID):
+   ```sh
+   python3 -I scripts/roster/import_roster.py apply --target prod --confirm-prod dependable-crab-872 \
+     --category all --org <orgId> \
+     --asset-manager-gold <ninaUserId> --asset-manager-silver <nikkiUserId> --asset-manager-make-up <deliaUserId>
+   ```
+   One tab only: `--category gold --asset-manager <ninaUserId>` (the other tabs the same way). If a batch fails, earlier batches stay; fix and run the same command again.
+6. **Verify** (read-only; the sheet against what prod now holds; exit code 1 on any difference):
+   ```sh
+   python3 -I scripts/roster/import_roster.py verify --target prod --confirm-prod dependable-crab-872 \
+     --category all --org <orgId>
+   ```
+7. **Owners** (after the roster import; they come from the roster columns `properties.ownerName` / `ownerEmails`, never from the Rental Owners PDF). It checks prod the same way, refuses if the team has no properties yet, dry-runs (second pass must change nothing, nothing in the NOT IMPORTED list) and then writes:
+   ```sh
+   node scripts/owners/import_owners.mjs dry-run --target prod --confirm-prod dependable-crab-872 --org <orgId>
+   node scripts/owners/import_owners.mjs apply   --target prod --confirm-prod dependable-crab-872 --org <orgId>
+   ```
+8. Tests for the guards: `node --test scripts/probes/import_prod_mode.test.mjs` (a fake `npx` records every call; nothing touches a deployment).
 
 After the import:
 
@@ -169,7 +194,7 @@ Run each one and tick it off.
 | Owner call routing menu | `/sarah` call type "Owner call routing menu" + routing directory switch | Off. The seed writes the directory as a draft only |
 | Main office forwarding | Client's carrier | Not pointed at Sarah's number |
 | WhatsApp (WAHA) | `WAHA_*` env | Unset |
-| Clerk sign-up | Clerk prod instance | Restricted |
+| Clerk sign-up | Clerk prod instance | Public; access is invite-only in Convex. `ALLOW_OPEN_SIGNUP` unset |
 | ElevenLabs tests/simulations | ElevenLabs | None without explicit OK (credits) |
 
 Go-live, in order: Pat and Alex approve → set `OUTBOUND_ENABLED=true` on prod → send one emergency test to Pat only → switch the office forwarding.
@@ -180,4 +205,5 @@ Go-live, in order: Pat and Alex approve → set `OUTBOUND_ENABLED=true` on prod 
 
 - **Dev and `OUTBOUND_ENABLED`.** The switch is in the code for every deployment, so dev is blocked as well while the variable is unset. To make dev send exactly as before: `npx convex env set OUTBOUND_ENABLED true` (dev). Dev holds real owners and tenants, so think twice before you do.
 - **Password gate layers.** `proxy.ts` (session claim) → `components/password-gate.tsx` (Clerk metadata + `users.passwordGate`) → `convex/authz.ts` (every data function, via `currentUser` / `requireUserId` / `requireOrgId`). The flag is cleared only by `app/change-password/actions.ts` (server action, Clerk Backend API) and mirrored to Convex by the Clerk webhook.
+- **Invite-only layers.** `convex/team.ts` `ensureTeamForUser` (the Clerk webhook) never gives an uninvited account a membership or a team → `convex/authz.ts` refuses a signed-in account with no membership with `INVITE_REQUIRED` in every data function (`currentUser` / `currentOrg` / `requireUserId` / `requireOrgId`) → `components/team-gate.tsx` shows the full-page "You need an invite" message (via the exempt `team.accessGate`). Memberships come only from `redeemInvite` / `acceptPendingInvite` and `prodSeed.seedPerson`. `ALLOW_OPEN_SIGNUP=true` brings back open self-join for a demo deployment only.
 - **Re-flag someone** (forgot password, new temporary one): `node scripts/prod/seedPeople.mjs apply --target prod --input ... --out <new file> --reset-password their@email`.

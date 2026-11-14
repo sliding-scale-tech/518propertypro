@@ -167,13 +167,15 @@ test("a signed Clerk claim: true blocks a clean mirror, false lets a stale mirro
 });
 
 test("action helpers (requireUserId / requireOrgId / requireAdminViewId) refuse a flagged person", async () => {
-  const user = { _id: "u1", clerkId: "user_1", mustChangePassword: true };
-  const resolved = { orgId: "org1", role: "admin", jobRoles: ["executive"], userId: "u1", mustChangePassword: true };
+  // Both go through authz.orgForClerkId's shape (requireUserId too, since the invite gate needs the membership).
+  const resolved = { noTeam: false, orgId: "org1", role: "admin", jobRoles: ["executive"], userId: "u1", mustChangePassword: true };
   const actx = (row) => ({ auth: { getUserIdentity: async () => ({ subject: "user_1" }) }, runQuery: async () => row });
-  await assert.rejects(A.requireUserId(actx(user)), refused);
+  await assert.rejects(A.requireUserId(actx(resolved)), refused);
   await assert.rejects(A.requireOrgId(actx(resolved)), refused);
   await assert.rejects(A.requireAdminViewId(actx(resolved)), refused);
-  assert.equal(await A.requireUserId(actx({ ...user, mustChangePassword: false })), "u1");
+  // Flagged AND team-less: the password gate answers first.
+  await assert.rejects(A.requireUserId(actx({ noTeam: true, userId: "u1", mustChangePassword: true })), refused);
+  assert.equal(await A.requireUserId(actx({ ...resolved, mustChangePassword: false })), "u1");
   assert.equal((await A.requireOrgId(actx({ ...resolved, mustChangePassword: false }))).orgId, "org1");
 });
 

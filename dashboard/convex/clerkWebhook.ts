@@ -76,9 +76,9 @@ export async function handleClerkWebhook(
         // does not state it, so an ordinary profile update never clears or sets it.
         mustChangePassword: flagFromPublicMetadata(user.public_metadata),
       });
-      // Every account needs a team before the dashboard means anything. Single-tenant: joins the
-      // one shared team (or creates it on a fresh install). A no-op when they already have one,
-      // and skipped when a live invitation is waiting — the invite carries the role.
+      // Invite-only (inviteGate.ts): this never gives an uninvited sign-up a membership or a new
+      // team. It only schedules a missing team setup for an existing admin (or, with
+      // ALLOW_OPEN_SIGNUP=true on a demo deployment, runs the old open self-join).
       await ctx.runMutation(internal.team.ensureTeamForUser, { userId });
       break;
     }
@@ -90,8 +90,7 @@ export async function handleClerkWebhook(
         clerkId,
         lastSignInAt: session.last_active_at ?? session.created_at ?? Date.now(),
       });
-      // Safety net for accounts that predate this webhook, or whose user.created event was
-      // missed — without it they would sign in to a dashboard with no team behind it.
+      // Retries a seeded/existing admin's missing team setup on each sign-in. Gives nobody a team.
       await ctx.runMutation(internal.team.ensureTeamForUser, { userId: sessionUserId });
       break;
     }

@@ -14,11 +14,24 @@
 //
 // Output never contains a full email: the report masks them, and Convex errors are cut down to the
 // error line only.
+//
+// PRODUCTION mode (docs/PROD-RUNBOOK.md step 5) is a separate, deliberate path:
+//
+//   node scripts/owners/import_owners.mjs apply --target prod --confirm-prod dependable-crab-872 \
+//        --org <prod orgId> [--dry-run]
+//
+// It needs the production deployment name typed out, runs every Convex call with --prod, checks
+// read-only (importPreflight:check) that the deployment that answered is that one, that the team
+// exists and that the roster import has already put properties in it, then runs the owners import as
+// a rolled-back dry run (the second pass must find nothing to do), prints the report, and only then
+// writes. --dry-run stops after the report and writes nothing. Without --target nothing changes.
 
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+export const PROD_DEPLOYMENT = "dependable-crab-872";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DASHBOARD = join(HERE, "..", "..");
@@ -29,14 +42,42 @@ export function parseArgs(argv) {
     const a = argv[i];
     if (a === "--org") out.org = argv[++i];
     else if (a === "--deployment") out.deployment = argv[++i];
+    else if (a === "--target") out.target = argv[++i];
+    else if (a === "--confirm-prod") out.confirmProd = argv[++i];
+    else if (a === "--dry-run") out.dryRunFlag = true;
     else if (a === "--prod") throw new Error("--prod is not allowed: this script only runs against a dev deployment.");
     else throw new Error(`Unknown argument "${a}".`);
   }
   if (out.mode !== "dry-run" && out.mode !== "apply") throw new Error('The first argument must be "dry-run" or "apply".');
   if (!out.org) throw new Error("--org <orgId> is required.");
+  if (out.target !== undefined && out.target !== "dev" && out.target !== "prod") throw new Error('--target must be "dev" or "prod".');
+  if (out.target === "prod") {
+    const problem = prodProblem(out);
+    if (problem) throw new Error(problem);
+    return out;
+  }
+  if (out.confirmProd !== undefined) throw new Error("--confirm-prod only goes with --target prod.");
+  if (out.dryRunFlag) throw new Error("--dry-run is a production-mode flag; in dev use the dry-run command.");
   if (!out.deployment) throw new Error("--deployment <dev deployment name> is required.");
   if (!/^[a-z0-9-]+$/.test(out.deployment)) throw new Error("--deployment must be a deployment name like brilliant-badger-615.");
   return out;
+}
+
+/** Null when production mode is allowed for these arguments, else the reason it is refused. */
+export function prodProblem(args) {
+  if (args.confirmProd !== PROD_DEPLOYMENT) {
+    const shown = args.confirmProd ? `"${args.confirmProd}" does not match` : "missing";
+    return `--confirm-prod ${PROD_DEPLOYMENT} must be typed out to use --target prod (${shown}); refusing.`;
+  }
+  if (args.deployment !== undefined && args.deployment !== PROD_DEPLOYMENT) {
+    return `--deployment ${args.deployment} is not the production deployment; with --target prod leave it out; refusing.`;
+  }
+  return null;
+}
+
+/** The flags that pick the deployment for one convex call. */
+export function targetFlags(args) {
+  return args.target === "prod" ? ["--prod"] : ["--deployment", args.deployment];
 }
 
 /** The CONVEX_DEPLOYMENT value in an .env.local text, or null. */
@@ -136,6 +177,31 @@ export function printReport(report, mode, secondPass, log = console.log) {
   }
 }
 
+function convex(args, fn, payload) {
+  const cmd = ["convex", "run", ...targetFlags(args), "--typecheck", "disable", "--codegen", "disable", fn, JSON.stringify(payload)];
+  return spawnSync("npx", cmd, { cwd: DASHBOARD, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+}
+
+function die(message) {
+  console.error(message);
+  process.exit(1);
+}
+
+/** Read-only checks in production; dies with every reason, prints counts only. */
+function prodPreflight(args) {
+  const proc = convex(args, "importPreflight:check", { orgId: args.org });
+  if (proc.status !== 0) die(`Production check failed (is importPreflight deployed to production? run npx convex deploy): ${errorLine(proc.stderr ?? "")}`);
+  const info = jsonFromStdout(proc.stdout);
+  const problems = [];
+  if (info.deployment !== PROD_DEPLOYMENT) problems.push(`--prod reached deployment ${JSON.stringify(info.deployment)}, not "${PROD_DEPLOYMENT}"`);
+  if (!info.orgExists) problems.push("that --org does not exist in production");
+  else if (info.propertiesInOrg === 0) problems.push("the team has no properties yet: run the roster import first (owners come from it)");
+  if (problems.length > 0) die(`Production check refused:\n  - ${problems.join("\n  - ")}`);
+  console.log(
+    `Production check OK: deployment ${info.deployment}, team "${info.orgName}"; ${info.propertiesInOrg} properties ${JSON.stringify(info.propertiesByCategory)}, ${info.unitsInOrg} units`,
+  );
+}
+
 function main() {
   let args;
   try {
@@ -143,30 +209,37 @@ function main() {
   } catch (e) {
     console.error(e.message);
     console.error("Usage: node scripts/owners/import_owners.mjs dry-run|apply --org <orgId> --deployment <dev-name>");
+    console.error("       node scripts/owners/import_owners.mjs dry-run|apply --target prod --confirm-prod <prod name> --org <orgId> [--dry-run]");
     process.exit(2);
   }
-  const problem = deploymentProblem(args.deployment, readFileSync(join(DASHBOARD, ".env.local"), "utf8"));
-  if (problem) {
-    console.error(problem);
-    process.exit(2);
+  const prod = args.target === "prod";
+  if (!prod) {
+    const problem = deploymentProblem(args.deployment, readFileSync(join(DASHBOARD, ".env.local"), "utf8"));
+    if (problem) {
+      console.error(problem);
+      process.exit(2);
+    }
   }
   const dryRun = args.mode === "dry-run";
-  const payload = JSON.stringify({ orgId: args.org, dryRun });
-  const cmd = [
-    "convex",
-    "run",
-    "--deployment",
-    args.deployment,
-    "--typecheck",
-    "disable",
-    "--codegen",
-    "disable",
-    "ownersImport:importOwners",
-    payload,
-  ];
-  console.log(`${args.mode}: owners from the unit rosters -> ${args.deployment}`);
-  const proc = spawnSync("npx", cmd, { cwd: DASHBOARD, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-  if (dryRun) {
+  console.log(`${args.mode}${args.dryRunFlag ? " --dry-run" : ""}: owners from the unit rosters -> ${prod ? `PRODUCTION (${PROD_DEPLOYMENT})` : args.deployment}`);
+  if (prod) {
+    prodPreflight(args);
+    // Always see what a real run would do first (rolled back), and stop if it is not idempotent.
+    const first = convex(args, "ownersImport:importOwners", { orgId: args.org, dryRun: true });
+    const data = dryRunData(first.stderr ?? "");
+    if (!data || data.kind !== "dry_run") die(`Dry run failed, nothing was written: ${errorLine(first.stderr ?? "")}`);
+    printReport(data.report, "dry run (rolled back, nothing written)", data.secondPass);
+    const sp = data.secondPass;
+    if (sp.owners.created || sp.owners.updated || sp.links.created) die("Not idempotent: a second pass would still change data; refusing.");
+    if (data.report.invalid.length > 0) die("Fix the roster owners listed under NOT IMPORTED first; nothing was written.");
+    if (dryRun || args.dryRunFlag) {
+      console.log("\nDRY RUN: nothing was written to production.");
+      return;
+    }
+    console.log("\nWriting to production ...");
+  }
+  const proc = convex(args, "ownersImport:importOwners", { orgId: args.org, dryRun: dryRun && !prod });
+  if (!prod && dryRun) {
     const data = dryRunData(proc.stderr ?? "");
     if (!data || data.kind !== "dry_run") {
       console.error(`Dry run failed: ${errorLine(proc.stderr ?? "")}`);

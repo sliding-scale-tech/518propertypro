@@ -290,6 +290,10 @@ export const importProperties = internalMutation({
     dryRun: v.boolean(),
     // Dry run only: spoken address + unit pairs to resolve with Sarah's find_unit logic.
     probes: v.optional(v.array(v.object({ spokenAddress: v.string(), spokenUnit: v.string() }))),
+    // Dry run only: counts instead of lists (no available units, addresses or probe answers), so a
+    // whole 200-row tab fits in one error payload (Convex cuts error data at about 16 KB). The
+    // production mode of import_roster.py uses it; without it the dry run is exactly as before.
+    compact: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const orgId = ctx.db.normalizeId("organizations", args.orgId);
@@ -327,6 +331,18 @@ export const importProperties = internalMutation({
       const offered = await availableUnitsFor(ctx, args.orgId);
       const probes = [];
       for (const p of args.probes ?? []) probes.push({ ...p, ...(await findUnitFor(ctx, { orgId: args.orgId, ...p })) });
+      if (args.compact) {
+        const brief = (x: typeof summary) => ({ ...x, available: [], rentKeptUnits: [], unitsChanged: x.unitsChanged.slice(0, 20) });
+        throw new ConvexError({
+          kind: "dry_run",
+          compact: true,
+          summary: brief(summary),
+          secondPass: brief(secondPass),
+          lossless: { ...lossless, diffs: diffs.slice(0, 20) },
+          availableInSheet: summary.available.length,
+          offeredCount: offered.available.length,
+        });
+      }
       // Rolls the whole transaction back; the CLI prints this data.
       throw new ConvexError({ kind: "dry_run", summary, secondPass, lossless, offered: offered.available, probes, addresses });
     }

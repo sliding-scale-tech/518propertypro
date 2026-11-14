@@ -21,10 +21,11 @@ import {
   requireOrg,
   requireOrgAdmin,
   requireOrgId,
-  requireUser,
-  currentUser,
+  currentUserWithoutTeam,
+  resolveCaller,
   tenantOrgId,
 } from "./authz";
+import { openSignupAllowed } from "./inviteGate";
 import * as el from "./elevenLabsApi";
 import type { JobRole } from "./jobRoles";
 import type { AppRole } from "./jobRoles";
@@ -875,16 +876,21 @@ export async function mergeGrantIntoMembership(
 }
 
 /**
- * Single-tenant: puts a brand-new account into the one shared team as a member. Only on a fresh
- * install, when no team exists yet, does it create the team with this account as admin and
- * schedule its setup (agent, property, knowledge — agents.ensure).
- * Scheduled rather than awaited: it calls ElevenLabs and takes seconds, and the Clerk webhook
- * that calls this must answer quickly or Clerk retries it. Scheduling in this same mutation
- * means the team and its setup are committed together — never a team whose setup was dropped.
+ * Called from the Clerk webhook on every user.created / user.updated / session.created.
  *
- * Called from the Clerk user webhook. Deliberately does nothing when the person already has a
- * membership: someone who signed up *because* they were invited must land in the inviting team,
- * not in a fresh empty one of their own.
+ * Invite-only (inviteGate.ts): this NEVER gives a membership, a role or a new team to someone who
+ * does not already have one. A membership comes only from redeeming an invite addressed to the
+ * person's email (redeemInvite / acceptPendingInvite) or from the production seed
+ * (prodSeed.seedPerson, which also creates the team on a fresh deployment). An uninvited sign-up
+ * keeps just their users row and is refused everywhere with INVITE_REQUIRED.
+ *
+ * For an existing admin it still schedules the team's setup (agent, knowledge) if that is missing,
+ * which is how a freshly seeded production team gets its agent on the admin's first sign-in.
+ *
+ * Only with ALLOW_OPEN_SIGNUP=true (demo/scratch deployments, default off) does the old open
+ * self-join run: a new account joins the one shared team as a role-less member, or on an empty
+ * deployment creates the team as its admin and schedules its setup. Scheduled rather than awaited:
+ * agents.ensure calls ElevenLabs and takes seconds, and the Clerk webhook must answer quickly.
  */
 export const ensureTeamForUser = internalMutation({
   args: { userId: v.id("users") },
@@ -897,6 +903,9 @@ export const ensureTeamForUser = internalMutation({
       if (existing.role === "admin") await scheduleSetupIfMissing(ctx, existing.orgId, args.userId);
       return;
     }
+
+    // Invite-only: nobody joins or creates a team by signing up.
+    if (!openSignupAllowed()) return;
 
     const user = await ctx.db.get(args.userId);
     if (!user) return;
@@ -1594,7 +1603,9 @@ export const orgIdByName = internalQuery({
 export const myPendingInvite = query({
   args: {},
   handler: async (ctx) => {
-    const user = await currentUser(ctx);
+    // Exempt from the invite gate (its whole point is the person with no team yet), never from
+    // the password gate. Says only what was sent to this account's own address.
+    const user = await currentUserWithoutTeam(ctx);
     if (!user?.email) return null;
 
     const membership = await ctx.db
@@ -1620,7 +1631,10 @@ export const myPendingInvite = query({
 export const acceptPendingInvite = mutation({
   args: {},
   handler: async (ctx): Promise<{ orgName: string }> => {
-    const user = await requireUser(ctx);
+    // Exempt from the invite gate (this IS the invite path); the live invite to their own email is
+    // what lets them in, checked below.
+    const user = await currentUserWithoutTeam(ctx);
+    if (!user) throw new ConvexError("Your account is still being set up. Try again in a moment.");
     const email = user.email?.toLowerCase();
     if (!email) throw new ConvexError("Your account has no email address to match an invite to.");
 
@@ -1654,5 +1668,45 @@ export const acceptPendingInvite = mutation({
 
     const org = await ctx.db.get(invite.orgId);
     return { orgName: org?.name ?? "your team" };
+  },
+});
+
+/**
+ * Which full-page gate the app chrome shows (components/team-gate.tsx). Exempt from the invite gate
+ * like myPendingInvite, and still behind the password gate. Says nothing about the team beyond
+ * whether the caller is on it and, if not, the name of a team that invited their own address.
+ *   null            signed out
+ *   "setting_up"    signed in, user row not created by the Clerk webhook yet
+ *   "member"        on the team: render the app
+ *   "invited"       not on the team, a live invite to their email is waiting (offer to join)
+ *   "invite_required" not on the team and not invited: the "You need an invite" page
+ */
+export const accessGate = query({
+  args: {},
+  handler: async (
+    ctx,
+  ): Promise<
+    | null
+    | { state: "setting_up" | "member" | "invite_required" }
+    | { state: "invited"; orgName: string }
+  > => {
+    const caller = await resolveCaller(ctx);
+    if (!caller) return null;
+    if (!caller.user) return { state: "setting_up" };
+    if (caller.membership) return { state: "member" };
+    const email = caller.user.email?.toLowerCase();
+    if (email) {
+      const invite = (
+        await ctx.db
+          .query("invites")
+          .withIndex("by_email", (q) => q.eq("email", email))
+          .collect()
+      ).find((i) => !i.acceptedAt && !i.revokedAt && i.expiresAt > Date.now());
+      if (invite) {
+        const org = await ctx.db.get(invite.orgId);
+        return { state: "invited", orgName: org?.name ?? "the team" };
+      }
+    }
+    return { state: "invite_required" };
   },
 });

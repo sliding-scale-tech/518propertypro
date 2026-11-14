@@ -38,6 +38,8 @@ import type * as geminiApi from "../geminiApi.js";
 import type * as googleApi from "../googleApi.js";
 import type * as googleCalendar from "../googleCalendar.js";
 import type * as http from "../http.js";
+import type * as importPreflight from "../importPreflight.js";
+import type * as inviteGate from "../inviteGate.js";
 import type * as jobRoles from "../jobRoles.js";
 import type * as leadRoutingLib from "../leadRoutingLib.js";
 import type * as leadScoring from "../leadScoring.js";
@@ -180,6 +182,8 @@ declare const fullApi: ApiFromModules<{
   googleApi: typeof googleApi;
   googleCalendar: typeof googleCalendar;
   http: typeof http;
+  importPreflight: typeof importPreflight;
+  inviteGate: typeof inviteGate;
   jobRoles: typeof jobRoles;
   leadRoutingLib: typeof leadRoutingLib;
   leadScoring: typeof leadScoring;

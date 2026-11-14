@@ -239,6 +239,9 @@ export const setupPlan = internalQuery({
  *   npx convex run orgMigration:backfillSetup                       (dry run)
  *   npx convex run orgMigration:backfillSetup '{"dryRun":false}'    (apply)
  *
+ * Invite-only (inviteGate.ts): ensureTeamForUser gives a team-less account nothing unless the
+ * deployment sets ALLOW_OPEN_SIGNUP=true, so without it the "teams created" step is a no-op.
+ *
  * Safe to re-run: every step is the same idempotent path sign-up uses. ensureTeamForUser skips
  * anyone who already has a team, agents.ensure claims the team first so overlapping runs cannot
  * create two agents, and cloneDefaultsForOrg skips a team that already has knowledge.
