@@ -5,7 +5,7 @@ import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { appBaseUrl } from "./appUrl";
 import { toE164 } from "./phone";
-import { isSmsAllowed, sendSms } from "./twilioApi";
+import { isSmsAllowed, sendSms, SMS_PREFIX } from "./twilioApi";
 import { publishedConfig } from "./sarahConfigRead";
 import { writeAudit } from "./audit";
 
@@ -448,12 +448,12 @@ export const send = internalAction({
         if (phone) targets.push({ phone, wantsSms: true });
       }
 
-      // Tenant texts are the company's approved wording, so no staff-tool "Simplr:" prefix, and
+      // Tenant texts are the company's approved wording, so no staff-tool "518 Property Pro:" prefix, and
       // a link only when the caller gave one (the photo-upload page).
       const isTenant = args.template === "tenant_message";
       const text = bodyFor(args.template, args.data);
       if (isTenant && !text) return; // never send an empty tenant text
-      const body = isTenant ? text : `Simplr: ${text}`;
+      const body = isTenant ? text : `${SMS_PREFIX}${text}`;
       let link = "";
       try {
         if (!isTenant || args.data.path) link = ` ${appBaseUrl()}${safePath(args.data.path)}`;
@@ -475,18 +475,22 @@ export const send = internalAction({
         // One retry covers a transient Twilio failure; a second failure is recorded, not thrown.
         let lastError = "";
         let ok = false;
+        let delivered = false;
         for (let attempt = 0; attempt < 2 && !ok; attempt++) {
           try {
-            await sendSms(t.phone, `${body}${link}`, args.template);
+            // false = dropped without an error (the OUTBOUND_ENABLED master switch is off): logged as skipped.
+            delivered = await sendSms(t.phone, `${body}${link}`, args.template);
             ok = true;
           } catch (err) {
             lastError = err instanceof Error ? err.message : String(err);
           }
         }
         await log(
-          ok
-            ? { userId: t.userId, phone: t.phone, status: "sent" }
-            : { userId: t.userId, phone: t.phone, status: "failed", error: lastError },
+          ok && !delivered
+            ? { userId: t.userId, phone: t.phone, status: "skipped", error: "outbound sending is off (OUTBOUND_ENABLED)" }
+            : ok
+              ? { userId: t.userId, phone: t.phone, status: "sent" }
+              : { userId: t.userId, phone: t.phone, status: "failed", error: lastError },
         );
       }
     } catch (err) {

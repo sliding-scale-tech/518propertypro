@@ -1,2 +1,10 @@
 
 .env.local
+
+# Production seed (scripts/prod/seedPeople.mjs). The real people file and the temporary-password
+# output must never be committed. The script already refuses an output path inside the repo; these
+# patterns are a backstop for the input file and any copy made by hand.
+scripts/prod/people.json
+scripts/prod/*.local.json
+*temp-passwords*
+*.passwords.csv

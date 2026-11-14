@@ -583,6 +583,8 @@ export const createFromCall = internalMutation({
     // The number Sarah read back and the caller confirmed (log_maintenance_request confirmed_phone).
     // Validated again here; one that is not a real phone number is ignored, never stored.
     smsConfirmPhone: v.optional(v.string()),
+    // The caller's yes or no to being texted at that number. Stored only with a valid smsConfirmPhone.
+    smsConsent: v.optional(v.boolean()),
   },
   handler: async (ctx, args): Promise<CreatedFromCall> => {
     let propertyId = args.propertyId;
@@ -629,6 +631,8 @@ export const createFromCall = internalMutation({
       mediaRequested: args.mediaRequested,
       photosPending: args.photosPending,
       smsConfirmPhone,
+      // Consent belongs to the number it was given for: dropped when no valid number is stored.
+      smsConsent: smsConfirmPhone ? (args.smsConsent ?? false) : undefined,
     };
     const outOfScope = issueType === "tenant_responsibility";
 

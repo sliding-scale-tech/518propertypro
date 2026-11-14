@@ -8,6 +8,7 @@
  */
 import { ConvexError } from "convex/values";
 import { isSmsAllowed } from "./twilioApi";
+import { allowOutbound, outboundEnabled } from "./outbound";
 
 /** One number for the whole property; this app is deliberately single-tenant. */
 export const SESSION_NAME = "leaseline";
@@ -143,14 +144,16 @@ export function toJid(chatId: string): string {
  * Inbound capture is unaffected.
  */
 export function outboundAllowed(): boolean {
-  return isSmsAllowed(undefined);
+  // Also off while the go-live master switch (outbound.ts, OUTBOUND_ENABLED) is off.
+  return isSmsAllowed(undefined) && outboundEnabled();
 }
 
 export async function sendText(chatId: string, text: string): Promise<boolean> {
-  if (!outboundAllowed()) {
+  if (!isSmsAllowed(undefined)) {
     console.log("waha: outbound message dropped, texting is off except emergency alerts");
     return false;
   }
+  if (!allowOutbound("whatsapp", chatId)) return false;
   const res = await request("/api/sendText", {
     method: "POST",
     body: { session: SESSION_NAME, chatId: toJid(chatId), text },
@@ -170,6 +173,7 @@ export async function startTyping(chatId: string): Promise<void> {
 }
 
 export async function stopTyping(chatId: string): Promise<void> {
+  if (!outboundEnabled()) return;
   await request("/api/stopTyping", {
     method: "POST",
     body: { session: SESSION_NAME, chatId: toJid(chatId) },

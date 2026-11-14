@@ -1,7 +1,12 @@
 /**
  * Thin wrapper over Twilio's SMS REST API. Mirrors the style of elevenLabsApi.ts: fetch-based,
  * no SDK, runs on Convex's default runtime.
+ *
+ * Two gates, both required for a text to leave: the template allowlist below, then the go-live
+ * master switch (outbound.ts, Convex env var OUTBOUND_ENABLED) inside send(), the one function that
+ * calls Twilio's Messages API.
  */
+import { allowOutbound, outboundEnabled } from "./outbound";
 
 // --- Texting policy -------------------------------------------------------------------
 // For now the app texts people in only two cases: emergency alerts to admins, and (later)
@@ -17,8 +22,22 @@ export const SMS_ALLOWED_TEMPLATES: readonly string[] = [
   ...(SMS_TECHNICIAN_ENABLED ? TECHNICIAN_TEMPLATES : []),
 ];
 
+// TENANT CONSENT: when tenant texts are added (maintenance updates), a text may only go to
+// maintenanceRequests.smsConfirmPhone, and only when that request's smsConsent === true. Sarah
+// asks for it in STEP 3 of the maintenance flow (A2P 10DLC). Never text a tenant on caller ID alone.
 export function isSmsAllowed(template: string | undefined): boolean {
   return template !== undefined && SMS_ALLOWED_TEMPLATES.includes(template);
+}
+
+/** Prefix on every staff/technician text, matching the registered 518 Property Pro SMS campaign. */
+export const SMS_PREFIX = "518 Property Pro: ";
+
+/** Opt-out line the campaign requires on every outgoing text. */
+export const SMS_OPT_OUT = " Reply STOP to opt out.";
+
+/** Adds the opt-out line once, right before an SMS is sent; a body that already ends with it is left alone. */
+export function withOptOut(body: string): string {
+  return body.endsWith(SMS_OPT_OUT) ? body : `${body}${SMS_OPT_OUT}`;
 }
 
 /** True when the send may go ahead. Otherwise logs why (no numbers, no message text) and returns false. */
@@ -46,7 +65,9 @@ function coreCredentials() {
   return { sid, token };
 }
 
-async function send(to: string, from: string, body: string): Promise<void> {
+/** The only Twilio Messages call in the app. Returns false (nothing sent) while OUTBOUND_ENABLED is off. */
+async function send(to: string, from: string, body: string, what?: string): Promise<boolean> {
+  if (!allowOutbound(to.startsWith("whatsapp:") ? "whatsapp" : "sms", to, what)) return false;
   const { sid, token } = coreCredentials();
 
   const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
@@ -64,25 +85,29 @@ async function send(to: string, from: string, body: string): Promise<void> {
     const detail = await res.text();
     throw new Error(`Twilio ${res.status}: ${detail.slice(0, 500)}`);
   }
+  return true;
 }
 
 /**
  * Every call must name the allowlisted template it belongs to; anything else is dropped without
- * throwing, so callers keep working.
+ * throwing, so callers keep working. Resolves true only when Twilio accepted the text; false when the
+ * allowlist or the OUTBOUND_ENABLED switch dropped it.
  */
-export async function sendSms(to: string, body: string, template?: string): Promise<void> {
-  if (!allowed("sms", template)) return;
+export async function sendSms(to: string, body: string, template?: string): Promise<boolean> {
+  if (!allowed("sms", template)) return false;
+  // Master switch before the env check, so a deployment with sending off never throws over a missing number.
+  if (!outboundEnabled()) return allowOutbound("sms", to, template);
   const from = process.env.TWILIO_SMS_FROM_NUMBER;
   if (!from) {
     throw new Error(
       "Missing TWILIO_SMS_FROM_NUMBER. Set it with: npx convex env set TWILIO_SMS_FROM_NUMBER <value>",
     );
   }
-  await send(to, from, body);
+  return await send(to, from, withOptOut(body));
 }
 
-export async function sendWhatsApp(to: string, body: string, template?: string): Promise<void> {
-  if (!allowed("whatsapp", template)) return;
+export async function sendWhatsApp(to: string, body: string, template?: string): Promise<boolean> {
+  if (!allowed("whatsapp", template)) return false;
   const from = process.env.TWILIO_WHATSAPP_FROM_NUMBER ?? SANDBOX_WHATSAPP_FROM;
-  await send(`whatsapp:${to}`, `whatsapp:${from}`, body);
+  return await send(`whatsapp:${to}`, `whatsapp:${from}`, body, template);
 }

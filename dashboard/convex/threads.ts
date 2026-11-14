@@ -221,11 +221,12 @@ export const sendMessage = internalAction({
       console.log(`threads.sendMessage: ${args.sender} reply on ${thread.channel} not sent, texting is off`);
       return;
     }
-    if (thread.channel === "whatsapp") {
-      await twilio.sendWhatsApp(thread.customerPhone, args.text);
-    } else {
-      await twilio.sendSms(thread.customerPhone, args.text);
-    }
+    const sent =
+      thread.channel === "whatsapp"
+        ? await twilio.sendWhatsApp(thread.customerPhone, args.text)
+        : await twilio.sendSms(thread.customerPhone, args.text);
+    // false = dropped (allowlist or the OUTBOUND_ENABLED master switch): never recorded as sent.
+    if (!sent) return;
     await ctx.runMutation(internal.threads.recordOutbound, {
       threadId: args.threadId,
       sender: args.sender,

@@ -13,6 +13,7 @@ import type { ActionCtx, MutationCtx } from "./_generated/server";
 import { appBaseUrl } from "./appUrl";
 import { purgeOrgAudit, writeAudit } from "./audit";
 import {
+  assertPasswordSet,
   currentOrg,
   isAdminView,
   canManageMaintenance,
@@ -792,6 +793,8 @@ export const redeemInvite = internalMutation({
       .withIndex("by_clerk_id", (q) => q.eq("clerkId", args.clerkId))
       .unique();
     if (!user) throw new ConvexError("Your account is still being set up. Try again in a moment.");
+    // Joining a team is not on the short list a person on a temporary password may do (passwordGate.ts).
+    assertPasswordSet(user, await ctx.auth.getUserIdentity());
 
     if ((user.email ?? "").toLowerCase() !== invite.email) {
       throw new ConvexError(
@@ -838,10 +841,24 @@ async function applyInviteToMembership(
   membership: Doc<"memberships">,
   invite: Doc<"invites">,
 ) {
+  await mergeGrantIntoMembership(ctx, membership, invite, { actorUserId: membership.userId, note: `invite=${invite._id}` });
+}
+
+/**
+ * The merge an accepted invite applies, shared with the production seed (prodSeed.ts) so seeded
+ * people get their roles exactly the way an invitee does: job roles are merged, an admin is never
+ * demoted, and a phone already on the membership is kept. Audited as invite_accepted.
+ */
+export async function mergeGrantIntoMembership(
+  ctx: MutationCtx,
+  membership: Doc<"memberships">,
+  grant: { role: "admin" | "member"; jobRoles?: JobRole[]; phone?: string },
+  audit: { actorUserId: Id<"users">; note: string },
+): Promise<{ role: "admin" | "member"; jobRoles: JobRole[]; phone?: string }> {
   const before = membership.jobRoles ?? [];
-  const jobRoles = [...new Set([...before, ...(invite.jobRoles ?? [])])];
-  const role = membership.role === "admin" || invite.role === "admin" ? "admin" : "member";
-  const phone = membership.phone ?? invite.phone;
+  const jobRoles = [...new Set([...before, ...(grant.jobRoles ?? [])])];
+  const role = membership.role === "admin" || grant.role === "admin" ? "admin" : "member";
+  const phone = membership.phone ?? grant.phone;
 
   await ctx.db.patch(membership._id, { role, jobRoles, phone });
   await writeAudit(ctx, {
@@ -849,11 +866,12 @@ async function applyInviteToMembership(
     entity: "membership",
     entityId: membership._id,
     action: "invite_accepted",
-    actorUserId: membership.userId,
+    actorUserId: audit.actorUserId,
     from: `${membership.role}:${before.join(",")}`,
     to: `${role}:${jobRoles.join(",")}`,
-    note: `invite=${invite._id}`,
+    note: audit.note,
   });
+  return { role, jobRoles, phone };
 }
 
 /**

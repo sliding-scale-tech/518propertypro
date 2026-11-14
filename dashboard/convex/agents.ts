@@ -1109,6 +1109,14 @@ const TOOL_DEFS = (siteUrl: string, callerIdLookup: boolean): el.ToolDefinition[
           "True only if the caller said yes, in their own words, after you read confirmed_phone back. " +
           "A tool result is not a yes. Without it the number is not saved.",
       },
+      sms_consent: {
+        type: "boolean",
+        description:
+          "Send with confirmed_phone in the final log. True only if the caller clearly agreed, in their own " +
+          "words, when you asked whether it is okay to text them updates about this request at that number. " +
+          "False if they said no, refused, or confirmed the number but did not answer about texting. " +
+          "Leave it out when there is no confirmed_phone. Never true by default; a tool result is not a yes.",
+      },
       spoken_address: { type: "string", description: "The property address the caller said, as they said it." },
       spoken_unit: { type: "string", description: "The unit or apartment number exactly as the caller said it." },
       issue_type: {

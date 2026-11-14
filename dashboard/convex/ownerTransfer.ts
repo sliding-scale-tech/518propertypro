@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { CALL_SID_RE, ownerDialTwiml } from "./ownerRoutingLib";
+import { allowOutbound } from "./outbound";
 
 /**
  * The Twilio half of transfer_owner_call (ownerRoutingLib.TRANSFER_MECHANISM "twilio_dial").
@@ -45,6 +46,12 @@ export const dial = internalAction({
         console.error("[owner-transfer] could not save the callback row:", err);
       }
     };
+
+    // Go-live master switch (outbound.ts): while OUTBOUND_ENABLED is off no staff phone is rung.
+    // Same path as any failed transfer: Sarah keeps the caller and a callback row is written.
+    if (!allowOutbound("call", args.number, `owner transfer to ${args.label}`)) {
+      return fail("outbound calls are switched off on this deployment");
+    }
 
     const sid = process.env.TWILIO_ACCOUNT_SID;
     const token = process.env.TWILIO_AUTH_TOKEN;

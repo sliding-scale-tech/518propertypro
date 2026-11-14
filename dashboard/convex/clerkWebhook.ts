@@ -1,6 +1,7 @@
 import type { GenericActionCtx } from "convex/server";
 import { internal } from "./_generated/api";
 import type { DataModel } from "./_generated/dataModel";
+import { flagFromPublicMetadata } from "./passwordGate";
 
 type ClerkEmail = { id?: string; email_address?: string };
 type ClerkUserPayload = {
@@ -11,6 +12,7 @@ type ClerkUserPayload = {
   last_name?: string | null;
   image_url?: string | null;
   last_sign_in_at?: number | null;
+  public_metadata?: Record<string, unknown> | null;
 };
 type ClerkSessionPayload = {
   user_id?: string;
@@ -70,6 +72,9 @@ export async function handleClerkWebhook(
         lastName: user.last_name ?? undefined,
         imageUrl: user.image_url ?? undefined,
         lastSignInAt: user.last_sign_in_at ?? undefined,
+        // Mirrors the forced-password-change flag (passwordGate.ts). Left alone when Clerk's payload
+        // does not state it, so an ordinary profile update never clears or sets it.
+        mustChangePassword: flagFromPublicMetadata(user.public_metadata),
       });
       // Every account needs a team before the dashboard means anything. Single-tenant: joins the
       // one shared team (or creates it on a fresh install). A no-op when they already have one,

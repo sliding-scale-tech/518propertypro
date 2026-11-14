@@ -5,6 +5,7 @@
  */
 
 import { ConvexError } from "convex/values";
+import { allowOutbound } from "./outbound";
 
 const BASE = "https://api.resend.com";
 
@@ -28,12 +29,18 @@ const FROM_ADDRESS = "Simplr <no-reply@simplr.pro>";
  * know it. Supplying both makes the message multipart/alternative, which is what a normal mail
  * client sends. It is also what renders in watches, screen readers and text-only clients.
  */
+/**
+ * The only Resend call in the app. Resolves true when Resend accepted the email, false when the
+ * go-live master switch (outbound.ts, OUTBOUND_ENABLED) is off: then nothing is sent, the skip is
+ * logged with the address masked, and the caller carries on as if it had gone.
+ */
 export async function sendEmail(input: {
   to: string;
   subject: string;
   html: string;
   text?: string;
-}): Promise<void> {
+}): Promise<boolean> {
+  if (!allowOutbound("email", input.to, input.subject)) return false;
   const res = await fetch(`${BASE}/emails`, {
     method: "POST",
     headers: {
@@ -64,4 +71,5 @@ export async function sendEmail(input: {
     console.error(`[resend] send failed: status ${res.status}, error ${errorName}`);
     throw new ConvexError("We couldn't send that email. Check the address and try again.");
   }
+  return true;
 }

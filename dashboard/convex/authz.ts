@@ -6,6 +6,7 @@ import { internal } from "./_generated/api";
 import { JOB_ROLES } from "./jobRoles";
 import type { AppRole, JobRole } from "./jobRoles";
 import { primaryView, rolesFor } from "./roleSet";
+import { PASSWORD_CHANGE_REQUIRED, passwordChangeRequired } from "./passwordGate";
 
 /**
  * Every dashboard tab (Leads, Tenants, Knowledge, Property, Agent) is scoped by this one
@@ -19,10 +20,20 @@ import { primaryView, rolesFor } from "./roleSet";
 export async function currentUser(ctx: QueryCtx | MutationCtx): Promise<Doc<"users"> | null> {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) return null;
-  return ctx.db
+  const user = await ctx.db
     .query("users")
     .withIndex("by_clerk_id", (q) => q.eq("clerkId", identity.subject))
     .unique();
+  // Forced password change (passwordGate.ts). The one exception to "return null rather than throw":
+  // a person still on their temporary password gets nothing from any data function until they set a
+  // new one. Every org/role helper below goes through here, so this one line covers them all.
+  assertPasswordSet(user, identity);
+  return user;
+}
+
+/** Throws PASSWORD_CHANGE_REQUIRED while the person must still replace their temporary password. */
+export function assertPasswordSet(user: { mustChangePassword?: boolean | null } | null | undefined, identity: unknown): void {
+  if (passwordChangeRequired(user, identity)) throw new ConvexError(PASSWORD_CHANGE_REQUIRED);
 }
 
 /**
@@ -47,6 +58,7 @@ export async function requireUserId(ctx: ActionCtx): Promise<Id<"users">> {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) throw new ConvexError("Sign in to continue.");
   const user = await ctx.runQuery(internal.users.byClerkId, { clerkId: identity.subject });
+  assertPasswordSet(user, identity);
   if (!user) throw new ConvexError("Your account is still being set up. Try again in a moment.");
   return user._id;
 }
@@ -234,6 +246,7 @@ export async function requireOrgId(ctx: ActionCtx): Promise<{
   const resolved = await ctx.runQuery(internal.authz.orgForClerkId, {
     clerkId: identity.subject,
   });
+  assertPasswordSet(resolved, identity);
   if (!resolved) throw new ConvexError("No team found for this account. Try signing in again.");
 
   return {
@@ -266,6 +279,8 @@ export const orgForClerkId = internalQuery({
       role: membership.role,
       jobRoles: membership.jobRoles ?? [],
       userId: user._id,
+      // Checked by requireOrgId (passwordGate.ts) together with the caller's token.
+      mustChangePassword: user.mustChangePassword === true,
     };
   },
 });

@@ -21,6 +21,10 @@ export default defineSchema({
     lastName: v.optional(v.string()),
     imageUrl: v.optional(v.string()),
     lastSignInAt: v.optional(v.number()),
+    // Forced password change on first login (passwordGate.ts). Mirrors Clerk
+    // publicMetadata.mustChangePassword: set by the production seed (prodSeed.ts), kept in step by the
+    // Clerk webhook. true = every data function refuses this person until they set a new password.
+    mustChangePassword: v.optional(v.boolean()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -1043,6 +1047,10 @@ export default defineSchema({
     // confirmed_phone). Never filled from caller ID alone. Kept for the planned confirmation text;
     // nothing sends to it yet.
     smsConfirmPhone: v.optional(v.string()),
+    // The caller's answer to "is it okay if 518 Property Pro texts you updates about this request at that number?"
+    // (log_maintenance_request sms_consent). Set together with smsConfirmPhone; absent on older rows.
+    // A tenant text may only go out when this is true.
+    smsConsent: v.optional(v.boolean()),
     spokenAddress: v.optional(v.string()),
     spokenUnit: v.optional(v.string()),
     residentId: v.optional(v.id("residents")),

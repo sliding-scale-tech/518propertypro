@@ -17,6 +17,7 @@ import { isVagueIssue, realPhone, realValue, stripAudioTags } from "./sanitize";
 import { WAIT_FOR_CALLER, confirmedPhoneLines, leadLogLines, maintenanceLogLines, photoReplyLines } from "./sarahReplies";
 import { toE164 } from "./phone";
 import { handleClerkWebhook } from "./clerkWebhook";
+import { maskRecipient, outboundEnabled } from "./outbound";
 import { handleOAuthCallback as handleGoogleOAuthCallback } from "./googleCalendar";
 import type { FunctionReturnType } from "convex/server";
 import { bookTour, cancelTourNow, changeTourApartment, findTourTimes, rescheduleTour, type IgnoredTour } from "./tours";
@@ -1867,6 +1868,19 @@ http.route({
           "verify_owner did not verify them: take a message with take_staff_message.",
       });
     }
+    if (r.status === "available" && r.transferNumber && !outboundEnabled()) {
+      // Go-live master switch (outbound.ts): no staff phone is rung while OUTBOUND_ENABLED is off, so
+      // Sarah takes a message instead of promising a transfer that ownerTransfer.dial would refuse.
+      console.log(`[outbound] call to ${maskRecipient(r.transferNumber)} skipped (owner transfer to ${r.label ?? "staff"}): OUTBOUND_ENABLED is off on this deployment`);
+      return Response.json({
+        ...NO_TRANSFER,
+        available: false,
+        status: "not_connecting",
+        person: r.label,
+        say: "I can't put you through right now, but I can take a message and pass it on.",
+        message: takeMessage,
+      });
+    }
     if (r.status === "available" && r.transferNumber) {
       // On the conversation too, so the call list shows who the owner was put through to.
       await ctx.runMutation(internal.conversations.markEscalation, {
@@ -2563,6 +2577,10 @@ http.route({
     const confirmedYes = body.confirmed_phone_yes === true || body.confirmed_phone_yes === "true";
     const confirmedE164 = confirmedRaw ? toE164(confirmedRaw) : null;
     const smsConfirmPhone = confirmedE164 && confirmedYes ? confirmedE164 : undefined;
+    // Permission to text that number about this request (A2P 10DLC consent). Fails closed: true only
+    // when Sarah sent a literal true, and only alongside a confirmed number; with a confirmed number
+    // anything else is recorded as an explicit false. Without one nothing is recorded.
+    const smsConsent = smsConfirmPhone ? body.sms_consent === true || body.sms_consent === "true" : undefined;
     const severityReason = optString(body.severity_reason, 500);
     const severityScore =
       body.severity_score === undefined || body.severity_score === null || body.severity_score === ""
@@ -2623,6 +2641,7 @@ http.route({
           severityScore: severityScore ?? SEVERITY_LEVEL_SCORE[severity],
           severityReason,
           smsConfirmPhone,
+          smsConsent,
         });
         emergencyAlerted = saved.emergencyAlerted;
       }

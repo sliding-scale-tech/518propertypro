@@ -9,6 +9,8 @@ import { AppSidebar } from "@/components/app-sidebar";
 import { TeamGate } from "@/components/team-gate";
 import { isPublicPath } from "@/lib/public-routes";
 import { PageTransition } from "@/components/page-transition";
+import { PasswordGate } from "@/components/password-gate";
+import { CHANGE_PASSWORD_PATH } from "@/lib/password-gate";
 
 export function AppChrome({ children }: { children: ReactNode }) {
   const pathname = usePathname();
@@ -24,9 +26,17 @@ export function AppChrome({ children }: { children: ReactNode }) {
         <PendingAuth />
       </AuthLoading>
       <Authenticated>
-        <TeamGate>
-          <SignedInShell>{children}</SignedInShell>
-        </TeamGate>
+        {/* Forced password change first: nothing below (team, sidebar, any page) mounts, and so no
+            data query runs, until the person has replaced their temporary password. */}
+        {pathname === CHANGE_PASSWORD_PATH ? (
+          children
+        ) : (
+          <PasswordGate>
+            <TeamGate>
+              <SignedInShell>{children}</SignedInShell>
+            </TeamGate>
+          </PasswordGate>
+        )}
       </Authenticated>
       <Unauthenticated>
         <SignedOutRedirect />

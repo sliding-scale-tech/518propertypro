@@ -25,3 +25,16 @@ server_upload_check.txt
 # Sensitive business documents (tax ID, registration papers)
 EIN.pdf
 **/EIN.pdf
+**/pat-ein.pdf
+**/*-ein.pdf
+**/*_ein.pdf
+
+# Confidential client documents: keep local, never commit (repo is public)
+/GOLD Property AI info.pdf
+/ROS.pdf
+/Rental Owners - Sheet1.pdf
+/Software Answers.pdf
+/Unit Information Silver Team.pdf
+/Unit Make Up.pdf
+/docs/context/
+/docs/rosters/

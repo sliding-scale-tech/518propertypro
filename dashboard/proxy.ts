@@ -1,6 +1,12 @@
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import { PUBLIC_ROUTE_PATTERNS } from "@/lib/public-routes";
+import {
+  CHANGE_PASSWORD_PATH,
+  allowedWhileFlagged,
+  isApiPath,
+  mustChangePasswordFromClaims,
+} from "@/lib/password-gate";
 
 const isPublicRoute = createRouteMatcher(PUBLIC_ROUTE_PATTERNS);
 
@@ -12,7 +18,20 @@ const isPublicRoute = createRouteMatcher(PUBLIC_ROUTE_PATTERNS);
 const SIMPLR_PRO_HOSTS = new Set(["simplr.pro", "www.simplr.pro"]);
 
 export default clerkMiddleware(async (auth, req) => {
-  if (!isPublicRoute(req)) await auth.protect();
+  if (!isPublicRoute(req)) {
+    const { sessionClaims } = await auth.protect();
+    // Forced password change on first login (lib/password-gate.ts, convex/passwordGate.ts): someone
+    // still on their temporary password reaches only the change page. Reads the session token's
+    // metadata claim, so it needs the Clerk session token customisation in docs/PROD-RUNBOOK.md; the
+    // app chrome and every Convex function enforce the same rule without it.
+    const { pathname } = req.nextUrl;
+    if (mustChangePasswordFromClaims(sessionClaims) && !allowedWhileFlagged(pathname)) {
+      if (isApiPath(pathname)) {
+        return NextResponse.json({ error: "Set a new password before you continue." }, { status: 403 });
+      }
+      return NextResponse.redirect(new URL(CHANGE_PASSWORD_PATH, req.url));
+    }
+  }
 
   const host = req.headers.get("host")?.split(":")[0] ?? "";
   if (SIMPLR_PRO_HOSTS.has(host)) {

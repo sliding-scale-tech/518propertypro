@@ -1,0 +1,19 @@
+{
+  "orgName": "Example Property Co",
+  "people": [
+    { "firstName": "Avery", "lastName": "Example", "email": "admin.one@example.com", "phone": "+15185550101", "roles": ["admin"] },
+    { "firstName": "Blake", "lastName": "Example", "email": null, "phone": "+15185550102", "roles": ["admin"] },
+    { "firstName": "Casey", "email": "gold.team@example.com", "phone": "+15185550103", "roles": ["asset_manager"], "photoTeam": "gold" },
+    { "firstName": "Drew", "email": "silver.am@example.com", "phone": "+15185550104", "roles": ["asset_manager"], "photoTeam": "silver" },
+    { "firstName": "Emery", "email": "makeup.am@example.com", "phone": "+15185550105", "roles": ["asset_manager", "accountant"], "photoTeam": "make_up" },
+    { "firstName": "Frankie", "email": "tech.one@example.com", "phone": "+15185550106", "roles": ["technician"] },
+    { "firstName": "Gray", "email": null, "phone": "+15185550107", "roles": ["technician"] }
+  ],
+  "phoneMenu": [
+    { "key": 1, "label": "Avery Example", "phone": "+15185550101", "personEmail": "admin.one@example.com" },
+    { "key": 2, "label": "Blake Example", "phone": "+15185550102" },
+    { "key": 3, "label": "Drew", "phone": "+15185550104", "personEmail": "silver.am@example.com" },
+    { "key": 4, "label": "Casey", "phone": "+15185550103", "personEmail": "gold.team@example.com" },
+    { "key": 5, "label": "Emery (Accounting)", "phone": "+15185550105", "personEmail": "makeup.am@example.com" }
+  ]
+}

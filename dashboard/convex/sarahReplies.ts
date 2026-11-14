@@ -125,7 +125,8 @@ export function leadLogLines(i: LeadLogInput): { say?: string; message: string }
  * The confirmed-number part of a log_maintenance_request result (confirmed_phone). Only a number the
  * caller said yes to after Sarah read it back is saved; one that cannot be a phone number is refused
  * with a line telling her to ask again. Neither ever fails the request itself. Nothing is texted to
- * the number yet, so no line here mentions a text.
+ * the number yet, so no result line promises a text; the only mention is the read-back that also asks
+ * permission to text (sms_consent), which is spoken in one turn with "is that right?".
  */
 export type ConfirmedPhoneInput = {
   /** Sarah sent confirmed_phone. */
@@ -144,10 +145,12 @@ export type ConfirmedPhoneLines =
 
 export const CONFIRMED_PHONE_INVALID =
   "That number doesn't look complete; ask the tenant again. Ask for the full 10-digit number, read it back " +
-  "digit by digit, and call log_maintenance_request again with it once they say yes. The request itself is logged.";
+  "digit by digit, ask both questions again (is that right, and is it okay to text updates at that number), " +
+  "and call log_maintenance_request again with it once they say yes. The request itself is logged.";
 export const CONFIRMED_PHONE_UNCONFIRMED =
-  "Number not saved: the caller has not confirmed it. Read it back digit by digit, wait for their yes, then call " +
-  "log_maintenance_request again with it and confirmed_phone_yes true.";
+  "Number not saved: the caller has not confirmed it. Read it back digit by digit and ask in the same turn, " +
+  "\"is that right, and is it okay if 518 Property Pro texts you updates about this request at that number?\". Wait for their " +
+  "yes, then call log_maintenance_request again with it, confirmed_phone_yes true and sms_consent true or false.";
 export const CONFIRMED_PHONE_SAVED =
   "Number saved. Do not read it back again and do not say anything will be texted or sent to it.";
 export const CONFIRMED_PHONE_NOT_STORED =

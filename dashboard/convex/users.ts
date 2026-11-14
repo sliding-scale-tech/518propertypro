@@ -1,15 +1,30 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery, query } from "./_generated/server";
+import { currentUser } from "./authz";
+import { passwordChangeRequired } from "./passwordGate";
 
 export const current = query({
   args: {},
-  handler: async (ctx) => {
+  // Through authz.currentUser, so it refuses a person who must still change their password.
+  handler: async (ctx) => await currentUser(ctx),
+});
+
+/**
+ * The ONE function a person on a temporary password may call (passwordGate.ts): whether the signed-in
+ * caller must still set a new password. Says nothing else, about them or anyone. Used by the app
+ * chrome to send them to /change-password and by that page to know when the change has landed.
+ * null = not signed in.
+ */
+export const passwordGate = query({
+  args: {},
+  handler: async (ctx): Promise<{ mustChangePassword: boolean } | null> => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) return null;
-    return await ctx.db
+    const user = await ctx.db
       .query("users")
       .withIndex("by_clerk_id", (q) => q.eq("clerkId", identity.subject))
       .unique();
+    return { mustChangePassword: passwordChangeRequired(user, identity) };
   },
 });
 
@@ -35,6 +50,8 @@ export const upsertFromClerk = internalMutation({
     lastName: v.optional(v.string()),
     imageUrl: v.optional(v.string()),
     lastSignInAt: v.optional(v.number()),
+    // Clerk publicMetadata.mustChangePassword when the webhook payload states it (passwordGate.ts).
+    mustChangePassword: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db
@@ -49,6 +66,7 @@ export const upsertFromClerk = internalMutation({
       ...(args.lastName !== undefined ? { lastName: args.lastName } : {}),
       ...(args.imageUrl !== undefined ? { imageUrl: args.imageUrl } : {}),
       ...(args.lastSignInAt !== undefined ? { lastSignInAt: args.lastSignInAt } : {}),
+      ...(args.mustChangePassword !== undefined ? { mustChangePassword: args.mustChangePassword } : {}),
       updatedAt: now,
     };
 
@@ -64,6 +82,7 @@ export const upsertFromClerk = internalMutation({
       lastName: args.lastName,
       imageUrl: args.imageUrl,
       lastSignInAt: args.lastSignInAt,
+      ...(args.mustChangePassword !== undefined ? { mustChangePassword: args.mustChangePassword } : {}),
       createdAt: now,
       updatedAt: now,
     });
